@@ -5,7 +5,11 @@ Simple, clean CSV analytics with automatic column mapping and natural language c
 ## Features
 
 ✅ **Automatic Column Mapping** - Upload CSV and columns are mapped automatically  
-✅ **Instant KPIs** - View revenue, orders, units, and top products immediately  
+✅ **Business-Grade Dashboard** - Comprehensive KPIs with date filtering and visualizations  
+✅ **Date Range Filtering** - Quick presets (Last 7/30 days, This/Last Month) + custom ranges  
+✅ **Advanced Analytics** - WoW comparisons, movers & decliners, trend analysis  
+✅ **Interactive Charts** - Revenue trends, status breakdowns, regional analysis  
+✅ **Export Functionality** - Download CSV reports for all data tables  
 ✅ **INR Currency** - All amounts displayed in Indian Rupees (₹)  
 ✅ **Natural Language Chat** - Ask questions about your data  
 ✅ **Persistent Mappings** - Remembers your column choices for future uploads  
@@ -27,10 +31,11 @@ Simple, clean CSV analytics with automatic column mapping and natural language c
    - Select your file
    - Click "Store Data" to process
 
-4. **View KPIs:**
-   - See total revenue, orders, units sold
-   - View top 5 products by revenue
-   - Preview your data
+4. **View Business Dashboard:**
+   - Select date range (presets or custom)
+   - See comprehensive KPIs with WoW comparisons
+   - View interactive charts and trend analysis
+   - Export data tables as CSV
 
 5. **Chat about data:**
    - Go to "💬 Chat" tab
@@ -84,6 +89,8 @@ The app automatically recognizes these columns:
 - Python 3.8+
 - streamlit
 - pandas
+- plotly
+- numpy
 
 ## Architecture
 
