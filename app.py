@@ -1745,6 +1745,10 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
     
     # WoW comparison (if we have enough data and order_date column)
     if len(df) > 0 and 'order_date' in df.columns:
+        # Convert order_date to datetime if it's a string
+        if df['order_date'].dtype == 'object':
+            df['order_date'] = pd.to_datetime(df['order_date'])
+        
         current_week_start = df['order_date'].max() - timedelta(days=7)
         previous_week_start = current_week_start - timedelta(days=7)
         
@@ -1764,29 +1768,33 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
         kpis['wow_revenue_change'] = None
     
     # Top products by revenue using combined SKU/ASIN identifier
-    if 'Sku' in df.columns:
+    # Handle both uppercase and lowercase column names for database compatibility
+    sku_col = 'Sku' if 'Sku' in df.columns else 'sku' if 'sku' in df.columns else None
+    asin_col = 'Asin' if 'Asin' in df.columns else 'asin' if 'asin' in df.columns else None
+    
+    if sku_col:
         # Check if ASIN column exists, if not use legacy grouping
-        if 'Asin' in df.columns:
+        if asin_col:
             # Group by SKU and ASIN for accurate product identification
-            product_revenue = df.groupby(['Sku', 'Asin']).agg({
+            product_revenue = df.groupby([sku_col, asin_col]).agg({
                 'revenue_calc': 'sum',
                 'units_sold_calc': 'sum'
             }).reset_index()
             
             # Create combined SKU/ASIN display names in format: SKU (ASIN)
             product_revenue['display_name'] = product_revenue.apply(
-                lambda row: create_product_identifier(row['Sku'], row['Asin']),
+                lambda row: create_product_identifier(row[sku_col], row[asin_col]),
                 axis=1
             )
         else:
             # Legacy grouping by SKU only
-            product_revenue = df.groupby(['Sku']).agg({
+            product_revenue = df.groupby([sku_col]).agg({
                 'revenue_calc': 'sum',
                 'units_sold_calc': 'sum'
             }).reset_index()
             
             # Create display names using SKU only
-            product_revenue['display_name'] = product_revenue['Sku'].apply(
+            product_revenue['display_name'] = product_revenue[sku_col].apply(
                 lambda sku: str(sku) if pd.notna(sku) and str(sku).strip() != '' else "Unknown Product"
             )
         
