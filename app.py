@@ -1154,7 +1154,14 @@ def robust_ingest_csv(df: pd.DataFrame, mappings: Dict[str, Optional[str]], file
             print(f"❌ No transaction_type found!")
         
         clean_df["shipment_item_id"] = df[mappings["shipment_item_id"]].astype(str) if mappings.get("shipment_item_id") else None
-        clean_df["region"] = df[mappings["region"]].astype(str) if mappings.get("region") else None
+        
+        # Normalize region names to title case for consistent grouping
+        if mappings.get("region"):
+            clean_df["region"] = df[mappings["region"]].astype(str).str.strip().str.title()
+            print(f"✅ Region names normalized to title case")
+        else:
+            clean_df["region"] = None
+            
         clean_df["status"] = df[mappings["status"]].astype(str) if mappings.get("status") else None
         
         # Add metadata columns
@@ -1338,7 +1345,14 @@ def store_sales_data(df: pd.DataFrame, mappings: Dict[str, Optional[str]], filen
         
         clean_df["transaction_type"] = df[mappings["transaction_type"]].astype(str) if mappings.get("transaction_type") else None
         clean_df["shipment_item_id"] = df[mappings["shipment_item_id"]].astype(str) if mappings.get("shipment_item_id") else None
-        clean_df["region"] = df[mappings["region"]].astype(str) if mappings.get("region") else None
+        
+        # Normalize region names to title case for consistent grouping
+        if mappings.get("region"):
+            clean_df["region"] = df[mappings["region"]].astype(str).str.strip().str.title()
+            print(f"✅ Region names normalized to title case")
+        else:
+            clean_df["region"] = None
+            
         clean_df["status"] = df[mappings["status"]].astype(str) if mappings.get("status") else None
         
         # Add metadata columns
@@ -1814,9 +1828,16 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
     else:
         kpis['status_breakdown'] = None
     
-    # Revenue by region
+    # Revenue by region (with case normalization)
     if 'region' in df.columns:
-        region_revenue = df.groupby('region')['revenue_in_inr'].sum().sort_values(ascending=False).head(10)
+        # Normalize region names to title case for consistent grouping
+        df_normalized = df.copy()
+        df_normalized['region_normalized'] = df_normalized['region'].str.strip().str.title()
+        
+        # Use revenue_calc if revenue_in_inr is not available
+        revenue_col = 'revenue_in_inr' if 'revenue_in_inr' in df.columns else 'revenue_calc'
+        
+        region_revenue = df_normalized.groupby('region_normalized')[revenue_col].sum().sort_values(ascending=False).head(10)
         kpis['region_revenue'] = region_revenue
     else:
         kpis['region_revenue'] = None
@@ -2776,36 +2797,20 @@ def main():
                     else:
                         st.info("No product units data available")
                 
-                # Status and Region breakdowns
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if kpis['status_breakdown'] is not None:
-                        st.markdown("#### 📊 Order Status Breakdown")
-                        fig = px.pie(
-                            values=kpis['status_breakdown'].values,
-                            names=kpis['status_breakdown'].index,
-                            title="Order Status Distribution"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.markdown("#### 📊 Order Status Breakdown")
-                        st.info("No status data available")
-                
-                with col2:
-                    if kpis['region_revenue'] is not None:
-                        st.markdown("#### 🌍 Revenue by Region")
-                        fig = px.bar(
-                            x=kpis['region_revenue'].values,
-                            y=kpis['region_revenue'].index,
-                            orientation='h',
-                            title="Revenue by Region (Top 10)",
-                            labels={'x': 'Revenue (₹)', 'y': 'Region'}
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.markdown("#### 🌍 Revenue by Region")
-                        st.info("No region data available")
+                # Revenue by Region (full width)
+                if kpis['region_revenue'] is not None:
+                    st.markdown("#### 🌍 Revenue by Region")
+                    fig = px.bar(
+                        x=kpis['region_revenue'].values,
+                        y=kpis['region_revenue'].index,
+                        orientation='h',
+                        title="Revenue by Region (Top 10)",
+                        labels={'x': 'Revenue (₹)', 'y': 'Region'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.markdown("#### 🌍 Revenue by Region")
+                    st.info("No region data available")
                 
                 # Movers & Decliners
                 st.markdown("---")
