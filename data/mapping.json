@@ -87,6 +87,7 @@
       "product_name": "Item Description",
       "quantity": "Quantity",
       "revenue_amount": "Invoice Amount",
+      "transaction_type": "Transaction Type",
       "region": "Ship To City",
       "status": null
     }
