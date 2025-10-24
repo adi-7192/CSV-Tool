@@ -1073,11 +1073,11 @@ def robust_ingest_csv(df: pd.DataFrame, mappings: Dict[str, Optional[str]], file
         else:
             print(f"⚠️  No transaction_type found in DataFrame or mappings")
         
-        # Create clean DataFrame with normalized keys
-        clean_df = pd.DataFrame()
+        # Create clean DataFrame with all original columns plus normalized keys
+        clean_df = df.copy()
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Map each field
+        # Map each field to lowercase versions
         if mappings.get("order_date"):
             try:
                 clean_df["order_date"] = pd.to_datetime(df[mappings["order_date"]], errors='coerce').dt.strftime('%Y-%m-%d')
@@ -1087,9 +1087,41 @@ def robust_ingest_csv(df: pd.DataFrame, mappings: Dict[str, Optional[str]], file
             clean_df["order_date"] = None
         
         clean_df["order_id"] = df[mappings["order_id"]].astype(str) if mappings.get("order_id") else None
-        clean_df["sku"] = df[mappings["sku"]].astype(str) if mappings.get("sku") else None
-        clean_df["asin"] = df[mappings["asin"]].astype(str) if mappings.get("asin") else None
-        clean_df["product_name"] = df[mappings["product_name"]].astype(str) if mappings.get("product_name") else None
+        
+        # Handle product identifiers with placeholder for missing values
+        # Apply placeholders to original columns first
+        if mappings.get("sku"):
+            # Apply placeholder to original Sku column
+            clean_df[mappings["sku"]] = clean_df[mappings["sku"]].fillna('UNKNOWN_SKU')
+            clean_df[mappings["sku"]] = clean_df[mappings["sku"]].astype(str)
+            clean_df[mappings["sku"]] = clean_df[mappings["sku"]].replace(['nan', 'NaN', ''], 'UNKNOWN_SKU')
+            
+            # Create lowercase version
+            clean_df["sku"] = clean_df[mappings["sku"]]
+        else:
+            clean_df["sku"] = 'UNKNOWN_SKU'
+            
+        if mappings.get("asin"):
+            # Apply placeholder to original Asin column
+            clean_df[mappings["asin"]] = clean_df[mappings["asin"]].fillna('UNKNOWN_ASIN')
+            clean_df[mappings["asin"]] = clean_df[mappings["asin"]].astype(str)
+            clean_df[mappings["asin"]] = clean_df[mappings["asin"]].replace(['nan', 'NaN', ''], 'UNKNOWN_ASIN')
+            
+            # Create lowercase version
+            clean_df["asin"] = clean_df[mappings["asin"]]
+        else:
+            clean_df["asin"] = 'UNKNOWN_ASIN'
+            
+        if mappings.get("product_name"):
+            # Apply placeholder to original Item Description column
+            clean_df[mappings["product_name"]] = clean_df[mappings["product_name"]].fillna('UNKNOWN_PRODUCT')
+            clean_df[mappings["product_name"]] = clean_df[mappings["product_name"]].astype(str)
+            clean_df[mappings["product_name"]] = clean_df[mappings["product_name"]].replace(['nan', 'NaN', '', 'None'], 'UNKNOWN_PRODUCT')
+            
+            # Create lowercase version
+            clean_df["product_name"] = clean_df[mappings["product_name"]]
+        else:
+            clean_df["product_name"] = 'UNKNOWN_PRODUCT'
         
         if mappings.get("quantity"):
             # Handle missing quantities with flag

@@ -84,6 +84,7 @@
       "order_date": "Invoice Date",
       "order_id": "Invoice Number",
       "sku": "Sku",
+      "asin": "Asin",
       "product_name": "Item Description",
       "quantity": "Quantity",
       "revenue_amount": "Invoice Amount",
