@@ -6,7 +6,6 @@ Upload CSV → Auto-map columns → View KPIs → Chat about data
 
 import streamlit as st
 import pandas as pd
-import sqlite3
 import os
 import re
 import hashlib
@@ -285,21 +284,79 @@ def clean_dataframe(df: pd.DataFrame, mappings: Dict[str, Optional[str]]) -> Tup
     
     return cleaned_df, report
 
+def cleanup_old_files(folder_path: str, keep_days: int = 7) -> int:
+    """Remove timestamped files older than specified days, keeping only the latest version of each base file"""
+    if not os.path.exists(folder_path):
+        return 0
+    
+    files_removed = 0
+    cutoff_time = datetime.now() - timedelta(days=keep_days)
+    
+    # Group files by base name to keep only the latest version
+    file_groups = {}
+    
+    for filename in os.listdir(folder_path):
+        if not filename.endswith('.csv'):
+            continue
+            
+        file_path = os.path.join(folder_path, filename)
+        if not os.path.isfile(file_path):
+            continue
+            
+        # Extract base name (remove _raw_YYYYMMDD_HHMMSS or _cleaned_YYYYMMDD_HHMMSS)
+        base_name = re.sub(r'_(raw|cleaned)_\d{8}_\d{6}\.csv$', '', filename)
+        
+        if base_name not in file_groups:
+            file_groups[base_name] = []
+        
+        file_groups[base_name].append({
+            'filename': filename,
+            'path': file_path,
+            'mtime': os.path.getmtime(file_path)
+        })
+    
+    # For each group, keep only the latest file and remove others
+    for base_name, files in file_groups.items():
+        if len(files) <= 1:
+            continue  # Only one file, keep it
+            
+        # Sort by modification time (newest first)
+        files.sort(key=lambda x: x['mtime'], reverse=True)
+        
+        # Keep the newest file, remove the rest
+        for file_info in files[1:]:
+            try:
+                os.remove(file_info['path'])
+                files_removed += 1
+                print(f"🗑️ Removed old file: {file_info['filename']}")
+            except Exception as e:
+                print(f"⚠️ Could not remove {file_info['filename']}: {e}")
+    
+    return files_removed
+
 def save_raw_and_cleaned_data(raw_df: pd.DataFrame, cleaned_df: pd.DataFrame, filename: str) -> Tuple[str, str]:
-    """Save raw and cleaned data to respective folders"""
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    """Save raw and cleaned data to respective folders with smart file management"""
     base_name = os.path.splitext(filename)[0]
     
-    # Save raw data
-    raw_filename = f"{base_name}_raw_{timestamp}.csv"
-    raw_path = os.path.join(RAW_DATA_FOLDER, raw_filename)
-    raw_df.to_csv(raw_path, index=False)
+    # Use consistent filenames (no timestamps) - files will be overwritten
+    raw_filename = f"{base_name}_raw.csv"
+    cleaned_filename = f"{base_name}_cleaned.csv"
     
-    # Save cleaned data
-    cleaned_filename = f"{base_name}_cleaned_{timestamp}.csv"
+    raw_path = os.path.join(RAW_DATA_FOLDER, raw_filename)
     cleaned_path = os.path.join(CLEANED_DATA_FOLDER, cleaned_filename)
+    
+    # Save files (overwrite existing files with same name)
+    raw_df.to_csv(raw_path, index=False)
     cleaned_df.to_csv(cleaned_path, index=False)
     
+    # Clean up old timestamped files in both folders
+    raw_removed = cleanup_old_files(RAW_DATA_FOLDER)
+    cleaned_removed = cleanup_old_files(CLEANED_DATA_FOLDER)
+    
+    if raw_removed > 0 or cleaned_removed > 0:
+        print(f"🧹 Cleaned up {raw_removed + cleaned_removed} old files")
+    
+    print(f"💾 Saved files: {raw_filename} and {cleaned_filename}")
     return raw_path, cleaned_path
 
 def compute_signature(headers: List[str]) -> str:
@@ -995,521 +1052,6 @@ def calculate_transaction_revenue(df: pd.DataFrame) -> Dict:
     
     return results
 
-def create_sales_table(conn: sqlite3.Connection) -> None:
-    """Create sales table with standard schema including derived fields (idempotent)"""
-    cursor = conn.cursor()
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_date TEXT,
-            order_id TEXT,
-            sku TEXT,
-            asin TEXT,
-            product_name TEXT,
-            quantity INTEGER,
-            missing_quantity_flag BOOLEAN,
-            revenue_in_inr REAL,
-            shipping_amount REAL,
-            transaction_type TEXT,
-            shipment_item_id TEXT,
-            region TEXT,
-            status TEXT,
-            data_source TEXT,
-            upload_date TEXT,
-            month_tag TEXT,
-            normalized_order_id TEXT,
-            normalized_sku TEXT,
-            normalized_order_date TEXT,
-            revenue_calc REAL,
-            shipping_loss_calc REAL,
-            units_sold_calc INTEGER,
-            needs_estimation BOOLEAN,
-            UNIQUE(normalized_order_id, normalized_sku, normalized_order_date)
-        )
-    ''')
-    conn.commit()
-
-def create_staging_table(conn: sqlite3.Connection) -> None:
-    """Create staging table for CSV ingestion including derived fields"""
-    cursor = conn.cursor()
-    cursor.execute(f'DROP TABLE IF EXISTS {STAGING_TABLE}')
-    cursor.execute(f'''
-        CREATE TABLE {STAGING_TABLE} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_date TEXT,
-            order_id TEXT,
-            sku TEXT,
-            asin TEXT,
-            product_name TEXT,
-            quantity INTEGER,
-            missing_quantity_flag BOOLEAN,
-            revenue_in_inr REAL,
-            shipping_amount REAL,
-            transaction_type TEXT,
-            shipment_item_id TEXT,
-            region TEXT,
-            status TEXT,
-            data_source TEXT,
-            upload_date TEXT,
-            month_tag TEXT,
-            normalized_order_id TEXT,
-            normalized_sku TEXT,
-            normalized_order_date TEXT,
-            revenue_calc REAL,
-            shipping_loss_calc REAL,
-            units_sold_calc INTEGER,
-            needs_estimation BOOLEAN
-        )
-    ''')
-    conn.commit()
-
-def create_dataset_registry_table(conn: sqlite3.Connection) -> None:
-    """Create dataset registry table to track uploaded files"""
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS dataset_registry (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename TEXT NOT NULL,
-            upload_date TEXT NOT NULL,
-            row_count INTEGER NOT NULL,
-            date_range_start TEXT,
-            date_range_end TEXT,
-            column_mappings TEXT,
-            file_hash TEXT,
-            status TEXT DEFAULT 'active'
-        )
-    ''')
-    conn.commit()
-
-def robust_ingest_csv(df: pd.DataFrame, mappings: Dict[str, Optional[str]], filename: str = "uploaded_file.csv", mode: str = "replace") -> str:
-    """Robust CSV ingestion with staging and upsert logic"""
-    try:
-        print(f"🔄 Starting robust ingestion: {len(df)} rows in {mode} mode")
-        print(f"📋 Mappings: {mappings}")
-        print(f"📊 DataFrame columns: {list(df.columns)[:10]}...")  # First 10 columns
-        
-        # Check if DataFrame already has derived fields
-        if 'revenue_calc' in df.columns:
-            print(f"✅ DataFrame has derived fields already")
-            revenue_calc_sum = df['revenue_calc'].sum()
-            print(f"   Total revenue_calc in input: ₹{revenue_calc_sum:,.2f}")
-        else:
-            print(f"⚠️  DataFrame missing derived fields")
-        
-        # Check transaction_type
-        if 'transaction_type' in df.columns:
-            txn_values = df['transaction_type'].value_counts()
-            print(f"📊 Transaction types in DataFrame:")
-            for txn, count in txn_values.items():
-                print(f"   {txn}: {count} rows")
-        elif mappings.get('transaction_type'):
-            mapped_col = mappings['transaction_type']
-            if mapped_col in df.columns:
-                txn_values = df[mapped_col].value_counts()
-                print(f"📊 Transaction types in mapped column '{mapped_col}':")
-                for txn, count in txn_values.items():
-                    print(f"   {txn}: {count} rows")
-        else:
-            print(f"⚠️  No transaction_type found in DataFrame or mappings")
-        
-        # Create clean DataFrame with all original columns plus normalized keys
-        clean_df = df.copy()
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Map each field to lowercase versions
-        if mappings.get("order_date"):
-            try:
-                clean_df["order_date"] = pd.to_datetime(df[mappings["order_date"]], errors='coerce').dt.strftime('%Y-%m-%d')
-            except: 
-                clean_df["order_date"] = None
-        else: 
-            clean_df["order_date"] = None
-        
-        clean_df["order_id"] = df[mappings["order_id"]].astype(str) if mappings.get("order_id") else None
-        
-        # Handle product identifiers with placeholder for missing values
-        # Apply placeholders to original columns first
-        if mappings.get("sku"):
-            # Apply placeholder to original Sku column
-            clean_df[mappings["sku"]] = clean_df[mappings["sku"]].fillna('UNKNOWN_SKU')
-            clean_df[mappings["sku"]] = clean_df[mappings["sku"]].astype(str)
-            clean_df[mappings["sku"]] = clean_df[mappings["sku"]].replace(['nan', 'NaN', ''], 'UNKNOWN_SKU')
-            
-            # Create lowercase version
-            clean_df["sku"] = clean_df[mappings["sku"]]
-        else:
-            clean_df["sku"] = 'UNKNOWN_SKU'
-            
-        if mappings.get("asin"):
-            # Apply placeholder to original Asin column
-            clean_df[mappings["asin"]] = clean_df[mappings["asin"]].fillna('UNKNOWN_ASIN')
-            clean_df[mappings["asin"]] = clean_df[mappings["asin"]].astype(str)
-            clean_df[mappings["asin"]] = clean_df[mappings["asin"]].replace(['nan', 'NaN', ''], 'UNKNOWN_ASIN')
-            
-            # Create lowercase version
-            clean_df["asin"] = clean_df[mappings["asin"]]
-        else:
-            clean_df["asin"] = 'UNKNOWN_ASIN'
-            
-        if mappings.get("product_name"):
-            # Apply placeholder to original Item Description column
-            clean_df[mappings["product_name"]] = clean_df[mappings["product_name"]].fillna('UNKNOWN_PRODUCT')
-            clean_df[mappings["product_name"]] = clean_df[mappings["product_name"]].astype(str)
-            clean_df[mappings["product_name"]] = clean_df[mappings["product_name"]].replace(['nan', 'NaN', '', 'None'], 'UNKNOWN_PRODUCT')
-            
-            # Create lowercase version
-            clean_df["product_name"] = clean_df[mappings["product_name"]]
-        else:
-            clean_df["product_name"] = 'UNKNOWN_PRODUCT'
-        
-        if mappings.get("quantity"):
-            # Handle missing quantities with flag
-            clean_df["quantity"] = pd.to_numeric(df[mappings["quantity"]], errors='coerce')
-            clean_df["missing_quantity_flag"] = clean_df["quantity"].isna()
-            clean_df["quantity"] = clean_df["quantity"].fillna(0).astype(int)
-        else: 
-            clean_df["quantity"] = 0
-            clean_df["missing_quantity_flag"] = False
-        
-        if mappings.get("revenue_amount"):
-            clean_df["revenue_in_inr"] = parse_revenue(df[mappings["revenue_amount"]])
-        else: 
-            clean_df["revenue_in_inr"] = 0.0
-        
-        if mappings.get("shipping_amount"):
-            clean_df["shipping_amount"] = parse_revenue(df[mappings["shipping_amount"]])
-        else: 
-            clean_df["shipping_amount"] = 0.0
-        
-        # Preserve cleaned transaction_type if it exists, otherwise map from source
-        if 'transaction_type' in df.columns:
-            clean_df["transaction_type"] = df['transaction_type']  # Already cleaned
-            print(f"✅ Using cleaned transaction_type column from DataFrame")
-        elif mappings.get("transaction_type"):
-            clean_df["transaction_type"] = df[mappings["transaction_type"]].astype(str)
-            print(f"⚠️  Mapping transaction_type from '{mappings['transaction_type']}'")
-        else:
-            clean_df["transaction_type"] = None
-            print(f"❌ No transaction_type found!")
-        
-        clean_df["shipment_item_id"] = df[mappings["shipment_item_id"]].astype(str) if mappings.get("shipment_item_id") else None
-        
-        # Normalize region names to title case for consistent grouping
-        if mappings.get("region"):
-            clean_df["region"] = df[mappings["region"]].astype(str).str.strip().str.title()
-            print(f"✅ Region names normalized to title case")
-        else:
-            clean_df["region"] = None
-            
-        clean_df["status"] = df[mappings["status"]].astype(str) if mappings.get("status") else None
-        
-        # Add metadata columns
-        clean_df["data_source"] = filename
-        clean_df["upload_date"] = current_time
-        
-        # Add derived columns if they exist in the DataFrame (from cleaning)
-        clean_df["revenue_calc"] = df["revenue_calc"] if "revenue_calc" in df.columns else 0.0
-        clean_df["shipping_loss_calc"] = df["shipping_loss_calc"] if "shipping_loss_calc" in df.columns else 0.0
-        clean_df["units_sold_calc"] = df["units_sold_calc"] if "units_sold_calc" in df.columns else 0
-        clean_df["needs_estimation"] = df["needs_estimation"] if "needs_estimation" in df.columns else False
-        
-        # Add month tag for easy filtering
-        if clean_df["Invoice Date"].notna().any():
-            clean_df["month_tag"] = pd.to_datetime(clean_df["Invoice Date"], errors='coerce').dt.to_period('M').astype(str)
-        else:
-            clean_df["month_tag"] = None
-        
-        # Add normalized key fields
-        clean_df["normalized_order_id"] = ""
-        clean_df["normalized_sku"] = ""
-        clean_df["normalized_order_date"] = ""
-        
-        for idx, row in clean_df.iterrows():
-            norm_order_id, norm_sku, norm_order_date = normalize_key_fields(
-                row['order_id'], row['sku'], row['order_date']
-            )
-            clean_df.at[idx, 'normalized_order_id'] = norm_order_id
-            clean_df.at[idx, 'normalized_sku'] = norm_sku
-            clean_df.at[idx, 'normalized_order_date'] = norm_order_date
-        
-        # Filter out rows with invalid normalized keys
-        valid_rows = clean_df[
-            (clean_df['normalized_order_id'] != "") & 
-            (clean_df['normalized_sku'] != "") & 
-            (clean_df['normalized_order_date'] != "")
-        ].copy()
-        
-        dropped_invalid = len(clean_df) - len(valid_rows)
-        print(f"📊 Valid rows: {len(valid_rows)}, Invalid rows: {dropped_invalid}")
-        
-        if len(valid_rows) == 0:
-            return f"❌ No valid rows to process (all rows had missing key data)"
-        
-        # Start transaction
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        
-        try:
-            # Create tables
-            create_sales_table(conn)
-            create_staging_table(conn)
-            create_dataset_registry_table(conn)
-            
-            if mode == "replace":
-                # Clear existing data
-                cursor.execute(f'DELETE FROM {TABLE_NAME}')
-                print("🗑️ Cleared existing data")
-            
-            # Load data into staging
-            for _, row in valid_rows.iterrows():
-                cursor.execute(f'''
-                    INSERT INTO {STAGING_TABLE} 
-                    (order_date, order_id, sku, asin, product_name, quantity, missing_quantity_flag, 
-                     revenue_in_inr, shipping_amount, transaction_type, shipment_item_id, region, status, 
-                     data_source, upload_date, month_tag, normalized_order_id, normalized_sku, normalized_order_date,
-                     revenue_calc, shipping_loss_calc, units_sold_calc, needs_estimation)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (row['order_date'], row['order_id'], row['sku'], row['asin'], row['product_name'], 
-                      row['quantity'], row.get('missing_quantity_flag', False), row['revenue_in_inr'], 
-                      row['shipping_amount'], row['transaction_type'], row['shipment_item_id'], 
-                      row['region'], row['status'], row['data_source'], row['upload_date'], row['month_tag'],
-                      row['normalized_order_id'], row['normalized_sku'], row['normalized_order_date'],
-                      row.get('revenue_calc', 0.0), row.get('shipping_loss_calc', 0.0), 
-                      row.get('units_sold_calc', 0), row.get('needs_estimation', False)))
-            
-            # Upsert from staging to main table
-            cursor.execute(f'''
-                INSERT OR REPLACE INTO {TABLE_NAME} 
-                (order_date, order_id, sku, asin, product_name, quantity, missing_quantity_flag, 
-                 revenue_in_inr, shipping_amount, transaction_type, shipment_item_id, region, status, 
-                 data_source, upload_date, month_tag, normalized_order_id, normalized_sku, normalized_order_date,
-                 revenue_calc, shipping_loss_calc, units_sold_calc, needs_estimation)
-                SELECT order_date, order_id, sku, asin, product_name, quantity, missing_quantity_flag, 
-                       revenue_in_inr, shipping_amount, transaction_type, shipment_item_id, region, status, 
-                       data_source, upload_date, month_tag, normalized_order_id, normalized_sku, normalized_order_date,
-                       revenue_calc, shipping_loss_calc, units_sold_calc, needs_estimation
-                FROM {STAGING_TABLE}
-            ''')
-            
-            # Get statistics
-            cursor.execute(f'SELECT COUNT(*) FROM {STAGING_TABLE}')
-            total_processed = cursor.fetchone()[0]
-            
-            cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
-            total_in_main = cursor.fetchone()[0]
-            
-            # DEBUG: Check if derived fields were stored correctly
-            cursor.execute(f'SELECT transaction_type, revenue_calc, shipping_loss_calc, units_sold_calc FROM {TABLE_NAME} LIMIT 5')
-            debug_rows = cursor.fetchall()
-            print("\n📊 DEBUG: First 5 rows in database with derived fields:")
-            for i, row in enumerate(debug_rows):
-                print(f"  Row {i+1}: Transaction={row[0]}, revenue_calc={row[1]}, shipping_loss_calc={row[2]}, units_sold_calc={row[3]}")
-            
-            # Register dataset in registry
-            date_range_start = valid_rows["order_date"].min() if valid_rows["order_date"].notna().any() else None
-            date_range_end = valid_rows["order_date"].max() if valid_rows["order_date"].notna().any() else None
-            
-            cursor.execute('''
-                INSERT INTO dataset_registry 
-                (filename, upload_date, row_count, date_range_start, date_range_end, column_mappings, file_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (filename, current_time, len(valid_rows), date_range_start, date_range_end, 
-                  json.dumps(mappings), hashlib.md5(str(df.values).encode()).hexdigest()))
-            
-            # Clean up staging
-            cursor.execute(f'DROP TABLE {STAGING_TABLE}')
-            
-            conn.commit()
-            
-            # Data health report
-            cursor.execute(f'SELECT COUNT(DISTINCT normalized_order_id || "|" || normalized_sku || "|" || normalized_order_date) FROM {TABLE_NAME}')
-            distinct_keys = cursor.fetchone()[0]
-            
-            cursor.execute(f'SELECT MIN(order_date), MAX(order_date) FROM {TABLE_NAME} WHERE order_date IS NOT NULL')
-            date_range = cursor.fetchone()
-            
-            conn.close()
-            
-            # Build result message
-            message = f"✅ Processed {total_processed} rows from {filename}"
-            if dropped_invalid > 0:
-                message += f" ({dropped_invalid} invalid rows dropped)"
-            
-            message += f"\n📊 Data Health: {total_in_main:,} total rows, {distinct_keys:,} unique keys"
-            if date_range[0] and date_range[1]:
-                message += f", Date range: {date_range[0]} to {date_range[1]}"
-            
-            return message
-            
-        except Exception as e:
-            conn.rollback()
-            conn.close()
-            raise e
-            
-    except Exception as e:
-        return f"❌ Error during ingestion: {str(e)}"
-
-def store_sales_data(df: pd.DataFrame, mappings: Dict[str, Optional[str]], filename: str = "uploaded_file.csv", mode: str = "replace") -> str:
-    """Store CSV data to sales table with persistent storage support"""
-    try:
-        print(f"DEBUG: Storing {len(df)} rows in {mode} mode")
-        print(f"DEBUG: Key columns - order_id: {mappings.get('order_id')}, sku: {mappings.get('sku')}, order_date: {mappings.get('order_date')}")
-        # Create clean DataFrame
-        clean_df = pd.DataFrame()
-        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Map each field
-        if mappings.get("order_date"):
-            try:
-                clean_df["order_date"] = pd.to_datetime(df[mappings["order_date"]], errors='coerce').dt.strftime('%Y-%m-%d')
-            except: clean_df["order_date"] = None
-        else: clean_df["order_date"] = None
-        
-        clean_df["order_id"] = df[mappings["order_id"]].astype(str) if mappings.get("order_id") else None
-        clean_df["sku"] = df[mappings["sku"]].astype(str) if mappings.get("sku") else None
-        clean_df["asin"] = df[mappings["asin"]].astype(str) if mappings.get("asin") else None
-        clean_df["product_name"] = df[mappings["product_name"]].astype(str) if mappings.get("product_name") else None
-        
-        if mappings.get("quantity"):
-            clean_df["quantity"] = pd.to_numeric(df[mappings["quantity"]], errors='coerce').fillna(0).astype(int)
-        else: clean_df["quantity"] = 0
-        
-        if mappings.get("revenue_amount"):
-            clean_df["revenue_in_inr"] = parse_revenue(df[mappings["revenue_amount"]])
-        else: clean_df["revenue_in_inr"] = 0.0
-        
-        if mappings.get("shipping_amount"):
-            clean_df["shipping_amount"] = parse_revenue(df[mappings["shipping_amount"]])
-        else: clean_df["shipping_amount"] = 0.0
-        
-        clean_df["transaction_type"] = df[mappings["transaction_type"]].astype(str) if mappings.get("transaction_type") else None
-        clean_df["shipment_item_id"] = df[mappings["shipment_item_id"]].astype(str) if mappings.get("shipment_item_id") else None
-        
-        # Normalize region names to title case for consistent grouping
-        if mappings.get("region"):
-            clean_df["region"] = df[mappings["region"]].astype(str).str.strip().str.title()
-            print(f"✅ Region names normalized to title case")
-        else:
-            clean_df["region"] = None
-            
-        clean_df["status"] = df[mappings["status"]].astype(str) if mappings.get("status") else None
-        
-        # Add metadata columns
-        clean_df["data_source"] = filename
-        clean_df["upload_date"] = current_time
-        
-        # Add month tag for easy filtering
-        if clean_df["Invoice Date"].notna().any():
-            clean_df["month_tag"] = pd.to_datetime(clean_df["Invoice Date"], errors='coerce').dt.to_period('M').astype(str)
-        else:
-            clean_df["month_tag"] = None
-        
-        print(f"DEBUG: Clean data shape: {clean_df.shape}")
-        print(f"DEBUG: Sample data - order_id: {clean_df['order_id'].head(3).tolist()}")
-        print(f"DEBUG: Sample data - sku: {clean_df['sku'].head(3).tolist()}")
-        print(f"DEBUG: Sample data - order_date: {clean_df['order_date'].head(3).tolist()}")
-        
-        # Store to database
-        conn = sqlite3.connect(DB_FILE)
-        create_sales_table(conn)
-        create_dataset_registry_table(conn)
-        
-        cursor = conn.cursor()
-        
-        if mode == "replace":
-            # Clear existing data and replace
-            cursor.execute(f'DELETE FROM {TABLE_NAME}')
-            # Insert new data row by row to handle the unique constraint properly
-            for _, row in clean_df.iterrows():
-                cursor.execute(f'''
-                    INSERT INTO {TABLE_NAME} 
-                    (order_date, order_id, sku, asin, product_name, quantity, revenue_in_inr, 
-                     shipping_amount, transaction_type, shipment_item_id, region, status, 
-                     data_source, upload_date, month_tag)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (row['order_date'], row['order_id'], row['sku'], row['asin'], row['product_name'], 
-                      row['quantity'], row['revenue_in_inr'], row['shipping_amount'], 
-                      row['transaction_type'], row['shipment_item_id'], row['region'], row['status'],
-                      row['data_source'], row['upload_date'], row['month_tag']))
-            conn.commit()
-            message = f"✅ Replaced data with {len(clean_df)} rows from {filename}"
-        else:
-            # Append mode - handle duplicates using INSERT OR IGNORE
-            initial_count = cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}').fetchone()[0]
-            
-            # Filter out rows with NULL values in key fields
-            valid_rows = clean_df.dropna(subset=['order_id', 'sku', 'order_date'])
-            skipped_nulls = len(clean_df) - len(valid_rows)
-            
-            new_rows = 0
-            duplicates_removed = 0
-            
-            for i, (_, row) in enumerate(valid_rows.iterrows()):
-                try:
-                    print(f"DEBUG: Processing row {i+1}/{len(valid_rows)}: {row['order_id']}, {row['sku']}, {row['order_date']}")
-                    
-                    # First check if the record already exists
-                    cursor.execute(f'''
-                        SELECT COUNT(*) FROM {TABLE_NAME} 
-                        WHERE order_id = ? AND sku = ? AND order_date = ?
-                    ''', (row['order_id'], row['sku'], row['order_date']))
-                    
-                    existing_count = cursor.fetchone()[0]
-                    if existing_count > 0:
-                        print(f"DEBUG: Duplicate found, skipping")
-                        duplicates_removed += 1
-                        continue
-                    
-                    # Insert the new record
-                    cursor.execute(f'''
-                        INSERT INTO {TABLE_NAME} 
-                        (order_date, order_id, sku, asin, product_name, quantity, revenue_in_inr, 
-                         shipping_amount, transaction_type, shipment_item_id, region, status, 
-                         data_source, upload_date, month_tag)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (row['order_date'], row['order_id'], row['sku'], row['asin'], row['product_name'], 
-                          row['quantity'], row['revenue_in_inr'], row['shipping_amount'], 
-                          row['transaction_type'], row['shipment_item_id'], row['region'], row['status'],
-                          row['data_source'], row['upload_date'], row['month_tag']))
-                    new_rows += 1
-                    print(f"DEBUG: Successfully inserted row {i+1}")
-                    
-                except sqlite3.IntegrityError as e:
-                    # Handle any remaining constraint violations
-                    print(f"DEBUG: Integrity error on row {i+1}: {e}")
-                    if "UNIQUE constraint failed" in str(e):
-                        duplicates_removed += 1
-                    else:
-                        print(f"Warning: Skipped row due to error: {e}")
-                        continue
-            
-            conn.commit()
-            
-            message = f"✅ Appended {new_rows} new rows from {filename}"
-            if duplicates_removed > 0:
-                message += f" ({duplicates_removed} duplicates skipped)"
-            if skipped_nulls > 0:
-                message += f" ({skipped_nulls} rows with missing key data skipped)"
-        
-        # Register dataset in registry
-        date_range_start = clean_df["order_date"].min() if clean_df["order_date"].notna().any() else None
-        date_range_end = clean_df["order_date"].max() if clean_df["order_date"].notna().any() else None
-        
-        cursor.execute('''
-            INSERT INTO dataset_registry 
-            (filename, upload_date, row_count, date_range_start, date_range_end, column_mappings, file_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (filename, current_time, len(clean_df), date_range_start, date_range_end, 
-              json.dumps(mappings), hashlib.md5(str(df.values).encode()).hexdigest()))
-        
-        conn.commit()
-        conn.close()
-        
-        return message
-        
-    except Exception as e:
-        return f"❌ Error storing data: {str(e)}"
-
 def check_existing_data() -> bool:
     """Check if there's existing data in the database"""
     try:
@@ -1562,21 +1104,109 @@ def get_total_data_summary() -> Dict:
             max_date = date_query.iloc[0]['max_date']
             date_range = (min_date, max_date)
         
-        # Data sources (use processed files count as proxy)
+        # Count unique months/datasets from the actual data
         try:
-            data_sources = len(st.session_state.processed_files) if hasattr(st.session_state, 'processed_files') and st.session_state.processed_files else 0
+            month_query = query_data('SELECT COUNT(DISTINCT month_tag) as unique_months FROM sales WHERE month_tag IS NOT NULL')
+            if not month_query.empty:
+                data_sources = month_query.iloc[0]['unique_months']
+            else:
+                data_sources = 0
         except:
-            data_sources = 0
+            # Fallback: count distinct invoice dates as proxy for datasets
+            try:
+                date_count_query = query_data('SELECT COUNT(DISTINCT DATE("Invoice Date")) as unique_dates FROM sales WHERE "Invoice Date" IS NOT NULL')
+                if not date_count_query.empty:
+                    data_sources = max(1, date_count_query.iloc[0]['unique_dates'] // 30)  # Approximate months
+                else:
+                    data_sources = 0
+            except:
+                data_sources = 0
+        
+        # Get unique records count to check for duplicates
+        try:
+            unique_query = query_data('SELECT COUNT(DISTINCT "Invoice Number" || \'|\' || "Sku" || \'|\' || "Invoice Date") as unique_count FROM sales')
+            unique_records = unique_query.iloc[0]['unique_count'] if not unique_query.empty else total_rows
+        except:
+            unique_records = total_rows
+        
+        # Get actual file information from data folders
+        file_info = get_uploaded_files_info()
         
         return {
             'total_rows': total_rows,
+            'unique_records': unique_records,
             'date_range_start': date_range[0] if date_range and date_range[0] else None,
             'date_range_end': date_range[1] if date_range and date_range[1] else None,
-            'data_sources': data_sources
+            'data_sources': data_sources,
+            'uploaded_files': file_info
         }
     except Exception as e:
         print(f"Error getting data summary: {e}")
         return {}
+
+def get_uploaded_files_info() -> List[Dict]:
+    """Get information about uploaded files from data folders"""
+    file_info = []
+    
+    try:
+        # Check raw files
+        raw_folder = 'data/raw'
+        cleaned_folder = 'data/cleaned'
+        
+        if os.path.exists(raw_folder):
+            for filename in os.listdir(raw_folder):
+                if filename.endswith('.csv') and not filename.startswith('test_'):
+                    raw_path = os.path.join(raw_folder, filename)
+                    
+                    # Find corresponding cleaned file (handle different naming patterns)
+                    cleaned_filename = None
+                    cleaned_path = None
+                    
+                    # Try different patterns for cleaned files
+                    patterns = [
+                        filename.replace('_raw.csv', '_cleaned.csv'),
+                        filename.replace('_raw_', '_cleaned_'),
+                        filename.replace('raw', 'cleaned')
+                    ]
+                    
+                    for pattern in patterns:
+                        potential_path = os.path.join(cleaned_folder, pattern)
+                        if os.path.exists(potential_path):
+                            cleaned_filename = pattern
+                            cleaned_path = potential_path
+                            break
+                    
+                    # Get file info
+                    raw_size = os.path.getsize(raw_path)
+                    raw_rows = sum(1 for line in open(raw_path)) - 1  # Subtract header
+                    
+                    cleaned_size = 0
+                    cleaned_rows = 0
+                    if cleaned_path and os.path.exists(cleaned_path):
+                        cleaned_size = os.path.getsize(cleaned_path)
+                        cleaned_rows = sum(1 for line in open(cleaned_path)) - 1  # Subtract header
+                    
+                    # Extract month from filename
+                    base_name = filename.replace('_raw.csv', '').replace('_raw_', '_')
+                    month = base_name.replace('Monthly', '').replace('monthly', '')
+                    
+                    file_info.append({
+                        'filename': base_name,
+                        'month': month,
+                        'raw_rows': raw_rows,
+                        'cleaned_rows': cleaned_rows,
+                        'raw_size': raw_size,
+                        'cleaned_size': cleaned_size,
+                        'upload_date': datetime.fromtimestamp(os.path.getmtime(raw_path)).strftime('%Y-%m-%d %H:%M')
+                    })
+        
+        # Sort by upload date (newest first)
+        file_info.sort(key=lambda x: x['upload_date'], reverse=True)
+        
+    except Exception as e:
+        print(f"Error getting file info: {e}")
+    
+    return file_info
 
 def debug_db_info() -> str:
     """Debug function to show active DB path and row counts"""
@@ -2776,15 +2406,47 @@ def main():
     # Header
     st.title("📊 CSV Analytics Dashboard")
     
-    # Show database path info
-    st.info(f"🗄️ **Database**: {DB_ABSOLUTE_PATH}")
-    
     # Show existing data status
     if st.session_state.has_existing_data:
         data_summary = get_total_data_summary()
-        st.success(f"✅ **Data Loaded**: {data_summary.get('total_rows', 0):,} rows from {data_summary.get('data_sources', 0)} files")
-        if data_summary.get('date_range_start') and data_summary.get('date_range_end'):
-            st.info(f"📅 **Date Range**: {data_summary['date_range_start']} to {data_summary['date_range_end']}")
+        
+        # Beautiful, user-friendly data status
+        if data_summary.get('total_rows', 0) > 0:
+            file_count = len(data_summary.get('uploaded_files', []))
+            
+            # Calculate unique records for clean display
+            unique_records = data_summary.get('unique_records', data_summary.get('total_rows', 0))
+            
+            # Show clean, positive message
+            st.success(f"🎉 **Welcome back!** Your dashboard is ready with {unique_records:,} records from {file_count} datasets")
+            
+            # Show uploaded files in a clean way
+            if data_summary.get('uploaded_files'):
+                st.markdown("**📊 Your Data:**")
+                for file_info in data_summary['uploaded_files'][:3]:  # Show first 3 files
+                    # Clean up month display
+                    month_display = file_info['month']
+                    
+                    # Extract clean month name
+                    if 'July' in month_display:
+                        month_display = 'July'
+                    elif 'Sept' in month_display:
+                        month_display = 'September'
+                    elif 'Aug' in month_display:
+                        month_display = 'August'
+                    elif 'MTR' in month_display:
+                        month_display = 'August (MTR)'
+                    else:
+                        # Fallback: clean up and capitalize
+                        month_display = month_display.replace('_20251026_205319.csv', '').replace('_20251026_205329.csv', '').replace('_20251026_205351.csv', '').replace('_20251024_153740.csv', '')
+                        month_display = month_display.replace('July_', 'July').replace('Sept_', 'September').replace('Aug_', 'August')
+                        month_display = month_display.title()
+                    
+                    st.markdown(f"• **{month_display}** - {file_info['cleaned_rows']:,} records")
+                if len(data_summary['uploaded_files']) > 3:
+                    st.markdown(f"• **+{len(data_summary['uploaded_files']) - 3} more datasets**")
+        else:
+            st.warning("⚠️ **No data found** in database")
         
         col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
@@ -2797,7 +2459,18 @@ def main():
                 st.session_state.has_existing_data = check_existing_data()
                 st.rerun()
     else:
-        st.markdown("*Upload CSV → Auto-map → View KPIs → Chat about data*")
+        # Beautiful welcome message for new users
+        st.markdown("---")
+        st.markdown("### 🚀 Welcome to Your Analytics Dashboard!")
+        st.markdown("""
+        **Get started in 3 simple steps:**
+        1. 📁 **Upload your CSV files** using the sidebar
+        2. 🔄 **Auto-mapping** will handle column detection
+        3. 📊 **Explore insights** with interactive charts and KPIs
+        
+        *Your data will be automatically processed and ready for analysis!*
+        """)
+        st.markdown("---")
     
     # Data Management Section
     if st.session_state.show_data_management:
@@ -2820,39 +2493,46 @@ def main():
             
             st.markdown("---")
         
-        # Use session state for dataset registry instead of SQLite
-        datasets = st.session_state.processed_files if hasattr(st.session_state, 'processed_files') else []
-        if datasets:
-            st.markdown(f"**📊 Data Sources ({len(datasets)} files):**")
+        # Get actual data summary from database
+        data_summary = get_total_data_summary()
+        
+        if data_summary.get('total_rows', 0) > 0:
+            file_count = len(data_summary.get('uploaded_files', []))
+            st.markdown(f"**📊 Data Sources ({file_count} files):**")
+            st.markdown(f"**Total Rows in Database**: {data_summary.get('total_rows', 0):,}")
             
-            for i, dataset in enumerate(datasets):
-                # Handle both old and new dataset formats
-                row_count = dataset.get('row_count', dataset.get('rows', 0))
-                upload_date = dataset.get('upload_date', dataset.get('timestamp', 'Unknown'))
-                status = dataset.get('status', 'unknown')
+            # Show duplicate analysis
+            if data_summary.get('unique_records', 0) < data_summary.get('total_rows', 0):
+                duplicate_count = data_summary.get('total_rows', 0) - data_summary.get('unique_records', 0)
+                st.warning(f"⚠️ **Duplicates**: {duplicate_count:,} duplicate records found")
+                st.markdown(f"**Unique Records**: {data_summary.get('unique_records', 0):,}")
+            
+            if data_summary.get('date_range_start') and data_summary.get('date_range_end'):
+                st.markdown(f"**Date Range**: {data_summary['date_range_start']} to {data_summary['date_range_end']}")
+            
+            # Show detailed file information
+            if data_summary.get('uploaded_files'):
+                st.markdown("#### 📁 Uploaded Files")
                 
-                # Create clean status display
-                if status == 'success':
-                    status_display = "✅ Loaded Successfully"
-                    status_color = "green"
-                elif status == 'failed':
-                    status_display = "❌ Failed to Load"
-                    status_color = "red"
-                else:
-                    status_display = "⚠️ Unknown Status"
-                    status_color = "orange"
+                # Calculate totals
+                total_file_rows = sum(f['cleaned_rows'] for f in data_summary['uploaded_files'])
+                st.markdown(f"**Total Rows in Files**: {total_file_rows:,}")
                 
-                with st.expander(f"📄 {dataset['filename']} ({row_count:,} rows)", expanded=False):
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.markdown(f"**Uploaded:** {upload_date}")
-                    with col2:
-                        if dataset.get('date_range_start') and dataset.get('date_range_end'):
-                            st.markdown(f"**Date Range:** {dataset['date_range_start']} to {dataset['date_range_end']}")
-                        elif dataset.get('month'):
-                            st.markdown(f"**Month:** {dataset['month']}")
-                    with col3:
-                        st.markdown(f"**Status:** :{status_color}[{status_display}]")
+                # Show each file
+                for file_info in data_summary['uploaded_files']:
+                    with st.expander(f"📄 {file_info['filename']} ({file_info['cleaned_rows']:,} rows)", expanded=False):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.markdown(f"**Month**: {file_info['month']}")
+                            st.markdown(f"**Uploaded**: {file_info['upload_date']}")
+                        with col2:
+                            st.markdown(f"**Raw Rows**: {file_info['raw_rows']:,}")
+                            st.markdown(f"**Cleaned Rows**: {file_info['cleaned_rows']:,}")
+                        with col3:
+                            st.markdown(f"**Raw Size**: {file_info['raw_size']:,} bytes")
+                            st.markdown(f"**Cleaned Size**: {file_info['cleaned_size']:,} bytes")
+            else:
+                st.info("📊 No file information available. Data may have been loaded from previous sessions.")
             
             st.markdown("---")
             col1, col2, col3 = st.columns(3)
