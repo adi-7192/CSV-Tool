@@ -18,6 +18,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from db_manager import store_data, query_data, clear_database, get_row_count, table_exists
 
+# Import AI Assistant
+try:
+    from ai_assistant import AIAssistant
+    AI_ASSISTANT_AVAILABLE = True
+except ImportError:
+    AI_ASSISTANT_AVAILABLE = False
+    print("⚠️ AI Assistant module not available. Chat will use basic functionality.")
+
 # Constants
 DB_FILE = 'data.db'
 TABLE_NAME = 'sales'
@@ -1062,31 +1070,43 @@ def check_existing_data() -> bool:
         return False
 
 def get_dataset_registry() -> List[Dict]:
-    """Get list of all uploaded datasets"""
-    if not os.path.exists(DB_FILE):
-        return []
-    
+    """Get list of all uploaded datasets (DuckDB version)"""
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT filename, upload_date, row_count, date_range_start, date_range_end, status
-            FROM dataset_registry 
-            WHERE status = 'active'
-            ORDER BY upload_date DESC
-        ''')
-        results = cursor.fetchall()
-        conn.close()
+        # Get data from DuckDB instead of SQLite
+        if not table_exists('sales'):
+            return []
         
-        return [{
-            'filename': row[0],
-            'upload_date': row[1],
-            'row_count': row[2],
-            'date_range_start': row[3],
-            'date_range_end': row[4],
-            'status': row[5]
-        } for row in results]
-    except:
+        # Get unique months/datasets from DuckDB
+        month_query = query_data('SELECT DISTINCT month_tag FROM sales WHERE month_tag IS NOT NULL ORDER BY month_tag DESC')
+        
+        datasets = []
+        for _, row in month_query.iterrows():
+            month_tag = row['month_tag']
+            # Get basic stats for this month
+            stats_query = query_data(f'''
+                SELECT 
+                    COUNT(*) as row_count,
+                    MIN("Invoice Date") as date_range_start,
+                    MAX("Invoice Date") as date_range_end
+                FROM sales 
+                WHERE month_tag = {month_tag}
+            ''')
+            
+            if not stats_query.empty:
+                stats = stats_query.iloc[0]
+                datasets.append({
+                    'filename': f'Month_{month_tag}',
+                    'upload_date': '2025-10-26',  # Approximate
+                    'row_count': stats['row_count'],
+                    'date_range_start': stats['date_range_start'],
+                    'date_range_end': stats['date_range_end'],
+                    'status': 'active'
+                })
+        
+        return datasets
+        
+    except Exception as e:
+        print(f"Error getting dataset registry: {e}")
         return []
 
 def get_total_data_summary() -> Dict:
@@ -2367,6 +2387,37 @@ def answer_descriptive_question(question: str) -> str:
     
     return f"Here's a summary: {total_orders} orders totaling {format_inr(total_revenue)} in revenue."
 
+def initialize_ai_assistant():
+    """Initialize AI Assistant if available and data exists"""
+    if not AI_ASSISTANT_AVAILABLE:
+        return False
+    
+    if st.session_state.ai_assistant is None and st.session_state.has_existing_data:
+        try:
+            with st.spinner("🤖 Initializing AI Assistant..."):
+                st.session_state.ai_assistant = AIAssistant()
+            return True
+        except Exception as e:
+            st.error(f"❌ Failed to initialize AI Assistant: {str(e)}")
+            st.info("💡 Make sure Ollama is running: `ollama serve`")
+            return False
+    return st.session_state.ai_assistant is not None
+
+def get_suggested_questions():
+    """Get suggested questions for the AI chat"""
+    return [
+        "What is the total revenue?",
+        "How many orders do we have?",
+        "Show me top 5 products by revenue",
+        "Which city has the highest revenue?",
+        "What was the revenue last month?",
+        "How many unique SKUs do we have?",
+        "What is the average order value?",
+        "Show me revenue by city",
+        "What are the top 3 cities by sales?",
+        "Compare September vs August performance"
+    ]
+
 def main():
     """Main Streamlit app"""
     st.set_page_config(
@@ -2402,6 +2453,10 @@ def main():
         st.session_state.cleaning_report = None
     if 'cleaned_df' not in st.session_state:
         st.session_state.cleaned_df = None
+    if 'ai_assistant' not in st.session_state:
+        st.session_state.ai_assistant = None
+    if 'ai_chat_history' not in st.session_state:
+        st.session_state.ai_chat_history = []
     
     # Header
     st.title("📊 CSV Analytics Dashboard")
@@ -3661,65 +3716,172 @@ def main():
                 st.warning("💡 No data found for the selected date range. Please check your date selection or upload data first.")
         
         with tab2:
-            st.header("💬 Chat About Your Data")
-            st.markdown("*Ask questions about revenue, orders, SKUs, and trends*")
+            st.header("🤖 AI Chat Assistant")
+            st.markdown("*Ask questions about your business data in natural language*")
             
-            # Chat history
-            if st.session_state.chat_history:
-                st.markdown("### 💬 Chat History")
-                for i, (question, answer) in enumerate(st.session_state.chat_history):
-                    with st.expander(f"Q{i+1}: {question[:50]}{'...' if len(question) > 50 else ''}", expanded=False):
-                        st.markdown(f"**Question:** {question}")
-                        st.markdown(f"**Answer:** {answer}")
+            # Initialize AI Assistant
+            ai_available = initialize_ai_assistant()
+            
+            if not ai_available:
+                st.warning("⚠️ **AI Assistant not available**")
+                st.info("""
+                **To enable AI chat:**
+                1. Make sure Ollama is running: `ollama serve`
+                2. Ensure llama3.1:8b model is installed: `ollama pull llama3.1:8b`
+                3. Refresh this page
+                
+                **Fallback:** Using basic chat functionality below.
+                """)
+                
+                # Fallback to basic chat
                 st.markdown("---")
-            
-            # Question input
-            question = st.text_input(
-                "Ask a question about your data:",
-                placeholder="e.g., What's the total revenue? Show me top products...",
-                key="chat_question"
-            )
-            
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                if st.button("🚀 Ask", type="primary"):
-                    if question.strip():
-                        # Determine if numeric or descriptive
-                        numeric_keywords = ['total', 'count', 'sum', 'revenue', 'orders', 'units', 'top', 'best']
-                        is_numeric = any(keyword in question.lower() for keyword in numeric_keywords)
-                        
-                        if is_numeric:
-                            answer = answer_numeric_question(question)
+                st.markdown("### 💬 Basic Chat (Fallback)")
+                
+                # Chat history
+                if st.session_state.chat_history:
+                    st.markdown("#### 💬 Chat History")
+                    for i, (question, answer) in enumerate(st.session_state.chat_history):
+                        with st.expander(f"Q{i+1}: {question[:50]}{'...' if len(question) > 50 else ''}", expanded=False):
+                            st.markdown(f"**Question:** {question}")
+                            st.markdown(f"**Answer:** {answer}")
+                    st.markdown("---")
+                
+                # Question input
+                question = st.text_input(
+                    "Ask a question about your data:",
+                    placeholder="e.g., What's the total revenue? Show me top products...",
+                    key="chat_question"
+                )
+                
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    if st.button("🚀 Ask", type="primary"):
+                        if question.strip():
+                            # Determine if numeric or descriptive
+                            numeric_keywords = ['total', 'count', 'sum', 'revenue', 'orders', 'units', 'top', 'best']
+                            is_numeric = any(keyword in question.lower() for keyword in numeric_keywords)
+                            
+                            if is_numeric:
+                                answer = answer_numeric_question(question)
+                            else:
+                                answer = answer_descriptive_question(question)
+                            
+                            # Add to history
+                            st.session_state.chat_history.append((question, answer))
+                            st.rerun()
                         else:
-                            answer = answer_descriptive_question(question)
-                        
-                        # Add to history
-                        st.session_state.chat_history.append((question, answer))
-                        st.rerun()
-                    else:
-                        st.warning("Please enter a question.")
+                            st.warning("Please enter a question.")
+                
+                with col2:
+                    st.caption("💡 Try: 'What's the total revenue?', 'Top 5 products', 'How many orders?'")
+                
+                # Example questions
+                st.markdown("---")
+                st.markdown("### 💡 Example Questions")
+                
+                example_cols = st.columns(2)
+                with example_cols[0]:
+                    st.markdown("**Numeric Questions:**")
+                    st.markdown("- What's the total revenue?")
+                    st.markdown("- How many orders?")
+                    st.markdown("- Top 5 products by revenue?")
+                    st.markdown("- Total units sold?")
+                
+                with example_cols[1]:
+                    st.markdown("**Descriptive Questions:**")
+                    st.markdown("- Show me performance trends")
+                    st.markdown("- What's our best product?")
+                    st.markdown("- Any declining trends?")
+                    st.markdown("- Overall business summary")
             
-            with col2:
-                st.caption("💡 Try: 'What's the total revenue?', 'Top 5 products', 'How many orders?'")
-            
-            # Example questions
-            st.markdown("---")
-            st.markdown("### 💡 Example Questions")
-            
-            example_cols = st.columns(2)
-            with example_cols[0]:
-                st.markdown("**Numeric Questions:**")
-                st.markdown("- What's the total revenue?")
-                st.markdown("- How many orders?")
-                st.markdown("- Top 5 products by revenue?")
-                st.markdown("- Total units sold?")
-            
-            with example_cols[1]:
-                st.markdown("**Descriptive Questions:**")
-                st.markdown("- Show me performance trends")
-                st.markdown("- What's our best product?")
-                st.markdown("- Any declining trends?")
-                st.markdown("- Overall business summary")
+            else:
+                # AI-powered chat interface
+                st.success("✅ **AI Assistant Ready!** Ask any question about your data.")
+                
+                # Chat history
+                if st.session_state.ai_chat_history:
+                    st.markdown("### 💬 Chat History")
+                    for i, chat_item in enumerate(st.session_state.ai_chat_history[-5:]):  # Show last 5
+                        with st.expander(f"Q{i+1}: {chat_item['question'][:50]}{'...' if len(chat_item['question']) > 50 else ''}", expanded=False):
+                            st.markdown(f"**Question:** {chat_item['question']}")
+                            st.markdown(f"**Answer:** {chat_item['answer']}")
+                            if chat_item.get('sql'):
+                                with st.expander("🔍 View SQL Query", expanded=False):
+                                    st.code(chat_item['sql'], language='sql')
+                    st.markdown("---")
+                
+                # Question input
+                question = st.text_input(
+                    "Ask a question about your data:",
+                    placeholder="e.g., What's the total revenue? Show me top products by city...",
+                    key="ai_chat_question"
+                )
+                
+                col1, col2 = st.columns([1, 4])
+                with col1:
+                    if st.button("🤖 Ask AI", type="primary"):
+                        if question.strip():
+                            with st.spinner("🤖 AI is thinking..."):
+                                try:
+                                    result = st.session_state.ai_assistant.ask_question(question)
+                                    
+                                    if result['success']:
+                                        # Add to AI chat history
+                                        st.session_state.ai_chat_history.append({
+                                            'question': question,
+                                            'answer': result['response'],
+                                            'sql': result.get('sql', ''),
+                                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                        })
+                                        
+                                        # Display the response
+                                        st.markdown("### 🤖 AI Response")
+                                        st.markdown(result['response'])
+                                        
+                                        # Show SQL query in expander
+                                        if result.get('sql'):
+                                            with st.expander("🔍 View Generated SQL Query", expanded=False):
+                                                st.code(result['sql'], language='sql')
+                                        
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ **Error:** {result['error']}")
+                                        st.info("💡 Try rephrasing your question or check if Ollama is running.")
+                                        
+                                except Exception as e:
+                                    st.error(f"❌ **Unexpected error:** {str(e)}")
+                                    st.info("💡 Make sure Ollama is running: `ollama serve`")
+                        else:
+                            st.warning("Please enter a question.")
+                
+                with col2:
+                    st.caption("💡 Try: 'What's the total revenue?', 'Top 5 products by city', 'Compare last month vs this month'")
+                
+                # Suggested questions
+                st.markdown("---")
+                st.markdown("### 💡 Suggested Questions")
+                
+                suggested_questions = get_suggested_questions()
+                
+                # Create clickable buttons for suggested questions
+                cols = st.columns(2)
+                for i, suggested_q in enumerate(suggested_questions):
+                    with cols[i % 2]:
+                        if st.button(f"💡 {suggested_q}", key=f"suggested_{i}", help="Click to ask this question"):
+                            # Set the question in the text input
+                            st.session_state.ai_chat_question = suggested_q
+                            st.rerun()
+                
+                # Show AI status
+                st.markdown("---")
+                st.markdown("### 🤖 AI Assistant Status")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.success("✅ **Connected** to Ollama")
+                with col2:
+                    st.info(f"🤖 **Model:** llama3.1:8b")
+                with col3:
+                    st.info(f"💬 **Chat History:** {len(st.session_state.ai_chat_history)} questions")
     
     else:
         st.info("👆 Upload a CSV file in the sidebar to begin")
