@@ -2164,6 +2164,14 @@ def main():
     # Initialize session state
     if 'uploaded_df' not in st.session_state:
         st.session_state.uploaded_df = None
+    if 'uploaded_file_ids' not in st.session_state:
+        st.session_state.uploaded_file_ids = set()  # Track processed file IDs
+    if 'processed_files' not in st.session_state:
+        st.session_state.processed_files = []  # List of processed file metadata
+    if 'total_rows_loaded' not in st.session_state:
+        st.session_state.total_rows_loaded = 0
+    if 'last_upload_time' not in st.session_state:
+        st.session_state.last_upload_time = None
     if 'mappings' not in st.session_state:
         st.session_state.mappings = {}
     if 'show_mapping_modal' not in st.session_state:
@@ -2211,6 +2219,22 @@ def main():
     if st.session_state.show_data_management:
         st.markdown("---")
         st.markdown("### 📁 Data Sources Management")
+        
+        # Show processed files summary
+        if st.session_state.processed_files:
+            st.markdown("#### 📊 Recent Uploads")
+            st.markdown(f"**Files Loaded**: {len(st.session_state.processed_files)}")
+            st.markdown(f"**Total Rows**: {st.session_state.total_rows_loaded:,}")
+            if st.session_state.last_upload_time:
+                st.markdown(f"**Last Upload**: {st.session_state.last_upload_time}")
+            
+            # Show recent files
+            recent_files = st.session_state.processed_files[-5:]  # Last 5 files
+            for file_data in recent_files:
+                status_icon = "✅" if file_data['status'] == 'success' else "❌"
+                st.markdown(f"{status_icon} **{file_data['filename']}** - {file_data['rows']:,} rows ({file_data['month']})")
+            
+            st.markdown("---")
         
         datasets = get_dataset_registry()
         if datasets:
@@ -2284,155 +2308,205 @@ def main():
         else:
             upload_mode = "Replace all data"
         
-        uploaded_file = st.file_uploader(
-            "Choose CSV file",
+        uploaded_files = st.file_uploader(
+            "📁 Upload Monthly CSV Files",
             type=['csv'],
-            help="Upload a CSV file to analyze"
+            accept_multiple_files=True,
+            help="Upload one or more CSV files to analyze",
+            key="csv_uploader"
         )
         
-        if uploaded_file is not None:
-            try:
-                df = pd.read_csv(uploaded_file)
-                st.success(f"✅ Loaded {len(df)} rows, {len(df.columns)} columns")
-                
-                # Check if this is a new file
-                is_new = (st.session_state.uploaded_df is None or 
-                         list(df.columns) != list(st.session_state.uploaded_df.columns))
-                
-                if is_new:
-                    st.session_state.uploaded_df = df.copy()
-                    
-                    # Try to load saved mapping
-                    saved_mapping = load_mapping(list(df.columns))
-                    
-                    if saved_mapping:
-                        st.session_state.mappings = saved_mapping
-                        st.info("✅ Using saved column mapping")
-                    else:
-                        # Auto-map columns
-                        st.session_state.mappings = auto_map_columns(df)
-                        
-                        # Check for ambiguous fields
-                        ambiguous = [field for field, header in st.session_state.mappings.items() 
-                                   if header is None and any(normalize_header(h) in 
-                                   [normalize_header(s) for s in SYNONYMS.get(field, [])] 
-                                   for h in df.columns)]
-                        
-                        if ambiguous:
-                            st.session_state.show_mapping_modal = True
-                            st.warning(f"⚠️ {len(ambiguous)} fields need confirmation")
-                        else:
-                            st.success("✅ All columns mapped automatically!")
-                
-                # Start data cleaning process
-                if st.button("🧹 Clean & Validate Data", type="primary"):
-                    if st.session_state.uploaded_df is not None and st.session_state.mappings:
-                        # Perform data cleaning
-                        cleaned_df, cleaning_report = clean_dataframe_transaction_aware(st.session_state.uploaded_df, st.session_state.mappings)
-                        
-                        # Store results in session state
-                        st.session_state.cleaned_df = cleaned_df
-                        st.session_state.cleaning_report = cleaning_report
-                        st.session_state.show_cleaning_preview = True
-                        st.rerun()
-                    else:
-                        st.error("Please upload a file and complete column mapping first")
-                
-                # Store data (only if cleaning is complete)
-                if st.button("💾 Store Data", type="primary"):
-                    if st.session_state.cleaned_df is not None:
-                        # Show progress
-                        with st.spinner("Storing data..."):
-                            mode = "append" if upload_mode == "Append to existing data" else "replace"
-                            filename = uploaded_file.name if uploaded_file else "uploaded_file.csv"
-                            
-                            # Debug info
-                            st.info(f"Storing {len(st.session_state.cleaned_df)} rows in {mode} mode...")
-                            
-                            # Check if derived fields exist
-                            has_derived = 'revenue_calc' in st.session_state.cleaned_df.columns
-                            if has_derived:
-                                st.info(f"✅ Cleaned data has derived fields (revenue_calc, etc.)")
-                                # Show summary of derived fields
-                                total_revenue_calc = st.session_state.cleaned_df['revenue_calc'].sum()
-                                st.write(f"Total revenue_calc in cleaned data: ₹{total_revenue_calc:,.2f}")
-                            else:
-                                st.warning("⚠️ Cleaned data missing derived fields!")
-                            
-                            # Save raw and cleaned data
-                            try:
-                                raw_path, cleaned_path = save_raw_and_cleaned_data(
-                                    st.session_state.uploaded_df, 
-                                    st.session_state.cleaned_df, 
-                                    filename
-                                )
-                                st.success(f"✅ Saved to: {cleaned_path}")
-                            except Exception as e:
-                                st.error(f"Error saving files: {e}")
-                            
-                            # Ingest cleaned data
-                            result = robust_ingest_csv(st.session_state.cleaned_df, st.session_state.mappings, filename, mode)
-                            st.write(result)
-                            
-                            if "✅" in result:
-                                # Verify data was stored
-                                conn = sqlite3.connect(DB_FILE)
-                                cursor = conn.cursor()
-                                cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
-                                row_count = cursor.fetchone()[0]
-                                conn.close()
-                                
-                                st.success(f"✅ Verified: {row_count} rows now in database")
-                                
-                                # Save mapping
-                                save_mapping(list(df.columns), st.session_state.mappings)
-                                st.session_state.show_mapping_modal = False
-                                st.session_state.show_cleaning_preview = False
-                                st.session_state.has_existing_data = check_existing_data()
-                                
-                                # Show cleaning summary
-                                if st.session_state.cleaning_report:
-                                    report = st.session_state.cleaning_report
-                                    st.success(f"🧹 **Cleaning Summary**: {report['rows_kept']} rows kept, {report['duplicates_found']} duplicates removed, {report['rows_dropped']} rows dropped")
-                                
-                                st.success("✅ Data stored successfully! You can now view the dashboard.")
-                                time.sleep(2)
-                                st.rerun()
-                            else:
-                                st.error("❌ Storage failed. Check console output for details.")
-                    else:
-                        st.warning("Please clean and validate your data first using the 'Clean & Validate Data' button")
-                
-                # Debug actions
-                st.markdown("---")
-                st.markdown("### 🔧 Debug Actions")
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if st.button("📊 Show DB Info", help="Show active database path and row counts"):
-                        db_info = debug_db_info()
-                        st.text_area("Database Information", db_info, height=150)
-                
-                with col2:
-                    if st.button("🔍 Check Duplicates", help="Check for potential duplicates in current file"):
-                        if st.session_state.uploaded_df is not None:
-                            duplicate_info = debug_check_duplicates(st.session_state.uploaded_df, st.session_state.mappings)
-                            st.text_area("Duplicate Check", duplicate_info, height=150)
-                        else:
-                            st.warning("No file uploaded to check")
+        if uploaded_files:
+            # Get IDs of newly uploaded files
+            current_file_ids = {file.file_id for file in uploaded_files}
+            new_files = [f for f in uploaded_files if f.file_id not in st.session_state.uploaded_file_ids]
             
-            except Exception as e:
-                st.error(f"Error processing CSV: {str(e)}")
+            if new_files:
+                print(f"📁 NEW FILES DETECTED: {len(new_files)} new file(s) to process")
+                st.info(f"Processing {len(new_files)} new file(s)...")
+                
+                successful_files = 0
+                failed_files = 0
+                total_rows_processed = 0
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Create progress bar
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                for i, file in enumerate(new_files):
+                    try:
+                        filename = file.name
+                        print(f"📄 Processing new file {i+1}/{len(new_files)}: {filename}")
+                        
+                        # Update progress
+                        progress = (i + 1) / len(new_files)
+                        progress_bar.progress(progress)
+                        status_text.text(f"Processing {filename}...")
+                        
+                        # Read CSV
+                        df_raw = pd.read_csv(file)
+                        print(f"📊 Loaded {len(df_raw)} rows, {len(df_raw.columns)} columns from {filename}")
+                        
+                        # Auto-map columns (use first file as template or saved mapping)
+                        if len(st.session_state.processed_files) == 0:  # First file determines mapping
+                            saved_mapping = load_mapping(list(df_raw.columns))
+                            if saved_mapping:
+                                mappings = saved_mapping
+                                st.session_state.mappings = mappings
+                                print(f"✅ Using saved column mapping for {filename}")
+                            else:
+                                mappings = auto_map_columns(df_raw)
+                                st.session_state.mappings = mappings
+                                print(f"✅ Auto-mapped columns for {filename}")
+                        else:
+                            # Use same mapping for subsequent files
+                            mappings = st.session_state.mappings
+                            print(f"✅ Using existing mapping for {filename}")
+                        
+                        # Auto-clean data
+                        print(f"🧹 Auto-cleaning {filename}...")
+                        df_cleaned, cleaning_report = clean_dataframe_transaction_aware(df_raw, mappings)
+                        print(f"✅ Cleaned {filename}: {len(df_cleaned)} rows")
+                        
+                        # Store to database (APPEND mode for subsequent files)
+                        mode = "append" if upload_mode == "Append to existing data" or len(st.session_state.processed_files) > 0 else "replace"
+                        print(f"💾 Storing {filename} in {mode} mode...")
+                        
+                        # Save raw and cleaned data
+                        try:
+                            raw_path, cleaned_path = save_raw_and_cleaned_data(df_raw, df_cleaned, filename)
+                            print(f"✅ Saved {filename} to: {cleaned_path}")
+                        except Exception as e:
+                            print(f"⚠️ Warning saving {filename}: {e}")
+                        
+                        # Store to database
+                        result = robust_ingest_csv(df_cleaned, mappings, filename, mode)
+                        print(f"📊 Ingestion result for {filename}: {result}")
+                        
+                        if "✅" in result:
+                            successful_files += 1
+                            total_rows_processed += len(df_cleaned)
+                            
+                            # Track processed file
+                            st.session_state.uploaded_file_ids.add(file.file_id)
+                            file_metadata = {
+                                'filename': filename,
+                                'rows': len(df_cleaned),
+                                'month': df_cleaned['month_tag'].iloc[0] if 'month_tag' in df_cleaned.columns and len(df_cleaned) > 0 else 'Unknown',
+                                'status': 'success',
+                                'timestamp': current_time
+                            }
+                            st.session_state.processed_files.append(file_metadata)
+                            
+                            st.success(f"✅ {filename}: {len(df_cleaned)} rows loaded")
+                            print(f"✅ Successfully processed {filename}: {len(df_cleaned)} rows")
+                        else:
+                            failed_files += 1
+                            print(f"❌ Failed to process {filename}: {result}")
+                            
+                            # Track failed file
+                            st.session_state.uploaded_file_ids.add(file.file_id)
+                            file_metadata = {
+                                'filename': filename,
+                                'rows': 0,
+                                'month': 'Failed',
+                                'status': 'failed',
+                                'timestamp': current_time,
+                                'error': result
+                            }
+                            st.session_state.processed_files.append(file_metadata)
+                        
+                    except Exception as e:
+                        failed_files += 1
+                        error_msg = f"Error processing {file.name}: {e}"
+                        st.error(error_msg)
+                        print(f"❌ {error_msg}")
+                        
+                        # Track failed file
+                        st.session_state.uploaded_file_ids.add(file.file_id)
+                        file_metadata = {
+                            'filename': file.name,
+                            'rows': 0,
+                            'month': 'Failed',
+                            'status': 'failed',
+                            'timestamp': current_time,
+                            'error': str(e)
+                        }
+                        st.session_state.processed_files.append(file_metadata)
+                
+                # Clear progress bar
+                progress_bar.empty()
+                status_text.empty()
+                
+                # Update session state
+                st.session_state.total_rows_loaded += total_rows_processed
+                st.session_state.last_upload_time = current_time
+                st.session_state.has_existing_data = True
+                
+                # Show results
+                if successful_files > 0:
+                    st.success(f"✅ **Processed {successful_files}/{len(new_files)} files successfully!**")
+                    st.success(f"📊 **Total rows loaded**: {total_rows_processed:,}")
+                    
+                    # Verify total data in database
+                    conn = sqlite3.connect(DB_FILE)
+                    cursor = conn.cursor()
+                    cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
+                    total_db_rows = cursor.fetchone()[0]
+                    conn.close()
+                    
+                    st.info(f"🗄️ **Total rows in database**: {total_db_rows:,}")
+                    print(f"✅ PROCESSING COMPLETE: {successful_files}/{len(new_files)} files, {total_rows_processed} rows")
+                
+                if failed_files > 0:
+                    st.warning(f"⚠️ **{failed_files} files failed to process**")
+                
+                # Force rerun ONCE after processing all files
+                st.rerun()
+            else:
+                st.info("All uploaded files have already been processed.")
+        
+        # Display processed files summary
+        if st.session_state.processed_files:
+            st.markdown("### 📊 Loaded Files")
+            for pf in st.session_state.processed_files:
+                status_icon = "✅" if pf['status'] == 'success' else "❌"
+                st.text(f"{status_icon} {pf['filename']} ({pf['rows']} rows)")
+            
+            # Debug actions
+            st.markdown("---")
+            st.markdown("### 🔧 Debug Actions")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("📊 Show DB Info", help="Show active database path and row counts"):
+                    db_info = debug_db_info()
+                    st.text_area("Database Information", db_info, height=150)
+            
+            with col2:
+                if st.button("🔍 Check Recent Files", help="Show recently processed files"):
+                    recent_files = st.session_state.processed_files[-5:]  # Last 5 files
+                    file_info = "Recent Files:\n"
+                    for file_data in recent_files:
+                        status_icon = "✅" if file_data['status'] == 'success' else "❌"
+                        file_info += f"{status_icon} {file_data['filename']} - {file_data['rows']} rows ({file_data['month']})\n"
+                    st.text_area("Recent Files", file_info, height=150)
     
     # Main content area
-    if st.session_state.uploaded_df is not None or st.session_state.has_existing_data:
+    if st.session_state.uploaded_df is not None or st.session_state.has_existing_data or st.session_state.processed_files:
         # Show mapping modal if needed
         if st.session_state.show_mapping_modal:
             st.markdown("---")
             st.markdown("### 🤔 Confirm Column Mapping")
             st.markdown("*Please select the correct column for each field:*")
             
-            df = st.session_state.uploaded_df
+            # Get the first uploaded file for mapping
+            if st.session_state.uploaded_files:
+                first_file = list(st.session_state.uploaded_files.keys())[0]
+                df = st.session_state.uploaded_files[first_file]['dataframe']
+            else:
+                df = st.session_state.uploaded_df
             ambiguous = [field for field, header in st.session_state.mappings.items() 
                         if header is None and any(normalize_header(h) in 
                         [normalize_header(s) for s in SYNONYMS.get(field, [])] 
