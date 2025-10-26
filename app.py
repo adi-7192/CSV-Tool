@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import plotly.express as px
 import plotly.graph_objects as go
+from db_manager import store_data, query_data, clear_database, get_row_count, table_exists
 
 # Constants
 DB_FILE = 'data.db'
@@ -406,8 +407,32 @@ def load_mapping(headers: List[str]) -> Optional[Dict[str, str]]:
     except: return None
 
 def format_inr(amount: float) -> str:
-    """Format amount as INR with thousand separators"""
-    return f"₹{amount:,.2f}"
+    """Format amount as INR with Indian number formatting (lakhs and crores)"""
+    if amount == 0:
+        return "₹0"
+    
+    # Handle negative amounts
+    is_negative = amount < 0
+    amount = abs(amount)
+    
+    # Indian number formatting
+    if amount >= 10000000:  # 1 crore = 10 million
+        crores = amount / 10000000
+        if crores >= 100:
+            return f"₹{crores:.1f} Cr" if not is_negative else f"-₹{crores:.1f} Cr"
+        else:
+            return f"₹{crores:.2f} Cr" if not is_negative else f"-₹{crores:.2f} Cr"
+    
+    elif amount >= 100000:  # 1 lakh = 100 thousand
+        lakhs = amount / 100000
+        return f"₹{lakhs:.2f} L" if not is_negative else f"-₹{lakhs:.2f} L"
+    
+    elif amount >= 1000:  # Thousands
+        thousands = amount / 1000
+        return f"₹{thousands:.1f}K" if not is_negative else f"-₹{thousands:.1f}K"
+    
+    else:  # Less than 1000
+        return f"₹{amount:.0f}" if not is_negative else f"-₹{amount:.0f}"
 
 def create_product_identifier(sku: str, asin: str) -> str:
     """Create combined SKU/ASIN identifier for product display in format: SKU (ASIN)"""
@@ -606,6 +631,7 @@ def clean_dataframe_transaction_aware(df: pd.DataFrame, mappings: Dict[str, Opti
                 cleaned_df.at[idx, 'revenue_calc'] = 0.0
                 cleaned_df.at[idx, 'needs_estimation'] = True
                 cleaned_df.at[idx, 'shipping_loss_calc'] = 0.0  # Placeholder
+                cleaned_df.at[idx, 'units_sold_calc'] = int(qty) if pd.notna(qty) and qty > 0 else 1  # Preserve quantity for cost calculation
         
         # Summary after processing
         total_revenue_calc = cleaned_df['revenue_calc'].sum()
@@ -613,11 +639,16 @@ def clean_dataframe_transaction_aware(df: pd.DataFrame, mappings: Dict[str, Opti
         negative_revenue = (cleaned_df['revenue_calc'] < 0).sum()
         zero_revenue = (cleaned_df['revenue_calc'] == 0).sum()
         
+        # Count FreeReplacement transactions processed
+        freereplacement_count = (cleaned_df['transaction_type'] == 'FreeReplacement').sum()
+        freereplacement_units = cleaned_df[cleaned_df['transaction_type'] == 'FreeReplacement']['units_sold_calc'].sum()
+        
         print(f"\n✅ Derived columns created:")
         print(f"   Total revenue_calc: ₹{total_revenue_calc:,.2f}")
         print(f"   Rows with positive revenue_calc: {positive_revenue}")
         print(f"   Rows with negative revenue_calc: {negative_revenue}")
         print(f"   Rows with zero revenue_calc: {zero_revenue}")
+        print(f"   FreeReplacement transactions: {freereplacement_count} (total units: {freereplacement_units})")
     else:
         print(f"⚠️ WARNING: Could not create derived columns - missing transaction_type or revenue_amount columns!")
     
@@ -694,6 +725,14 @@ def clean_dataframe_transaction_aware(df: pd.DataFrame, mappings: Dict[str, Opti
         ]
     }
     
+    # Add month tag for easy filtering
+    if 'Invoice Date' in cleaned_df.columns and cleaned_df['Invoice Date'].notna().any():
+        cleaned_df['month_tag'] = pd.to_datetime(cleaned_df['Invoice Date'], errors='coerce').dt.to_period('M').astype(str)
+        print(f"✅ Added month_tag column")
+    else:
+        cleaned_df['month_tag'] = None
+        print(f"⚠️ No valid Invoice Date found, month_tag set to None")
+    
     if 'transaction_type' in cleaned_df.columns:
         report['cleaning_steps'].append("📊 Transaction type breakdown:")
         for txn, count in cleaned_df['transaction_type'].value_counts(dropna=False).items():
@@ -730,7 +769,7 @@ def calculate_transaction_revenue(df: pd.DataFrame) -> Dict:
         refunds = abs(df[df['revenue_calc'] < 0]['revenue_calc'].sum())
         shipping_loss = df['shipping_loss_calc'].sum()
         units_sold = df['units_sold_calc'].sum() if 'units_sold_calc' in df.columns else 0
-        orders = df['order_id'].nunique() if 'order_id' in df.columns else 0
+        orders = df['Invoice Number'].nunique() if 'Invoice Number' in df.columns else 0
         
         # Calculate FreeReplacement cost estimation
         free_replacement_cost = 0.0
@@ -776,7 +815,7 @@ def calculate_transaction_revenue(df: pd.DataFrame) -> Dict:
                         'count': len(txn_data),
                         'revenue': txn_data['revenue_calc'].sum(),
                         'units': txn_data['units_sold_calc'].sum() if 'units_sold_calc' in txn_data.columns else 0,
-                        'orders': txn_data['order_id'].nunique() if 'order_id' in txn_data.columns else 0,
+                        'orders': txn_data['Invoice Number'].nunique() if 'Invoice Number' in txn_data.columns else 0,
                         'description': f'{txn} transactions'
                     }
         
@@ -805,7 +844,7 @@ def calculate_transaction_revenue(df: pd.DataFrame) -> Dict:
         # Legacy calculation - treat all as shipments
         gross_revenue = df['revenue_in_inr'].sum() if 'revenue_in_inr' in df.columns else 0.0
         units_sold = df['quantity'].sum() if 'quantity' in df.columns else 0
-        orders = df['order_id'].nunique() if 'order_id' in df.columns else 0
+        orders = df['Invoice Number'].nunique() if 'Invoice Number' in df.columns else 0
         aov = gross_revenue / orders if orders > 0 else 0.0
         
         return {
@@ -870,7 +909,7 @@ def calculate_transaction_revenue(df: pd.DataFrame) -> Dict:
             # Shipment: positive revenue contribution
             revenue = type_data['revenue_in_inr'].sum()
             units = type_data['quantity'].sum()
-            orders = type_data['order_id'].nunique() if 'order_id' in type_data.columns else 0
+            orders = type_data['Invoice Number'].nunique() if 'Invoice Number' in type_data.columns else 0
             
             results['gross_revenue'] += revenue
             results['units_sold'] += units
@@ -1175,8 +1214,8 @@ def robust_ingest_csv(df: pd.DataFrame, mappings: Dict[str, Optional[str]], file
         clean_df["needs_estimation"] = df["needs_estimation"] if "needs_estimation" in df.columns else False
         
         # Add month tag for easy filtering
-        if clean_df["order_date"].notna().any():
-            clean_df["month_tag"] = pd.to_datetime(clean_df["order_date"], errors='coerce').dt.to_period('M').astype(str)
+        if clean_df["Invoice Date"].notna().any():
+            clean_df["month_tag"] = pd.to_datetime(clean_df["Invoice Date"], errors='coerce').dt.to_period('M').astype(str)
         else:
             clean_df["month_tag"] = None
         
@@ -1360,8 +1399,8 @@ def store_sales_data(df: pd.DataFrame, mappings: Dict[str, Optional[str]], filen
         clean_df["upload_date"] = current_time
         
         # Add month tag for easy filtering
-        if clean_df["order_date"].notna().any():
-            clean_df["month_tag"] = pd.to_datetime(clean_df["order_date"], errors='coerce').dt.to_period('M').astype(str)
+        if clean_df["Invoice Date"].notna().any():
+            clean_df["month_tag"] = pd.to_datetime(clean_df["Invoice Date"], errors='coerce').dt.to_period('M').astype(str)
         else:
             clean_df["month_tag"] = None
         
@@ -1473,16 +1512,10 @@ def store_sales_data(df: pd.DataFrame, mappings: Dict[str, Optional[str]], filen
 
 def check_existing_data() -> bool:
     """Check if there's existing data in the database"""
-    if not os.path.exists(DB_FILE):
-        return False
-    
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count > 0
+        # Use DuckDB instead of SQLite
+        row_count = get_row_count('sales')
+        return row_count > 0
     except:
         return False
 
@@ -1516,77 +1549,67 @@ def get_dataset_registry() -> List[Dict]:
 
 def get_total_data_summary() -> Dict:
     """Get summary of all stored data"""
-    if not os.path.exists(DB_FILE):
-        return {}
-    
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        
+        # Use DuckDB instead of SQLite
         # Total rows
-        cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
-        total_rows = cursor.fetchone()[0]
+        total_rows = get_row_count('sales')
         
         # Date range
-        cursor.execute(f'SELECT MIN(order_date), MAX(order_date) FROM {TABLE_NAME} WHERE order_date IS NOT NULL')
-        date_range = cursor.fetchone()
+        date_query = query_data('SELECT MIN("Invoice Date") as min_date, MAX("Invoice Date") as max_date FROM sales WHERE "Invoice Date" IS NOT NULL')
+        date_range = None
+        if not date_query.empty:
+            min_date = date_query.iloc[0]['min_date']
+            max_date = date_query.iloc[0]['max_date']
+            date_range = (min_date, max_date)
         
-        # Data sources
-        cursor.execute(f'SELECT COUNT(DISTINCT data_source) FROM {TABLE_NAME}')
-        data_sources = cursor.fetchone()[0]
-        
-        conn.close()
+        # Data sources (use processed files count as proxy)
+        try:
+            data_sources = len(st.session_state.processed_files) if hasattr(st.session_state, 'processed_files') and st.session_state.processed_files else 0
+        except:
+            data_sources = 0
         
         return {
             'total_rows': total_rows,
-            'date_range_start': date_range[0],
-            'date_range_end': date_range[1],
+            'date_range_start': date_range[0] if date_range and date_range[0] else None,
+            'date_range_end': date_range[1] if date_range and date_range[1] else None,
             'data_sources': data_sources
         }
-    except:
+    except Exception as e:
+        print(f"Error getting data summary: {e}")
         return {}
 
 def debug_db_info() -> str:
     """Debug function to show active DB path and row counts"""
     try:
-        if not os.path.exists(DB_FILE):
-            return f"❌ Database file not found at: {DB_ABSOLUTE_PATH}"
+        # Use DuckDB instead of SQLite
+        if not table_exists('sales'):
+            return f"❌ Sales table not found in DuckDB database"
         
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
+        # Get row counts using DuckDB
+        total_rows = get_row_count('sales')
         
-        # Check if sales table exists
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (TABLE_NAME,))
-        if not cursor.fetchone():
-            conn.close()
-            return f"❌ Sales table not found in database at: {DB_ABSOLUTE_PATH}"
+        # Get unique records count
+        unique_query = query_data(f'SELECT COUNT(DISTINCT "Invoice Number" || \'|\' || "Sku" || \'|\' || "Invoice Date") as unique_count FROM sales')
+        unique_keys = unique_query.iloc[0]['unique_count'] if not unique_query.empty else 0
         
-        # Get row counts
-        cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
-        total_rows = cursor.fetchone()[0]
+        # Get data sources count
+        sources_query = query_data(f'SELECT COUNT(DISTINCT "Invoice Number") as sources FROM sales')
+        data_sources = sources_query.iloc[0]['sources'] if not sources_query.empty else 0
         
-        cursor.execute(f'SELECT COUNT(DISTINCT normalized_order_id || "|" || normalized_sku || "|" || normalized_order_date) FROM {TABLE_NAME}')
-        unique_keys = cursor.fetchone()[0]
-        
-        cursor.execute(f'SELECT COUNT(DISTINCT data_source) FROM {TABLE_NAME}')
-        data_sources = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        return f"""📊 Database Info:
-🗄️ Path: {DB_ABSOLUTE_PATH}
+        return f"""📊 DuckDB Database Info:
+🗄️ Path: data/analytics.duckdb
 📈 Total rows: {total_rows:,}
 🔑 Unique composite keys: {unique_keys:,}
 📁 Data sources: {data_sources}"""
         
     except Exception as e:
-        return f"❌ Error checking database: {e}"
+        return f"❌ Error checking DuckDB: {e}"
 
 def debug_check_duplicates(df: pd.DataFrame, mappings: Dict[str, Optional[str]]) -> str:
     """Debug function to check potential duplicates in incoming file"""
     try:
-        if not os.path.exists(DB_FILE):
-            return "❌ No existing database to check against"
+        if not table_exists('sales'):
+            return "❌ No existing DuckDB database to check against"
         
         # Create normalized keys for incoming data
         incoming_keys = []
@@ -1602,21 +1625,16 @@ def debug_check_duplicates(df: pd.DataFrame, mappings: Dict[str, Optional[str]])
         if not incoming_keys:
             return "❌ No valid keys found in incoming data"
         
-        # Check against existing database
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        
+        # Check against existing DuckDB database
         duplicates_found = []
         for i, (norm_order_id, norm_sku, norm_order_date) in enumerate(incoming_keys[:5]):  # Check first 5
-            cursor.execute(f'''
-                SELECT COUNT(*) FROM {TABLE_NAME} 
-                WHERE normalized_order_id = ? AND normalized_sku = ? AND normalized_order_date = ?
-            ''', (norm_order_id, norm_sku, norm_order_date))
+            duplicate_query = query_data(f'''
+                SELECT COUNT(*) as count FROM sales 
+                WHERE "Invoice Number" = ? AND "Sku" = ? AND "Invoice Date" = ?
+            ''', [norm_order_id, norm_sku, norm_order_date])
             
-            if cursor.fetchone()[0] > 0:
+            if not duplicate_query.empty and duplicate_query.iloc[0]['count'] > 0:
                 duplicates_found.append(f"Row {i+1}: {norm_order_id}|{norm_sku}|{norm_order_date}")
-        
-        conn.close()
         
         if duplicates_found:
             return f"⚠️ Found {len(duplicates_found)} potential duplicates:\n" + "\n".join(duplicates_found)
@@ -1628,55 +1646,50 @@ def debug_check_duplicates(df: pd.DataFrame, mappings: Dict[str, Optional[str]])
 
 def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str = None, month_tags: list = None) -> Optional[pd.DataFrame]:
     """Get filtered data for date range and optional transaction type"""
-    if not os.path.exists(DB_FILE): 
-        print(f"Database file not found: {DB_FILE}")
+    if not table_exists('sales'): 
+        print(f"DuckDB table 'sales' not found")
         return None
     
     try:
-        conn = sqlite3.connect(DB_FILE)
-        
-        # First, check if table exists and has data
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
-        total_rows = cursor.fetchone()[0]
-        print(f"✅ Total rows in database: {total_rows}")
+        # Check if table has data using DuckDB
+        total_rows = get_row_count('sales')
+        print(f"✅ Total rows in DuckDB: {total_rows}")
         
         if total_rows == 0:
-            print("❌ No data in database")
-            conn.close()
+            print("❌ No data in DuckDB")
             return None
         
-        # Check date range in database
-        cursor.execute(f"SELECT MIN(order_date), MAX(order_date) FROM {TABLE_NAME} WHERE order_date IS NOT NULL")
-        db_date_range = cursor.fetchone()
-        print(f"📅 Database date range: {db_date_range[0]} to {db_date_range[1]}")
+        # Check date range in DuckDB
+        date_range_query = query_data(f'SELECT MIN("Invoice Date") as min_date, MAX("Invoice Date") as max_date FROM sales WHERE "Invoice Date" IS NOT NULL')
+        if not date_range_query.empty:
+            db_date_range = (date_range_query.iloc[0]['min_date'], date_range_query.iloc[0]['max_date'])
+            print(f"📅 DuckDB date range: {db_date_range[0]} to {db_date_range[1]}")
         print(f"📅 Requested date range: {start_date} to {end_date}")
         
-        # Build query with optional transaction type and month filters
-        base_query = f"""
-            SELECT * FROM {TABLE_NAME} 
-            WHERE order_date >= ? AND order_date <= ?
-        """
-        params = [start_date, end_date]
-        
+        # Build query with parameters inline (DuckDB doesn't support parameterized queries the same way)
         if transaction_type and transaction_type != "All":
-            base_query += " AND transaction_type = ?"
-            params.append(transaction_type)
+            base_query = f"""
+                SELECT * FROM sales 
+                WHERE "Invoice Date" >= '{start_date}' AND "Invoice Date" <= '{end_date}' AND "Transaction Type" = '{transaction_type}'
+            """
+        else:
+            base_query = f"""
+                SELECT * FROM sales 
+                WHERE "Invoice Date" >= '{start_date}' AND "Invoice Date" <= '{end_date}'
+            """
         
         # Add month_tag filtering if specified
         if month_tags and len(month_tags) > 0:
-            placeholders = ','.join(['?' for _ in month_tags])
-            base_query += f" AND month_tag IN ({placeholders})"
-            params.extend(month_tags)
+            month_list = "', '".join(month_tags)
+            base_query += f" AND month_tag IN ('{month_list}')"
         
-        base_query += " ORDER BY order_date"
+        base_query += ' ORDER BY "Invoice Date"'
         
-        print(f"🔍 Executing query with params: {params}")
+        print(f"🔍 Executing DuckDB query: {base_query}")
         
-        df = pd.read_sql_query(base_query, conn, params=params)
-        conn.close()
+        df = query_data(base_query)
         
-        print(f"✅ Query returned {len(df)} rows")
+        print(f"✅ DuckDB query returned {len(df)} rows")
         
         if df.empty: 
             print("❌ Query returned empty result")
@@ -1712,17 +1725,15 @@ def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str
         
         print("\n" + "="*50 + "\n")
         
-        # Convert order_date to datetime
-        df['order_date'] = pd.to_datetime(df['order_date'], errors='coerce')
-        df = df.dropna(subset=['order_date'])
+        # Convert Invoice Date to datetime
+        df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+        df = df.dropna(subset=['Invoice Date'])
         
         # Ensure numeric columns are properly typed
-        if 'revenue_in_inr' in df.columns:
-            df['revenue_in_inr'] = pd.to_numeric(df['revenue_in_inr'], errors='coerce').fillna(0.0)
-        if 'shipping_amount' in df.columns:
-            df['shipping_amount'] = pd.to_numeric(df['shipping_amount'], errors='coerce').fillna(0.0)
-        if 'quantity' in df.columns:
-            df['quantity'] = pd.to_numeric(df['quantity'], errors='coerce').fillna(0)
+        if 'Invoice Amount' in df.columns:
+            df['Invoice Amount'] = pd.to_numeric(df['Invoice Amount'], errors='coerce').fillna(0.0)
+        if 'Quantity' in df.columns:
+            df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0)
         
         print(f"✅ After date conversion and type casting: {len(df)} rows")
         return df
@@ -1733,20 +1744,594 @@ def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str
         traceback.print_exc()
         return None
 
+def get_months_in_date_range(start_date: str, end_date: str) -> list:
+    """Get all months within the specified date range from database"""
+    try:
+        # Query database for distinct months in the date range using DuckDB-compatible syntax
+        # Cast VARCHAR to DATE first, then extract components
+        query = f"""
+            SELECT DISTINCT 
+                EXTRACT(year FROM CAST("Invoice Date" AS DATE)) as year,
+                EXTRACT(month FROM CAST("Invoice Date" AS DATE)) as month,
+                strftime('%Y-%m', CAST("Invoice Date" AS DATE)) as month_tag,
+                strftime('%B %Y', CAST("Invoice Date" AS DATE)) as month_display
+            FROM sales 
+            WHERE CAST("Invoice Date" AS DATE) >= '{start_date}' 
+            AND CAST("Invoice Date" AS DATE) <= '{end_date}'
+            AND "Invoice Date" IS NOT NULL
+            ORDER BY year, month
+        """
+        
+        months_df = query_data(query)
+        
+        if months_df.empty:
+            return []
+        
+        # Convert to list of dictionaries with month info
+        months = []
+        for _, row in months_df.iterrows():
+            months.append({
+                'year': int(row['year']),
+                'month': int(row['month']),
+                'month_tag': row['month_tag'],
+                'month_display': row['month_display'],
+                'month_name': row['month_display'].split()[0]  # Just the month name
+            })
+        
+        return months
+    except Exception as e:
+        print(f"Error getting months in date range: {e}")
+        return []
+
+def get_month_metrics(start_date: str, end_date: str, month_tag: str) -> dict:
+    """Get key metrics for a specific month"""
+    try:
+        query = f"""
+            SELECT 
+                COUNT(DISTINCT "Invoice Number") as order_count,
+                COUNT(DISTINCT "Sku") as sku_count,
+                SUM(revenue_calc) as total_revenue,
+                SUM(units_sold_calc) as total_units,
+                COUNT(*) as total_records
+            FROM sales 
+            WHERE CAST("Invoice Date" AS DATE) >= '{start_date}' 
+            AND CAST("Invoice Date" AS DATE) <= '{end_date}'
+            AND strftime('%Y-%m', CAST("Invoice Date" AS DATE)) = '{month_tag}'
+        """
+        
+        result = query_data(query)
+        
+        if result.empty:
+            return {
+                'order_count': 0,
+                'sku_count': 0,
+                'total_revenue': 0.0,
+                'total_units': 0,
+                'total_records': 0
+            }
+        
+        row = result.iloc[0]
+        return {
+            'order_count': int(row['order_count']) if pd.notna(row['order_count']) else 0,
+            'sku_count': int(row['sku_count']) if pd.notna(row['sku_count']) else 0,
+            'total_revenue': float(row['total_revenue']) if pd.notna(row['total_revenue']) else 0.0,
+            'total_units': int(row['total_units']) if pd.notna(row['total_units']) else 0,
+            'total_records': int(row['total_records']) if pd.notna(row['total_records']) else 0
+        }
+    except Exception as e:
+        print(f"Error getting month metrics for {month_tag}: {e}")
+        return {
+            'order_count': 0,
+            'sku_count': 0,
+            'total_revenue': 0.0,
+            'total_units': 0,
+            'total_records': 0
+        }
+
+
+def debug_transaction_types():
+    """Debug function to check what transaction types exist in the database"""
+    try:
+        result = query_data('SELECT DISTINCT transaction_type FROM sales ORDER BY transaction_type')
+        print("Transaction types in database:")
+        for row in result.itertuples():
+            print(f"  - '{row.transaction_type}'")
+        
+        # Check counts for each type
+        counts = query_data('SELECT transaction_type, COUNT(*) as count FROM sales GROUP BY transaction_type ORDER BY count DESC')
+        print("\nTransaction type counts:")
+        for row in counts.itertuples():
+            print(f"  {row.transaction_type}: {row.count} records")
+            
+    except Exception as e:
+        print(f"Error checking transaction types: {e}")
+
+
+def calculate_asin_average_prices():
+    """
+    Calculate average prices for each ASIN from Shipment transactions.
+    This provides the baseline pricing for free replacement cost calculations.
+    
+    Returns:
+        dict: Dictionary mapping ASIN to average price
+    """
+    try:
+        query = """
+            SELECT 
+                "Asin",
+                COUNT(*) as transaction_count,
+                AVG(ABS("Invoice Amount")) as avg_price,
+                MIN(ABS("Invoice Amount")) as min_price,
+                MAX(ABS("Invoice Amount")) as max_price,
+                STDDEV(ABS("Invoice Amount")) as price_stddev
+            FROM sales 
+            WHERE transaction_type = 'Shipment' 
+            AND "Asin" IS NOT NULL 
+            AND "Asin" != ''
+            AND ABS("Invoice Amount") > 0
+            GROUP BY "Asin"
+            HAVING COUNT(*) >= 3
+            ORDER BY transaction_count DESC
+        """
+        
+        result = query_data(query)
+        
+        if result.empty:
+            print("⚠️ No ASIN pricing data found")
+            return {}
+        
+        asin_prices = {}
+        for _, row in result.iterrows():
+            asin = row['Asin']
+            avg_price = float(row['avg_price'])
+            transaction_count = int(row['transaction_count'])
+            price_stddev = float(row['price_stddev']) if pd.notna(row['price_stddev']) else 0
+            
+            # Use median if standard deviation is too high (outliers present)
+            if price_stddev > avg_price * 0.5:  # High variance indicates outliers
+                median_query = f"""
+                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ABS("Invoice Amount")) as median_price
+                    FROM sales 
+                    WHERE transaction_type = 'Shipment' 
+                    AND "Asin" = '{asin}'
+                    AND ABS("Invoice Amount") > 0
+                """
+                median_result = query_data(median_query)
+                if not median_result.empty:
+                    avg_price = float(median_result.iloc[0]['median_price'])
+            
+            asin_prices[asin] = {
+                'avg_price': avg_price,
+                'transaction_count': transaction_count,
+                'min_price': float(row['min_price']),
+                'max_price': float(row['max_price']),
+                'price_stddev': price_stddev
+            }
+        
+        print(f"✅ Calculated average prices for {len(asin_prices)} ASINs")
+        return asin_prices
+        
+    except Exception as e:
+        print(f"❌ Error calculating ASIN average prices: {e}")
+        return {}
+
+
+def calculate_free_replacement_cost(start_date: str, end_date: str, month_tag: str = None):
+    """
+    Calculate the true cost impact of free replacements using ASIN-based average pricing.
+    
+    Args:
+        start_date (str): Start date for filtering
+        end_date (str): End date for filtering  
+        month_tag (str): Optional month tag for specific month filtering
+        
+    Returns:
+        dict: Detailed breakdown of free replacement costs
+    """
+    try:
+        # Get ASIN average prices
+        asin_prices = calculate_asin_average_prices()
+        
+        if not asin_prices:
+            print("⚠️ No ASIN pricing data available for free replacement calculation")
+            return {
+                'total_cost': 0.0,
+                'transaction_count': 0,
+                'asin_breakdown': {},
+                'fallback_used': True,
+                'overall_avg_price': 0.0
+            }
+        
+        # Build date filter condition
+        date_filter = f"""
+            CAST("Invoice Date" AS DATE) >= '{start_date}' 
+            AND CAST("Invoice Date" AS DATE) <= '{end_date}'
+        """
+        
+        if month_tag:
+            date_filter += f" AND strftime('%Y-%m', CAST(\"Invoice Date\" AS DATE)) = '{month_tag}'"
+        
+        # Query free replacement transactions
+        query = f"""
+            SELECT 
+                "Asin",
+                COUNT(*) as replacement_count,
+                SUM(ABS(units_sold_calc)) as total_units
+            FROM sales 
+            WHERE transaction_type IN ('FreeReplacement', 'Free Replacement', 'Free_Replacement')
+            AND {date_filter}
+            AND "Asin" IS NOT NULL 
+            AND "Asin" != ''
+            GROUP BY "Asin"
+            ORDER BY replacement_count DESC
+        """
+        
+        result = query_data(query)
+        
+        if result.empty:
+            print(f"ℹ️ No free replacement transactions found for the specified period")
+            return {
+                'total_cost': 0.0,
+                'transaction_count': 0,
+                'asin_breakdown': {},
+                'fallback_used': False,
+                'overall_avg_price': 0.0
+            }
+        
+        # Calculate overall average price as fallback
+        overall_avg_query = f"""
+            SELECT AVG(ABS("Invoice Amount")) as overall_avg
+            FROM sales 
+            WHERE transaction_type = 'Shipment'
+            AND {date_filter}
+            AND ABS("Invoice Amount") > 0
+        """
+        overall_avg_result = query_data(overall_avg_query)
+        overall_avg_price = float(overall_avg_result.iloc[0]['overall_avg']) if not overall_avg_result.empty else 0.0
+        
+        # Calculate costs for each ASIN
+        total_cost = 0.0
+        total_transactions = 0
+        asin_breakdown = {}
+        fallback_used = False
+        
+        for _, row in result.iterrows():
+            asin = row['Asin']
+            replacement_count = int(row['replacement_count'])
+            total_units = int(row['total_units'])
+            
+            # Get average price for this ASIN
+            if asin in asin_prices:
+                avg_price = asin_prices[asin]['avg_price']
+                price_source = 'asin_specific'
+            else:
+                avg_price = overall_avg_price
+                price_source = 'overall_average'
+                fallback_used = True
+                print(f"⚠️ Using overall average price for ASIN {asin} (no specific pricing data)")
+            
+            # Calculate cost: 2x average price per unit (original + replacement)
+            asin_cost = total_units * avg_price * 2
+            total_cost += asin_cost
+            total_transactions += replacement_count
+            
+            asin_breakdown[asin] = {
+                'replacement_count': replacement_count,
+                'total_units': total_units,
+                'avg_price': avg_price,
+                'cost_per_unit': avg_price * 2,
+                'total_cost': asin_cost,
+                'price_source': price_source
+            }
+        
+        print(f"✅ Free replacement cost calculation complete:")
+        print(f"   Total transactions: {total_transactions}")
+        print(f"   Total units: {sum(b['total_units'] for b in asin_breakdown.values())}")
+        print(f"   Total cost: ₹{total_cost:,.2f}")
+        print(f"   Fallback pricing used: {fallback_used}")
+        
+        return {
+            'total_cost': total_cost,
+            'transaction_count': total_transactions,
+            'asin_breakdown': asin_breakdown,
+            'fallback_used': fallback_used,
+            'overall_avg_price': overall_avg_price
+        }
+        
+    except Exception as e:
+        print(f"❌ Error calculating free replacement cost: {e}")
+        return {
+            'total_cost': 0.0,
+            'transaction_count': 0,
+            'asin_breakdown': {},
+            'fallback_used': True,
+            'overall_avg_price': 0.0
+        }
+
+
+def display_free_replacement_breakdown(metrics: dict):
+    """
+    Display detailed breakdown of free replacement costs in the UI.
+    
+    Args:
+        metrics (dict): Metrics dictionary containing free_replacement_breakdown
+    """
+    if 'free_replacement_breakdown' not in metrics:
+        return
+    
+    breakdown = metrics['free_replacement_breakdown']
+    
+    if breakdown['transaction_count'] == 0:
+        st.info("ℹ️ No free replacement transactions found for this period.")
+        return
+    
+    # Display summary
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            label="🎁 Free Replacements",
+            value=f"{breakdown['transaction_count']:,}",
+            help="Number of free replacement transactions"
+        )
+    with col2:
+        st.metric(
+            label="💰 Total Cost Impact",
+            value=format_inr(breakdown['total_cost']),
+            help="True business cost (2x average ASIN price)"
+        )
+    with col3:
+        avg_cost_per_unit = breakdown['total_cost'] / sum(b['total_units'] for b in breakdown['asin_breakdown'].values()) if sum(b['total_units'] for b in breakdown['asin_breakdown'].values()) > 0 else 0
+        st.metric(
+            label="📊 Avg Cost per Unit",
+            value=format_inr(avg_cost_per_unit),
+            help="Average cost per replacement unit"
+        )
+    
+    # Display detailed breakdown
+    if breakdown['asin_breakdown']:
+        st.markdown("#### 🔍 **ASIN Breakdown**")
+        
+        # Create a DataFrame for better display
+        breakdown_data = []
+        for asin, data in breakdown['asin_breakdown'].items():
+            breakdown_data.append({
+                'ASIN': asin,
+                'Replacements': data['replacement_count'],
+                'Units': data['total_units'],
+                'Avg Price': format_inr(data['avg_price']),
+                'Cost per Unit': format_inr(data['cost_per_unit']),
+                'Total Cost': format_inr(data['total_cost']),
+                'Price Source': 'ASIN-specific' if data['price_source'] == 'asin_specific' else 'Overall average'
+            })
+        
+        df_breakdown = pd.DataFrame(breakdown_data)
+        st.dataframe(df_breakdown, use_container_width=True)
+        
+        # Show calculation methodology
+        with st.expander("ℹ️ **Calculation Methodology**"):
+            st.markdown("""
+            **Free Replacement Cost Calculation:**
+            
+            1. **ASIN Price Lookup**: For each free replacement ASIN, we calculate the average selling price from regular Shipment transactions
+            2. **Cost Multiplier**: Each free replacement costs 2x the average price (original product + replacement product)
+            3. **Fallback Pricing**: If no ASIN-specific pricing exists, we use the overall average product price
+            4. **Outlier Handling**: For ASINs with high price variance, we use median instead of average
+            
+            **Business Impact:**
+            - Original product cost (lost revenue)
+            - Replacement product cost (additional inventory)
+            - Shipping charges for both shipments
+            - Customer service overhead
+            
+            This gives you the true financial impact of free replacements on your business.
+            """)
+        
+        if breakdown['fallback_used']:
+            st.warning(f"⚠️ **Fallback Pricing Used**: Some ASINs used overall average price (₹{format_inr(breakdown['overall_avg_price'])}) due to insufficient pricing data.")
+
+
+def get_month_metrics_by_transaction_type(start_date: str, end_date: str, month_tag: str, transaction_type: str) -> dict:
+    """Get key metrics for a specific month filtered by transaction type"""
+    try:
+        # Define transaction type filters with common variations
+        transaction_filters = {
+            'Revenue (Shipments)': "transaction_type = 'Shipment'",
+            'Refunds': "transaction_type = 'Refund'",
+            'Free Replacements': "transaction_type IN ('FreeReplacement', 'Free Replacement', 'Free_Replacement')",
+            'All Transactions': "1=1"  # No filter
+        }
+        
+        filter_condition = transaction_filters.get(transaction_type, "1=1")
+        
+        # Debug: Print the filter condition
+        print(f"Debug: Filtering {transaction_type} with condition: {filter_condition}")
+        
+        # Special handling for Free Replacements - use ASIN-based cost calculation
+        if transaction_type == 'Free Replacements':
+            free_replacement_data = calculate_free_replacement_cost(start_date, end_date, month_tag)
+            
+            # Get basic transaction counts
+            count_query = f"""
+                SELECT 
+                    COUNT(DISTINCT "Invoice Number") as order_count,
+                    COUNT(DISTINCT "Sku") as sku_count,
+                    COUNT(*) as total_records,
+                    SUM(ABS(units_sold_calc)) as total_units
+                FROM sales 
+                WHERE CAST("Invoice Date" AS DATE) >= '{start_date}' 
+                AND CAST("Invoice Date" AS DATE) <= '{end_date}'
+                AND strftime('%Y-%m', CAST("Invoice Date" AS DATE)) = '{month_tag}'
+                AND {filter_condition}
+            """
+            
+            count_result = query_data(count_query)
+            
+            if count_result.empty:
+                return {
+                    'order_count': 0,
+                    'sku_count': 0,
+                    'total_amount': 0.0,
+                    'total_units': 0,
+                    'total_records': 0,
+                    'transaction_type': transaction_type,
+                    'free_replacement_breakdown': free_replacement_data
+                }
+            
+            row = count_result.iloc[0]
+            return {
+                'order_count': int(row['order_count']) if pd.notna(row['order_count']) else 0,
+                'sku_count': int(row['sku_count']) if pd.notna(row['sku_count']) else 0,
+                'total_amount': free_replacement_data['total_cost'],  # Use calculated cost
+                'total_units': int(row['total_units']) if pd.notna(row['total_units']) else 0,
+                'total_records': int(row['total_records']) if pd.notna(row['total_records']) else 0,
+                'transaction_type': transaction_type,
+                'free_replacement_breakdown': free_replacement_data
+            }
+        
+        # Standard calculation for other transaction types
+        query = f"""
+            SELECT 
+                COUNT(DISTINCT "Invoice Number") as order_count,
+                COUNT(DISTINCT "Sku") as sku_count,
+                SUM(CASE 
+                    WHEN transaction_type = 'Shipment' THEN ABS("Invoice Amount")
+                    WHEN transaction_type = 'Refund' THEN ABS("Invoice Amount")
+                    WHEN transaction_type = 'FreeReplacement' THEN ABS("Invoice Amount") * 2
+                    ELSE 0
+                END) as total_amount,
+                SUM(CASE 
+                    WHEN transaction_type = 'Shipment' THEN ABS(units_sold_calc)
+                    WHEN transaction_type = 'Refund' THEN ABS(units_sold_calc)
+                    WHEN transaction_type = 'FreeReplacement' THEN ABS(units_sold_calc)
+                    ELSE 0
+                END) as total_units,
+                COUNT(*) as total_records
+            FROM sales 
+            WHERE CAST("Invoice Date" AS DATE) >= '{start_date}' 
+            AND CAST("Invoice Date" AS DATE) <= '{end_date}'
+            AND strftime('%Y-%m', CAST("Invoice Date" AS DATE)) = '{month_tag}'
+            AND {filter_condition}
+            AND CASE 
+                WHEN transaction_type = 'Shipment' THEN ABS("Invoice Amount")
+                WHEN transaction_type = 'Refund' THEN ABS("Invoice Amount")
+                WHEN transaction_type = 'FreeReplacement' THEN ABS("Invoice Amount") * 2
+                ELSE 0
+            END > 0
+        """
+        
+        result = query_data(query)
+        
+        if result.empty:
+            return {
+                'order_count': 0,
+                'sku_count': 0,
+                'total_amount': 0.0,
+                'total_units': 0,
+                'total_records': 0,
+                'transaction_type': transaction_type
+            }
+        
+        row = result.iloc[0]
+        return {
+            'order_count': int(row['order_count']) if pd.notna(row['order_count']) else 0,
+            'sku_count': int(row['sku_count']) if pd.notna(row['sku_count']) else 0,
+            'total_amount': float(row['total_amount']) if pd.notna(row['total_amount']) else 0.0,
+            'total_units': int(row['total_units']) if pd.notna(row['total_units']) else 0,
+            'total_records': int(row['total_records']) if pd.notna(row['total_records']) else 0,
+            'transaction_type': transaction_type
+        }
+    except Exception as e:
+        print(f"Error getting month metrics for {month_tag} ({transaction_type}): {e}")
+        return {
+            'order_count': 0,
+            'sku_count': 0,
+            'total_amount': 0.0,
+            'total_units': 0,
+            'total_records': 0,
+            'transaction_type': transaction_type
+        }
+
+def calculate_mom_change(current_metrics: dict, previous_metrics: dict) -> dict:
+    """Calculate month-over-month percentage changes"""
+    changes = {}
+    
+    # Use 'total_amount' for transaction-specific metrics, fallback to 'total_revenue' for backward compatibility
+    amount_key = 'total_amount' if 'total_amount' in current_metrics else 'total_revenue'
+    
+    for metric in [amount_key, 'order_count', 'sku_count', 'total_units']:
+        current = current_metrics.get(metric, 0)
+        previous = previous_metrics.get(metric, 0)
+        
+        if previous > 0:
+            change_pct = ((current - previous) / previous) * 100
+            changes[metric] = {
+                'value': change_pct,
+                'direction': 'up' if change_pct > 0 else 'down' if change_pct < 0 else 'flat',
+                'formatted': f"{change_pct:+.1f}%"
+            }
+        else:
+            changes[metric] = {
+                'value': 0,
+                'direction': 'flat',
+                'formatted': "N/A"
+            }
+    
+    return changes
+
 def get_available_months() -> list:
-    """Get list of available months from database"""
-    if not os.path.exists(DB_FILE):
+    """Get list of available months from DuckDB database"""
+    if not table_exists('sales'):
+        print("❌ Sales table does not exist")
         return []
     
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT DISTINCT month_tag FROM {TABLE_NAME} WHERE month_tag IS NOT NULL ORDER BY month_tag")
-        months = [row[0] for row in cursor.fetchall()]
-        conn.close()
+        # First check if month_tag column exists
+        table_info = query_data("DESCRIBE sales")
+        columns = table_info['column_name'].tolist() if not table_info.empty else []
+        
+        if 'month_tag' not in columns:
+            print("❌ month_tag column not found in sales table")
+            # Try to extract months from Invoice Date instead
+            months_query = query_data("""
+                SELECT DISTINCT 
+                    EXTRACT(YEAR FROM "Invoice Date") as year,
+                    EXTRACT(MONTH FROM "Invoice Date") as month,
+                    CONCAT(EXTRACT(YEAR FROM "Invoice Date"), '-', LPAD(EXTRACT(MONTH FROM "Invoice Date")::VARCHAR, 2, '0')) as month_tag
+                FROM sales 
+                WHERE "Invoice Date" IS NOT NULL 
+                ORDER BY year, month
+            """)
+            if not months_query.empty:
+                months = months_query['month_tag'].tolist()
+                print(f"✅ Extracted {len(months)} months from Invoice Date: {months}")
+                return months
+            else:
+                print("❌ No valid Invoice Date found for month extraction")
+                return []
+        
+        # Use month_tag column
+        months_query = query_data("SELECT DISTINCT month_tag FROM sales WHERE month_tag IS NOT NULL ORDER BY month_tag")
+        months = months_query['month_tag'].tolist() if not months_query.empty else []
+        
+        if months:
+            print(f"✅ Found {len(months)} months in month_tag column: {months}")
+        else:
+            print("❌ No months found in month_tag column")
+            # Check if there are any rows at all
+            total_rows = get_row_count('sales')
+            print(f"📊 Total rows in sales table: {total_rows}")
+            
+            # Check sample month_tag values
+            sample_query = query_data("SELECT month_tag FROM sales LIMIT 5")
+            if not sample_query.empty:
+                sample_values = sample_query['month_tag'].tolist()
+                print(f"📊 Sample month_tag values: {sample_values}")
+        
         return months
     except Exception as e:
-        print(f"Error getting available months: {e}")
+        print(f"❌ Error getting available months from DuckDB: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def calculate_mom_comparison(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> Dict:
@@ -1757,12 +2342,12 @@ def calculate_mom_comparison(current_df: pd.DataFrame, previous_df: pd.DataFrame
     # Calculate current month metrics
     current_revenue = current_df['revenue_calc'].sum() if 'revenue_calc' in current_df.columns else 0
     current_units = current_df['units_sold_calc'].sum() if 'units_sold_calc' in current_df.columns else 0
-    current_orders = current_df['order_id'].nunique() if 'order_id' in current_df.columns else 0
+    current_orders = current_df['Invoice Number'].nunique() if 'Invoice Number' in current_df.columns else 0
     
     # Calculate previous month metrics
     prev_revenue = previous_df['revenue_calc'].sum() if 'revenue_calc' in previous_df.columns else 0
     prev_units = previous_df['units_sold_calc'].sum() if 'units_sold_calc' in previous_df.columns else 0
-    prev_orders = previous_df['order_id'].nunique() if 'order_id' in previous_df.columns else 0
+    prev_orders = previous_df['Invoice Number'].nunique() if 'Invoice Number' in previous_df.columns else 0
     
     # Calculate growth rates
     revenue_growth = ((current_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
@@ -1883,10 +2468,10 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
         kpis['status_breakdown'] = None
     
     # Revenue by region (with case normalization)
-    if 'region' in df.columns:
+    if 'Ship To City' in df.columns:
         # Normalize region names to title case for consistent grouping
         df_normalized = df.copy()
-        df_normalized['region_normalized'] = df_normalized['region'].str.strip().str.title()
+        df_normalized['region_normalized'] = df_normalized['Ship To City'].str.strip().str.title()
         
         # Use revenue_calc if revenue_in_inr is not available
         revenue_col = 'revenue_in_inr' if 'revenue_in_inr' in df.columns else 'revenue_calc'
@@ -1897,8 +2482,12 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
         kpis['region_revenue'] = None
     
     # Revenue trend
-    if 'order_date' in df.columns:
-        daily_revenue = df.groupby(df['order_date'].dt.date)['revenue_in_inr'].sum().reset_index()
+    if 'Invoice Date' in df.columns:
+        # Ensure Invoice Date is datetime before using .dt accessor
+        if df['Invoice Date'].dtype == 'object':
+            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+        
+        daily_revenue = df.groupby(df['Invoice Date'].dt.date)['revenue_calc'].sum().reset_index()
         daily_revenue.columns = ['date', 'revenue']
         kpis['revenue_trend'] = daily_revenue
     else:
@@ -1915,7 +2504,7 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
         kpis['monthly_units'] = monthly_units
         
         # Monthly orders breakdown
-        monthly_orders = df.groupby('month_tag')['order_id'].nunique().sort_index()
+        monthly_orders = df.groupby('month_tag')['Invoice Number'].nunique().sort_index()
         kpis['monthly_orders'] = monthly_orders
         
         # Top products by month
@@ -1944,27 +2533,39 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
 
 def compute_movers_decliners(df: pd.DataFrame, min_units: int = 10) -> Dict:
     """Compute fast movers and decliners"""
-    if df is None or df.empty or 'sku' not in df.columns:
+    if df is None or df.empty or 'Sku' not in df.columns:
         return {'decliners': pd.DataFrame(), 'fast_movers': pd.DataFrame()}
     
     try:
+        # Ensure Invoice Date is datetime
+        if 'Invoice Date' in df.columns:
+            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+            df = df.dropna(subset=['Invoice Date'])
+        
+        if df.empty:
+            return {'decliners': pd.DataFrame(), 'fast_movers': pd.DataFrame()}
+        
         # Group by week and SKU/ASIN
-        df['week'] = df['order_date'].dt.to_period('W')
+        # Ensure Invoice Date is datetime before using .dt accessor
+        if df['Invoice Date'].dtype == 'object':
+            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+        
+        df['week'] = df['Invoice Date'].dt.to_period('W')
         
         # Check if ASIN column exists
-        if 'asin' in df.columns:
-            weekly_data = df.groupby(['week', 'sku', 'asin']).agg({
-                'revenue_in_inr': 'sum',
-                'quantity': 'sum'
+        if 'Asin' in df.columns:
+            weekly_data = df.groupby(['week', 'Sku', 'Asin']).agg({
+                'revenue_calc': 'sum',
+                'units_sold_calc': 'sum'
             }).reset_index()
         else:
             # Legacy grouping by SKU only
-            weekly_data = df.groupby(['week', 'sku']).agg({
-                'revenue_in_inr': 'sum',
-                'quantity': 'sum'
+            weekly_data = df.groupby(['week', 'Sku']).agg({
+                'revenue_calc': 'sum',
+                'units_sold_calc': 'sum'
             }).reset_index()
             # Add dummy ASIN column for compatibility
-            weekly_data['asin'] = None
+            weekly_data['Asin'] = None
         
         # Get current and previous week
         current_week = weekly_data['week'].max()
@@ -1978,67 +2579,52 @@ def compute_movers_decliners(df: pd.DataFrame, min_units: int = 10) -> Dict:
         
         # Merge for comparison
         comparison = current_week_data.merge(
-            previous_week_data[['sku', 'revenue_in_inr', 'quantity']], 
-            on='sku', 
+            previous_week_data[['Sku', 'revenue_calc', 'units_sold_calc']], 
+            on='Sku', 
             suffixes=('_current', '_previous')
         )
         
         # Calculate WoW change
         comparison['wow_change'] = (
-            (comparison['revenue_in_inr_current'] - comparison['revenue_in_inr_previous']) / 
-            comparison['revenue_in_inr_previous'] * 100
+            (comparison['revenue_calc_current'] - comparison['revenue_calc_previous']) / 
+            comparison['revenue_calc_previous'] * 100
         )
         
         # Create display names using combined SKU/ASIN identifier in format: SKU (ASIN)
         comparison['display_name'] = comparison.apply(
-            lambda row: create_product_identifier(row['sku'], row['asin']),
+            lambda row: create_product_identifier(row['Sku'], row['Asin']),
             axis=1
         )
         
         # Decliners: ≥30% drop and ≥N units previous week
         decliners = comparison[
             (comparison['wow_change'] <= -30) & 
-            (comparison['quantity_previous'] >= min_units)
+            (comparison['units_sold_calc_previous'] >= min_units)
         ].sort_values('wow_change')
         
         # Fast movers: ≥30% increase and ≥N units current week
         fast_movers = comparison[
             (comparison['wow_change'] >= 30) & 
-            (comparison['quantity_current'] >= min_units)
+            (comparison['units_sold_calc_current'] >= min_units)
         ].sort_values('wow_change', ascending=False)
         
         return {
-            'decliners': decliners[['display_name', 'revenue_in_inr_current', 'wow_change']],
-            'fast_movers': fast_movers[['display_name', 'revenue_in_inr_current', 'wow_change']]
+            'decliners': decliners[['display_name', 'revenue_calc_current', 'wow_change']],
+            'fast_movers': fast_movers[['display_name', 'revenue_calc_current', 'wow_change']]
         }
         
     except Exception as e:
         print(f"Error computing movers/decliners: {e}")
         return {'decliners': pd.DataFrame(), 'fast_movers': pd.DataFrame()}
 
-def run_sql_query(query: str) -> Tuple[List, List[str]]:
-    """Run SQL query and return results"""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(query)
-        results = cursor.fetchall()
-        columns = [desc[0] for desc in cursor.description]
-        conn.close()
-        return results, columns
-    except Exception as e:
-        print(f"SQL Error: {e}")
-        return [], []
 
 def answer_numeric_question(question: str) -> str:
-    """Answer numeric questions with SQL"""
+    """Answer numeric questions with DuckDB SQL"""
     question_lower = question.lower()
     
     if "total revenue" in question_lower or "revenue" in question_lower:
-        # Get transaction-based revenue calculation
-        conn = sqlite3.connect(DB_FILE)
-        df = pd.read_sql_query("SELECT * FROM sales", conn)
-        conn.close()
+        # Get transaction-based revenue calculation using DuckDB
+        df = query_data("SELECT * FROM sales")
         
         if not df.empty:
             transaction_revenue = calculate_transaction_revenue(df)
@@ -2049,55 +2635,55 @@ def answer_numeric_question(question: str) -> str:
 • **Free Replacements:** {format_inr(transaction_revenue['free_replacement_cost'])}"""
     
     elif "orders" in question_lower or "order count" in question_lower:
-        results, _ = run_sql_query("SELECT COUNT(DISTINCT order_id) as total_orders FROM sales")
-        if results:
-            return f"**Total Orders:** {results[0][0]:,}"
+        results = query_data("SELECT COUNT(DISTINCT \"Invoice Number\") as total_orders FROM sales")
+        if not results.empty:
+            return f"**Total Orders:** {results.iloc[0]['total_orders']:,}"
     
     elif "units" in question_lower or "quantity" in question_lower:
-        results, _ = run_sql_query("SELECT SUM(quantity) as total_units FROM sales")
-        if results:
-            return f"**Total Units Sold:** {results[0][0]:,}"
+        results = query_data("SELECT SUM(\"Quantity\") as total_units FROM sales")
+        if not results.empty:
+            return f"**Total Units Sold:** {results.iloc[0]['total_units']:,}"
     
     elif "top" in question_lower and ("sku" in question_lower or "product" in question_lower or "item" in question_lower or "best" in question_lower):
         limit = 5
         if "top 3" in question_lower: limit = 3
         elif "top 10" in question_lower: limit = 10
         
-        # Check if ASIN column exists in database
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
-        columns = [row[1] for row in cursor.fetchall()]
-        conn.close()
+        # Check if ASIN column exists in DuckDB database
+        table_info = query_data("DESCRIBE sales")
+        columns = table_info['column_name'].tolist() if not table_info.empty else []
         
-        if 'asin' in columns:
-            results, columns = run_sql_query(f"""
-                SELECT sku, asin, SUM(revenue_calc) as revenue 
+        if 'Asin' in columns:
+            results = query_data(f"""
+                SELECT "Sku", "Asin", SUM(revenue_calc) as revenue 
                 FROM sales 
-                WHERE sku IS NOT NULL 
-                GROUP BY sku, asin
+                WHERE "Sku" IS NOT NULL 
+                GROUP BY "Sku", "Asin"
                 ORDER BY revenue DESC 
                 LIMIT {limit}
             """)
             
-            if results:
+            if not results.empty:
                 response = "**Top Products by Revenue:**\n"
-                for i, (sku, asin, revenue) in enumerate(results, 1):
+                for i, row in results.iterrows():
+                    sku = row['Sku']
+                    asin = row['Asin']
+                    revenue = row['revenue']
                     display_name = create_product_identifier(sku, asin)
-                    response += f"{i}. {display_name}: {format_inr(revenue)}\n"
+                    response += f"{i+1}. {display_name}: {format_inr(revenue)}\n"
                 return response
         else:
             # Legacy query without ASIN
-            results, columns = run_sql_query(f"""
-                SELECT sku, SUM(revenue_calc) as revenue 
+            results = query_data(f"""
+                SELECT "Sku", SUM(revenue_calc) as revenue 
                 FROM sales 
-                WHERE sku IS NOT NULL 
-                GROUP BY sku
+                WHERE "Sku" IS NOT NULL 
+                GROUP BY "Sku"
                 ORDER BY revenue DESC 
                 LIMIT {limit}
             """)
             
-            if results:
+            if not results.empty:
                 response = "**Top Products by Revenue:**\n"
                 for i, (sku, revenue) in enumerate(results, 1):
                     display_name = str(sku) if pd.notna(sku) else "Unknown Product"
@@ -2108,19 +2694,17 @@ def answer_numeric_question(question: str) -> str:
 
 def answer_descriptive_question(question: str) -> str:
     """Answer descriptive questions with general insights"""
-    # Get basic data for descriptive questions
-    if not os.path.exists(DB_FILE): return "No data available for analysis."
+    # Get basic data for descriptive questions using DuckDB
+    if not table_exists('sales'): return "No data available for analysis."
     
     try:
-        conn = sqlite3.connect(DB_FILE)
-        df = pd.read_sql_query(f"SELECT * FROM {TABLE_NAME}", conn)
-        conn.close()
+        df = query_data(f"SELECT * FROM sales")
         
         if df.empty: return "No data available for analysis."
         
         # Basic metrics for descriptive answers
         total_revenue = df['revenue_in_inr'].sum()
-        total_orders = df['order_id'].nunique() if 'order_id' in df.columns else 0
+        total_orders = df['Invoice Number'].nunique() if 'Invoice Number' in df.columns else 0
         total_units = df['quantity'].sum() if 'quantity' in df.columns else 0
     except:
         return "No data available for analysis."
@@ -2236,51 +2820,66 @@ def main():
             
             st.markdown("---")
         
-        datasets = get_dataset_registry()
+        # Use session state for dataset registry instead of SQLite
+        datasets = st.session_state.processed_files if hasattr(st.session_state, 'processed_files') else []
         if datasets:
-            st.markdown(f"**Found {len(datasets)} uploaded datasets:**")
+            st.markdown(f"**📊 Data Sources ({len(datasets)} files):**")
             
             for i, dataset in enumerate(datasets):
-                with st.expander(f"📄 {dataset['filename']} ({dataset['row_count']:,} rows)", expanded=False):
+                # Handle both old and new dataset formats
+                row_count = dataset.get('row_count', dataset.get('rows', 0))
+                upload_date = dataset.get('upload_date', dataset.get('timestamp', 'Unknown'))
+                status = dataset.get('status', 'unknown')
+                
+                # Create clean status display
+                if status == 'success':
+                    status_display = "✅ Loaded Successfully"
+                    status_color = "green"
+                elif status == 'failed':
+                    status_display = "❌ Failed to Load"
+                    status_color = "red"
+                else:
+                    status_display = "⚠️ Unknown Status"
+                    status_color = "orange"
+                
+                with st.expander(f"📄 {dataset['filename']} ({row_count:,} rows)", expanded=False):
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.markdown(f"**Uploaded:** {dataset['upload_date']}")
+                        st.markdown(f"**Uploaded:** {upload_date}")
                     with col2:
-                        if dataset['date_range_start'] and dataset['date_range_end']:
+                        if dataset.get('date_range_start') and dataset.get('date_range_end'):
                             st.markdown(f"**Date Range:** {dataset['date_range_start']} to {dataset['date_range_end']}")
+                        elif dataset.get('month'):
+                            st.markdown(f"**Month:** {dataset['month']}")
                     with col3:
-                        st.markdown(f"**Status:** {dataset['status']}")
+                        st.markdown(f"**Status:** :{status_color}[{status_display}]")
             
             st.markdown("---")
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("🗑️ Clear All Data", type="secondary", help="Remove all data and start fresh"):
                     try:
-                        # Clear database tables
-                        conn = sqlite3.connect(DB_FILE)
-                        cursor = conn.cursor()
-                        cursor.execute(f'DELETE FROM {TABLE_NAME}')
-                        cursor.execute('DELETE FROM dataset_registry')
-                        conn.commit()
-                        conn.close()
-                        
-                        # Delete the database file completely
-                        if os.path.exists(DB_FILE):
-                            os.remove(DB_FILE)
-                        
-                        # Reset all session state
-                        st.session_state.has_existing_data = False
-                        st.session_state.uploaded_df = None
-                        st.session_state.mappings = {}
-                        st.session_state.show_mapping_modal = False
-                        st.session_state.chat_history = []
-                        st.session_state.show_data_management = False
-                        st.session_state.show_cleaning_preview = False
-                        st.session_state.cleaning_report = None
-                        st.session_state.cleaned_df = None
-                        
-                        st.success("✅ All data cleared! Database file deleted.")
-                        st.rerun()
+                        # Clear database tables using DuckDB
+                        clear_result = clear_database('sales')
+                        if clear_result.get('success', False):
+                            # Reset all session state
+                            st.session_state.has_existing_data = False
+                            st.session_state.uploaded_df = None
+                            st.session_state.mappings = {}
+                            st.session_state.show_mapping_modal = False
+                            st.session_state.chat_history = []
+                            st.session_state.show_data_management = False
+                            st.session_state.show_cleaning_preview = False
+                            st.session_state.cleaning_report = None
+                            st.session_state.cleaned_df = None
+                            st.session_state.processed_files = []
+                            st.session_state.uploaded_file_ids = set()
+                            st.session_state.total_rows_loaded = 0
+                            
+                            st.success("✅ All data cleared! DuckDB database cleared.")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ Failed to clear data: {clear_result.get('error', 'Unknown error')}")
                     except Exception as e:
                         st.error(f"Error clearing data: {e}")
             with col2:
@@ -2315,6 +2914,28 @@ def main():
             help="Upload one or more CSV files to analyze",
             key="csv_uploader"
         )
+        
+        # Debug buttons (only show if needed)
+        if st.checkbox("🔧 Show Debug Options", help="Show debugging tools for troubleshooting"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🔄 Force Re-upload (Clear Session State)", help="Clear session state to allow re-uploading files"):
+                    st.session_state.uploaded_file_ids = set()
+                    st.session_state.processed_files = []
+                    st.success("Session state cleared! You can now re-upload files.")
+                    st.rerun()
+            
+            with col2:
+                if st.button("🗑️ Clear Database", help="Clear the DuckDB database and start fresh"):
+                    result = clear_database('sales')
+                    if result.get('success', False):
+                        st.session_state.uploaded_file_ids = set()
+                        st.session_state.processed_files = []
+                        st.success("Database cleared! You can now upload files.")
+                        st.rerun()
+                    else:
+                        st.error(f"Failed to clear database: {result.get('error', 'Unknown error')}")
         
         if uploaded_files:
             # Get IDs of newly uploaded files
@@ -2369,6 +2990,32 @@ def main():
                         df_cleaned, cleaning_report = clean_dataframe_transaction_aware(df_raw, mappings)
                         print(f"✅ Cleaned {filename}: {len(df_cleaned)} rows")
                         
+                        # Ensure DataFrame has consistent columns for database storage
+                        # This prevents column mismatch errors when appending
+                        expected_columns = [
+                            'Invoice Date', 'Invoice Number', 'Sku', 'Asin', 'Item Description',
+                            'Quantity', 'Invoice Amount', 'Transaction Type', 'Ship To City',
+                            'transaction_type', 'revenue_calc', 'shipping_loss_calc', 'units_sold_calc',
+                            'needs_estimation', 'month_tag'
+                        ]
+                        
+                        # Add missing columns with default values
+                        for col in expected_columns:
+                            if col not in df_cleaned.columns:
+                                if col in ['revenue_calc', 'shipping_loss_calc']:
+                                    df_cleaned[col] = 0.0
+                                elif col in ['units_sold_calc']:
+                                    df_cleaned[col] = 0
+                                elif col in ['needs_estimation']:
+                                    df_cleaned[col] = False
+                            else:
+                                    df_cleaned[col] = None
+                        
+                        # Remove extra columns that aren't in expected schema
+                        df_cleaned = df_cleaned[expected_columns]
+                        
+                        print(f"✅ Aligned columns for {filename}: {len(df_cleaned.columns)} columns")
+                        
                         # Store to database (APPEND mode for subsequent files)
                         mode = "append" if upload_mode == "Append to existing data" or len(st.session_state.processed_files) > 0 else "replace"
                         print(f"💾 Storing {filename} in {mode} mode...")
@@ -2379,31 +3026,44 @@ def main():
                             print(f"✅ Saved {filename} to: {cleaned_path}")
                         except Exception as e:
                             print(f"⚠️ Warning saving {filename}: {e}")
+                        use_append = (mode == "append")
                         
-                        # Store to database
-                        result = robust_ingest_csv(df_cleaned, mappings, filename, mode)
-                        print(f"📊 Ingestion result for {filename}: {result}")
+                        # Check if table exists and get its schema
+                        if table_exists('sales'):
+                            table_info = query_data("DESCRIBE sales")
+                            existing_columns = table_info['column_name'].tolist() if not table_info.empty else []
+                            
+                            # If columns don't match, use replace mode instead of append
+                            if len(df_cleaned.columns) != len(existing_columns):
+                                print(f"⚠️ Column mismatch detected! Using REPLACE mode instead of APPEND")
+                                use_append = False
+                                mode = "replace"
                         
-                        if "✅" in result:
+                        result = store_data(df_cleaned, 'sales', append=use_append)
+                        print(f"📊 DuckDB storage result for {filename}: {result}")
+                        
+                        if result.get('success', False):
                             successful_files += 1
-                            total_rows_processed += len(df_cleaned)
+                            rows_stored = result.get('rows_stored', len(df_cleaned))
+                            total_rows_processed += rows_stored
                             
                             # Track processed file
                             st.session_state.uploaded_file_ids.add(file.file_id)
                             file_metadata = {
                                 'filename': filename,
-                                'rows': len(df_cleaned),
+                                'rows': rows_stored,
                                 'month': df_cleaned['month_tag'].iloc[0] if 'month_tag' in df_cleaned.columns and len(df_cleaned) > 0 else 'Unknown',
                                 'status': 'success',
                                 'timestamp': current_time
                             }
                             st.session_state.processed_files.append(file_metadata)
                             
-                            st.success(f"✅ {filename}: {len(df_cleaned)} rows loaded")
-                            print(f"✅ Successfully processed {filename}: {len(df_cleaned)} rows")
+                            st.success(f"✅ {filename}: {len(df_cleaned)} cleaned → {rows_stored} stored")
+                            print(f"✅ Successfully processed {filename}: {rows_stored} rows stored")
                         else:
                             failed_files += 1
-                            print(f"❌ Failed to process {filename}: {result}")
+                            error_msg = result.get('error', 'Unknown DuckDB error')
+                            print(f"❌ Failed to process {filename}: {error_msg}")
                             
                             # Track failed file
                             st.session_state.uploaded_file_ids.add(file.file_id)
@@ -2413,7 +3073,7 @@ def main():
                                 'month': 'Failed',
                                 'status': 'failed',
                                 'timestamp': current_time,
-                                'error': result
+                                'error': error_msg
                             }
                             st.session_state.processed_files.append(file_metadata)
                         
@@ -2449,21 +3109,23 @@ def main():
                     st.success(f"✅ **Processed {successful_files}/{len(new_files)} files successfully!**")
                     st.success(f"📊 **Total rows loaded**: {total_rows_processed:,}")
                     
-                    # Verify total data in database
-                    conn = sqlite3.connect(DB_FILE)
-                    cursor = conn.cursor()
-                    cursor.execute(f'SELECT COUNT(*) FROM {TABLE_NAME}')
-                    total_db_rows = cursor.fetchone()[0]
-                    conn.close()
-                    
-                    st.info(f"🗄️ **Total rows in database**: {total_db_rows:,}")
-                    print(f"✅ PROCESSING COMPLETE: {successful_files}/{len(new_files)} files, {total_rows_processed} rows")
+                    # Verify total data in database using DuckDB
+                    try:
+                        total_db_rows = get_row_count('sales')
+                        st.info(f"🗄️ **Total rows in database**: {total_db_rows:,}")
+                        print(f"✅ PROCESSING COMPLETE: {successful_files}/{len(new_files)} files, {total_rows_processed} rows")
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not verify database count: {e}")
+                        print(f"⚠️ Database verification failed: {e}")
                 
                 if failed_files > 0:
                     st.warning(f"⚠️ **{failed_files} files failed to process**")
                 
-                # Force rerun ONCE after processing all files
-                st.rerun()
+                # Only rerun if we successfully processed at least one file
+                if successful_files > 0:
+                    st.rerun()
+                else:
+                    st.error("❌ No files were successfully processed. Please check the error messages above.")
             else:
                 st.info("All uploaded files have already been processed.")
         
@@ -2473,25 +3135,6 @@ def main():
             for pf in st.session_state.processed_files:
                 status_icon = "✅" if pf['status'] == 'success' else "❌"
                 st.text(f"{status_icon} {pf['filename']} ({pf['rows']} rows)")
-            
-            # Debug actions
-            st.markdown("---")
-            st.markdown("### 🔧 Debug Actions")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("📊 Show DB Info", help="Show active database path and row counts"):
-                    db_info = debug_db_info()
-                    st.text_area("Database Information", db_info, height=150)
-            
-            with col2:
-                if st.button("🔍 Check Recent Files", help="Show recently processed files"):
-                    recent_files = st.session_state.processed_files[-5:]  # Last 5 files
-                    file_info = "Recent Files:\n"
-                    for file_data in recent_files:
-                        status_icon = "✅" if file_data['status'] == 'success' else "❌"
-                        file_info += f"{status_icon} {file_data['filename']} - {file_data['rows']} rows ({file_data['month']})\n"
-                    st.text_area("Recent Files", file_info, height=150)
     
     # Main content area
     if st.session_state.uploaded_df is not None or st.session_state.has_existing_data or st.session_state.processed_files:
@@ -2623,16 +3266,14 @@ def main():
                 )
             
             with col2:
-                # Check if transaction_type column exists in database
-                if os.path.exists(DB_FILE):
+                # Check if transaction_type column exists in database using DuckDB
+                if table_exists('sales'):
                     try:
-                        conn = sqlite3.connect(DB_FILE)
-                        cursor = conn.cursor()
-                        cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
-                        columns = [row[1] for row in cursor.fetchall()]
-                        conn.close()
+                        # Get table schema from DuckDB
+                        table_info = query_data("DESCRIBE sales")
+                        columns = table_info['column_name'].tolist() if not table_info.empty else []
                         
-                        if 'transaction_type' in columns:
+                        if 'transaction_type' in columns or 'Transaction Type' in columns:
                             transaction_type = st.selectbox(
                                 "Transaction Type:",
                                 ["All", "Shipment", "Cancel", "Refund", "FreeReplacement"],
@@ -2641,7 +3282,8 @@ def main():
                         else:
                             transaction_type = "All"
                             st.info("ℹ️ Transaction type filtering not available for legacy data")
-                    except:
+                    except Exception as e:
+                        print(f"Error checking transaction type column: {e}")
                         transaction_type = "All"
                         st.info("ℹ️ Transaction type filtering not available")
                 else:
@@ -2649,43 +3291,44 @@ def main():
             
             with col3:
                 if preset == "Custom Range":
-                    # Check if data exists and get its date range
-                    if os.path.exists(DB_FILE):
+                    # Check if data exists and get its date range using DuckDB
+                    if table_exists('sales'):
                         try:
-                            conn = sqlite3.connect(DB_FILE)
-                            cursor = conn.cursor()
-                            cursor.execute(f"SELECT MIN(order_date), MAX(order_date) FROM {TABLE_NAME} WHERE order_date IS NOT NULL")
-                            db_dates = cursor.fetchone()
-                            conn.close()
+                            date_range_query = query_data('SELECT MIN("Invoice Date") as min_date, MAX("Invoice Date") as max_date FROM sales WHERE "Invoice Date" IS NOT NULL')
                             
-                            if db_dates[0] and db_dates[1]:
-                                default_start = datetime.strptime(db_dates[0], '%Y-%m-%d').date()
-                                default_end = datetime.strptime(db_dates[1], '%Y-%m-%d').date()
+                            if not date_range_query.empty:
+                                min_date = date_range_query.iloc[0]['min_date']
+                                max_date = date_range_query.iloc[0]['max_date']
+                                
+                                if min_date and max_date:
+                                    default_start = datetime.strptime(str(min_date), '%Y-%m-%d').date()
+                                    default_end = datetime.strptime(str(max_date), '%Y-%m-%d').date()
                                 start_date = st.date_input("Start Date", value=default_start)
                                 end_date = st.date_input("End Date", value=default_end)
                             else:
                                 start_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=30))
                                 end_date = st.date_input("End Date", value=datetime.now().date())
-                        except:
+                        except Exception as e:
+                            print(f"Error getting date range: {e}")
                             start_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=30))
                             end_date = st.date_input("End Date", value=datetime.now().date())
                     else:
                         start_date = st.date_input("Start Date", value=datetime.now().date() - timedelta(days=30))
                         end_date = st.date_input("End Date", value=datetime.now().date())
                 else:
-                    # For presets, use the actual data range from database
-                    if os.path.exists(DB_FILE):
+                    # For presets, use the actual data range from database using DuckDB
+                    if table_exists('sales'):
                         try:
-                            conn = sqlite3.connect(DB_FILE)
-                            cursor = conn.cursor()
-                            cursor.execute(f"SELECT MIN(order_date), MAX(order_date) FROM {TABLE_NAME} WHERE order_date IS NOT NULL")
-                            db_dates = cursor.fetchone()
-                            conn.close()
+                            date_range_query = query_data('SELECT MIN("Invoice Date") as min_date, MAX("Invoice Date") as max_date FROM sales WHERE "Invoice Date" IS NOT NULL')
                             
-                            if db_dates[0] and db_dates[1]:
+                            if not date_range_query.empty:
+                                min_date = date_range_query.iloc[0]['min_date']
+                                max_date = date_range_query.iloc[0]['max_date']
+                            
+                            if min_date and max_date:
                                 # Use the full data range
-                                start_date = datetime.strptime(db_dates[0], '%Y-%m-%d').date()
-                                end_date = datetime.strptime(db_dates[1], '%Y-%m-%d').date()
+                                start_date = datetime.strptime(str(min_date), '%Y-%m-%d').date()
+                                end_date = datetime.strptime(str(max_date), '%Y-%m-%d').date()
                             else:
                                 today = datetime.now().date()
                                 start_date = today - timedelta(days=30)
@@ -2717,86 +3360,225 @@ def main():
                     st.date_input("End Date", value=end_date, disabled=True)
             
             with col4:
-                st.markdown("**Range:**")
-                st.markdown(f"{start_date} to {end_date}")
+                pass  # Range display removed - redundant with Start/End Date fields
             
-            # Month-based filtering
+            # Get filtered data for dashboard (no month filtering needed - handled automatically above)
+            df = get_date_filtered_data(str(start_date), str(end_date), transaction_type)
+            
+            # Month Analysis - Original Layout with Accurate Data
             st.markdown("### 📊 Month Analysis")
-            col1, col2, col3 = st.columns([2, 2, 2])
             
-            with col1:
-                # Get available months
-                available_months = get_available_months()
-                if available_months:
-                    selected_months = st.multiselect(
-                        "Select Months:",
-                        options=available_months,
-                        default=available_months[-1:] if available_months else [],  # Default to latest month
-                        help="Select one or more months for analysis"
-                    )
-                else:
-                    selected_months = []
-                    st.info("No month data available")
+            # Transaction Type Filter (Simple)
+            transaction_type_options = [
+                "Revenue (Shipments)",
+                "Refunds", 
+                "Free Replacements",
+                "All Transactions"
+            ]
+            selected_transaction_type = st.selectbox(
+                "Select Transaction Type:",
+                options=transaction_type_options,
+                index=0,  # Default to Revenue (Shipments)
+                help="Choose what type of transactions to analyze"
+            )
             
-            with col2:
-                comparison_mode = st.selectbox(
-                    "Comparison Mode:",
-                    ["Single Month", "Month-over-Month", "Multi-Month Trend"],
-                    help="Choose how to display and compare data"
+            # Get months automatically from the selected date range
+            months_in_range = get_months_in_date_range(str(start_date), str(end_date))
+            
+            if not months_in_range:
+                st.info("📅 **No data found** in the selected date range. Try adjusting your date filters above.")
+            elif len(months_in_range) == 1:
+                # Single month - show detailed analysis
+                month = months_in_range[0]
+                metrics = get_month_metrics_by_transaction_type(
+                    str(start_date), str(end_date), month['month_tag'], selected_transaction_type
                 )
-            
-            with col3:
-                if comparison_mode == "Month-over-Month" and len(selected_months) >= 2:
-                    st.success(f"✅ Comparing {len(selected_months)} months")
-                elif comparison_mode == "Multi-Month Trend" and len(selected_months) > 1:
-                    st.success(f"✅ Showing trend across {len(selected_months)} months")
-                elif comparison_mode == "Single Month" and len(selected_months) == 1:
-                    st.success(f"✅ Analyzing {selected_months[0]}")
+                
+                st.markdown(f"#### 📈 **{month['month_display']}** - Detailed Analysis")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    amount_key = 'total_amount' if 'total_amount' in metrics else 'total_revenue'
+                    st.metric(
+                        label=f"💰 {selected_transaction_type}",
+                        value=format_inr(metrics[amount_key]),
+                        help=f"Total {selected_transaction_type.lower()} for this month"
+                    )
+                with col2:
+                    st.metric(
+                        label="📦 Orders",
+                        value=f"{metrics['order_count']:,}",
+                        help="Total number of orders"
+                    )
+                with col3:
+                    st.metric(
+                        label="🏷️ SKUs",
+                        value=f"{metrics['sku_count']:,}",
+                        help="Number of unique products"
+                    )
+                with col4:
+                    st.metric(
+                        label="📊 Units",
+                        value=f"{metrics['total_units']:,}",
+                        help="Total units"
+                    )
+                
+                # Show additional insights
+                st.markdown("#### 📋 **Month Summary**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.info(f"📅 **Period:** {month['month_display']}")
+                    st.info(f"📊 **Records:** {metrics['total_records']:,} transactions")
+                with col2:
+                    avg_order_value = metrics[amount_key] / metrics['order_count'] if metrics['order_count'] > 0 else 0
+                    st.info(f"💵 **Avg Order Value:** {format_inr(avg_order_value)}")
+                    st.info(f"📈 **Amount per SKU:** {format_inr(metrics[amount_key] / metrics['sku_count']) if metrics['sku_count'] > 0 else 'N/A'}")
+                
+                # Show free replacement breakdown if this is the selected transaction type
+                if selected_transaction_type == 'Free Replacements':
+                    st.markdown("---")
+                    display_free_replacement_breakdown(metrics)
+                    
+            else:
+                # Multiple months - show card-based comparison (ORIGINAL LAYOUT)
+                st.markdown(f"#### 📊 **Multi-Month Analysis** ({len(months_in_range)} months)")
+                
+                # Calculate metrics for all months with selected transaction type
+                month_data = []
+                for month in months_in_range:
+                    metrics = get_month_metrics_by_transaction_type(
+                        str(start_date), str(end_date), month['month_tag'], selected_transaction_type
+                    )
+                    # Only include months that have data for the selected transaction type
+                    if metrics['total_records'] > 0:
+                        month_data.append({
+                            'month': month,
+                            'metrics': metrics
+                        })
+                
+                if not month_data:
+                    st.warning(f"⚠️ **No {selected_transaction_type.lower()} data found** in the selected date range.")
+                    st.info("💡 Try selecting a different transaction type or adjusting your date range.")
                 else:
-                    st.info("Select months for analysis")
-            
-            # Debug section
-            with st.expander("🔍 Debug Information", expanded=False):
-                if os.path.exists(DB_FILE):
-                    try:
-                        conn = sqlite3.connect(DB_FILE)
-                        cursor = conn.cursor()
+                    # Calculate MoM changes
+                    for i in range(len(month_data)):
+                        if i > 0:
+                            changes = calculate_mom_change(
+                                month_data[i]['metrics'], 
+                                month_data[i-1]['metrics']
+                            )
+                            month_data[i]['changes'] = changes
+                        else:
+                            month_data[i]['changes'] = None
+                    
+                    # Create responsive grid layout (ORIGINAL)
+                    if len(month_data) <= 3:
+                        cols = st.columns(len(month_data))
+                    elif len(month_data) <= 6:
+                        cols = st.columns(3)
+                    else:
+                        cols = st.columns(4)
+                    
+                    # Display month cards (ORIGINAL DESIGN WITH SMALLER CARDS)
+                    for i, data in enumerate(month_data):
+                        month = data['month']
+                        metrics = data['metrics']
+                        changes = data['changes']
                         
-                        # Check table existence
-                        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{TABLE_NAME}'")
-                        table_exists = cursor.fetchone() is not None
-                        st.write(f"Table exists: {table_exists}")
+                        col_idx = i % len(cols)
                         
-                        if table_exists:
-                            # Get row count
-                            cursor.execute(f"SELECT COUNT(*) FROM {TABLE_NAME}")
-                            total_rows = cursor.fetchone()[0]
-                            st.write(f"Total rows: {total_rows}")
+                        with cols[col_idx]:
+                            # Create smaller modern card with shadow effect
+                            st.markdown(f"""
+                            <div style="
+                                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                                padding: 15px;
+                                border-radius: 12px;
+                                box-shadow: 0 6px 20px rgba(0,0,0,0.1);
+                                margin-bottom: 15px;
+                                color: white;
+                            ">
+                                <h3 style="margin: 0 0 10px 0; font-size: 1.1em;">{month['month_display']}</h3>
+                            </div>
+                            """, unsafe_allow_html=True)
                             
-                            # Get date range
-                            cursor.execute(f"SELECT MIN(order_date), MAX(order_date) FROM {TABLE_NAME} WHERE order_date IS NOT NULL")
-                            date_range = cursor.fetchone()
-                            st.write(f"Date range in DB: {date_range[0]} to {date_range[1]}")
+                            # Amount metric with trend (UPDATED WITH ACCURATE DATA)
+                            amount_key = 'total_amount' if 'total_amount' in metrics else 'total_revenue'
+                            amount_col, trend_col = st.columns([3, 1])
+                            with amount_col:
+                                st.metric(
+                                    label=f"💰 {selected_transaction_type}",
+                                    value=format_inr(metrics[amount_key]),
+                                    delta=changes[amount_key]['formatted'] if changes and amount_key in changes else None,
+                                    help=f"Total {selected_transaction_type.lower()} for this month"
+                                )
+                            with trend_col:
+                                if changes and amount_key in changes and changes[amount_key]['direction'] == 'up':
+                                    st.markdown("📈")
+                                elif changes and amount_key in changes and changes[amount_key]['direction'] == 'down':
+                                    st.markdown("📉")
+                                else:
+                                    st.markdown("➡️")
                             
-                            # Get sample data
-                            cursor.execute(f"SELECT * FROM {TABLE_NAME} LIMIT 3")
-                            sample_data = cursor.fetchall()
-                            st.write("Sample data:")
-                            st.write(sample_data)
+                            # Other metrics (smaller)
+                            st.metric(
+                                label="📦 Orders",
+                                value=f"{metrics['order_count']:,}",
+                                delta=changes['order_count']['formatted'] if changes else None
+                            )
+                            
+                            st.metric(
+                                label="🏷️ SKUs",
+                                value=f"{metrics['sku_count']:,}",
+                                delta=changes['sku_count']['formatted'] if changes else None
+                            )
+                            
+                            st.metric(
+                                label="📊 Units",
+                                value=f"{metrics['total_units']:,}",
+                                delta=changes['total_units']['formatted'] if changes else None
+                            )
+                    
+                    # Overall period summary
+                    st.markdown("---")
+                    st.markdown("#### 📈 **Period Overview**")
+                    
+                    total_amount = sum(data['metrics'].get('total_amount', data['metrics'].get('total_revenue', 0)) for data in month_data)
+                    total_orders = sum(data['metrics']['order_count'] for data in month_data)
+                    total_skus = sum(data['metrics']['sku_count'] for data in month_data)
+                    total_units = sum(data['metrics']['total_units'] for data in month_data)
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric(f"💰 Total {selected_transaction_type}", format_inr(total_amount))
+                    with col2:
+                        st.metric("📦 Total Orders", f"{total_orders:,}")
+                    with col3:
+                        st.metric("🏷️ Total SKUs", f"{total_skus:,}")
+                    with col4:
+                        st.metric("📊 Total Units", f"{total_units:,}")
+                    
+                    # Best and worst performing months
+                    if len(month_data) > 1:
+                        best_month = max(month_data, key=lambda x: x['metrics'].get('total_amount', x['metrics'].get('total_revenue', 0)))
+                        worst_month = min(month_data, key=lambda x: x['metrics'].get('total_amount', x['metrics'].get('total_revenue', 0)))
                         
-                        conn.close()
-                    except Exception as e:
-                        st.write(f"Error: {e}")
-                else:
-                    st.write("Database file does not exist")
-            
-            # Get filtered data and compute KPIs
-            if st.button("🔄 Refresh Dashboard", type="primary"):
-                st.rerun()
-            
-            # Load and compute KPIs with month filtering
-            month_tags = selected_months if selected_months else None
-            df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, month_tags)
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            best_amount = best_month['metrics'].get('total_amount', best_month['metrics'].get('total_revenue', 0))
+                            st.success(f"🏆 **Best Month:** {best_month['month']['month_display']} ({format_inr(best_amount)})")
+                        with col2:
+                            worst_amount = worst_month['metrics'].get('total_amount', worst_month['metrics'].get('total_revenue', 0))
+                            st.warning(f"📉 **Needs Attention:** {worst_month['month']['month_display']} ({format_inr(worst_amount)})")
+                    
+                    # Show free replacement breakdown if this is the selected transaction type
+                    if selected_transaction_type == 'Free Replacements':
+                        st.markdown("---")
+                        # Calculate overall free replacement data for the period
+                        overall_free_replacement_data = calculate_free_replacement_cost(str(start_date), str(end_date))
+                        if overall_free_replacement_data['transaction_count'] > 0:
+                            st.markdown("#### 🎁 **Period Free Replacement Analysis**")
+                            display_free_replacement_breakdown({'free_replacement_breakdown': overall_free_replacement_data})
             
             # Debug: Show data loading status
             if df is None:
@@ -2812,27 +3594,34 @@ def main():
                 ### 📊 **Or delete and recreate database:**
                 """)
                 if st.button("🗑️ Delete Database & Start Fresh"):
-                    if os.path.exists(DB_FILE):
-                        os.remove(DB_FILE)
-                        st.success("✅ Database deleted! Please upload new data.")
+                    # Use DuckDB clear_database function
+                    result = clear_database('sales')
+                    if result.get('success', False):
+                        st.success("✅ Database cleared! Please upload new data.")
+                        # Reset session state
+                        st.session_state.processed_files = []
+                        st.session_state.uploaded_file_ids = set()
+                        st.session_state.has_existing_data = False
                         st.rerun()
+                    else:
+                        st.error(f"❌ Failed to clear database: {result.get('error', 'Unknown error')}")
                 return
             elif df.empty:
                 st.warning("⚠️ No data found for the selected date range and filters.")
                 st.info(f"💡 Date range: {start_date} to {end_date}, Transaction type: {transaction_type}")
                 
-                # Show available date range
+                # Show available date range using DuckDB
                 try:
-                    conn = sqlite3.connect(DB_FILE)
-                    cursor = conn.cursor()
-                    cursor.execute(f"SELECT MIN(order_date), MAX(order_date), COUNT(*) FROM {TABLE_NAME}")
-                    db_info = cursor.fetchone()
-                    conn.close()
+                    date_range_query = query_data('SELECT MIN("Invoice Date") as min_date, MAX("Invoice Date") as max_date, COUNT(*) as total_rows FROM sales')
+                    if not date_range_query.empty:
+                        min_date = date_range_query.iloc[0]['min_date']
+                        max_date = date_range_query.iloc[0]['max_date']
+                        total_rows = date_range_query.iloc[0]['total_rows']
                     
                     st.info(f"""
                     **Data available in database:**
-                    - Date range: {db_info[0]} to {db_info[1]}
-                    - Total rows: {db_info[2]}
+                        - Date range: {min_date} to {max_date}
+                        - Total rows: {total_rows}
                     
                     **Adjust your date filter to match the available data range.**
                     """)
@@ -2840,7 +3629,7 @@ def main():
                     pass
                 return
             else:
-                st.success(f"✅ Loaded {len(df)} rows of data")
+                pass  # Data loaded message already shown above
             
             if df is not None and not df.empty:
                 kpis = compute_business_kpis(df)
@@ -2945,17 +3734,142 @@ def main():
                         x='date', 
                         y='revenue',
                         title="Daily Revenue Trend",
-                        labels={'revenue': 'Revenue (₹)', 'date': 'Date'}
+                        labels={'revenue': 'Revenue (₹)', 'date': 'Date'},
+                        markers=True,  # Add data point markers
+                        line_shape='spline'  # Smooth line
                     )
-                    fig.update_layout(height=400)
+                    fig.update_layout(
+                        height=400,
+                        hovermode='x unified',
+                        xaxis_title="Date",
+                        yaxis_title="Revenue (₹)",
+                        showlegend=False
+                    )
+                    # Add hover template for better data display
+                    fig.update_traces(
+                        hovertemplate='<b>%{x}</b><br>Revenue: ₹%{y:,.0f}<extra></extra>'
+                    )
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show trend summary
+                    if len(kpis['revenue_trend']) > 1:
+                        total_revenue = kpis['revenue_trend']['revenue'].sum()
+                        avg_daily = kpis['revenue_trend']['revenue'].mean()
+                        max_daily = kpis['revenue_trend']['revenue'].max()
+                        min_daily = kpis['revenue_trend']['revenue'].min()
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Revenue", format_inr(total_revenue))
+                        with col2:
+                            st.metric("Avg Daily", format_inr(avg_daily))
+                        with col3:
+                            st.metric("Peak Day", format_inr(max_daily))
+                        with col4:
+                            st.metric("Lowest Day", format_inr(min_daily))
                 else:
-                    st.info("No revenue trend data available")
+                    st.info("No revenue trend data available - try adjusting your date range")
                 
-                # Top Products
-                col1, col2 = st.columns(2)
+                # Revenue by Region and Top Products (side by side)
+                col1, col2 = st.columns([1, 1])
                 
                 with col1:
+                    st.markdown("#### 🌍 Revenue by Region")
+                    if kpis['region_revenue'] is not None and not kpis['region_revenue'].empty:
+                        # Create a more detailed table view for better display
+                        region_df = pd.DataFrame({
+                            'Region': kpis['region_revenue'].index,
+                            'Revenue': kpis['region_revenue'].values
+                        })
+                        region_df['Revenue (₹)'] = region_df['Revenue'].apply(format_inr)
+                        region_df = region_df[['Region', 'Revenue (₹)']]
+                        
+                        # Display as table for better readability
+                        st.dataframe(region_df, use_container_width=True, hide_index=True)
+                        
+                        # Export button
+                        csv = region_df.to_csv(index=False)
+                        st.download_button(
+                            "📥 Export CSV",
+                            csv,
+                            "revenue_by_region.csv",
+                            "text/csv",
+                            key="export_region"
+                        )
+                        
+                        # Also show the chart below the table
+                        # Create properly sorted data for chart (highest revenue at top)
+                        chart_data = pd.DataFrame({
+                            'Region': kpis['region_revenue'].index,
+                            'Revenue': kpis['region_revenue'].values
+                        }).sort_values('Revenue', ascending=True)  # Sort ascending for horizontal bars (highest at top)
+                        
+                        # Create Indian currency formatted labels
+                        def format_chart_amount(amount):
+                            """Format amount for chart display in Indian currency"""
+                            if amount >= 10000000:  # 1 crore = 10 million
+                                crores = amount / 10000000
+                                if crores >= 100:
+                                    return f"₹{crores:.1f} Cr"
+                                else:
+                                    return f"₹{crores:.2f} Cr"
+                            elif amount >= 100000:  # 1 lakh = 100 thousand
+                                lakhs = amount / 100000
+                                return f"₹{lakhs:.2f} L"
+                            elif amount >= 1000:  # Thousands
+                                thousands = amount / 1000
+                                return f"₹{thousands:.1f}K"
+                            else:
+                                return f"₹{amount:.0f}"
+                        
+                        # Create the chart with proper Y-axis labels
+                        fig = px.bar(
+                            x=chart_data['Revenue'],
+                            y=chart_data['Region'],
+                            orientation='h',
+                            title="Revenue by Region Chart",
+                            labels={'x': 'Revenue (₹)', 'y': 'Region'},
+                            text=[format_chart_amount(rev) for rev in chart_data['Revenue']]
+                        )
+                        
+                        # Fix chart styling to ensure Y-axis labels are visible and complete full width usage
+                        fig.update_layout(
+                            height=max(400, len(chart_data) * 35),  # Dynamic height based on number of regions
+                            margin=dict(l=120, r=0, t=50, b=50),  # Zero right margin for complete width usage
+                            xaxis=dict(
+                                title="Revenue (₹)",
+                                showgrid=False,  # Remove vertical grid lines
+                                tickformat='₹.2s',
+                                automargin=True  # Auto-adjust margins
+                            ),
+                            yaxis=dict(
+                                title="Region",
+                                showgrid=False,
+                                tickfont=dict(size=12, color='white'),
+                                automargin=True  # Auto-adjust margins
+                            ),
+                            plot_bgcolor='rgba(0,0,0,0)',  # Transparent background
+                            paper_bgcolor='rgba(0,0,0,0)',  # Transparent background
+                            font=dict(size=12, color='white'),
+                            showlegend=False,
+                            width=None,  # Use full container width
+                            autosize=True,  # Enable auto-sizing
+                            bargap=0.1  # Reduce gap between bars for better space usage
+                        )
+                        
+                        # Update bar colors and text positioning
+                        fig.update_traces(
+                            marker_color='#1f77b4',  # Consistent blue color
+                            textposition='outside',
+                            textfont=dict(size=10, color='white'),
+                            hovertemplate='<b>%{y}</b><br>Revenue: %{text}<extra></extra>'
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                    else:
+                        st.info("No region data available")
+                
+                with col2:
                     st.markdown("#### 🏆 Top 10 Products by Revenue")
                     if not kpis['top_products_revenue'].empty:
                         display_df = kpis['top_products_revenue'].copy()
@@ -2976,114 +3890,26 @@ def main():
                     else:
                         st.info("No product revenue data available")
                 
-                with col2:
-                    st.markdown("#### 📦 Top 10 Products by Units")
-                    if not kpis['top_products_units'].empty:
-                        display_df = kpis['top_products_units'].copy()
-                        display_df['Units'] = display_df['quantity'].apply(lambda x: f"{x:,}")
-                        display_df = display_df[['display_name', 'Units']]
-                        display_df.columns = ['Product', 'Units']
-                        st.dataframe(display_df, use_container_width=True, hide_index=True)
-                        
-                        # Export button
-                        csv = display_df.to_csv(index=False)
-                        st.download_button(
-                            "📥 Export CSV",
-                            csv,
-                            "top_products_units.csv",
-                            "text/csv",
-                            key="export_units"
-                        )
-                    else:
-                        st.info("No product units data available")
-                
-                # Revenue by Region (full width)
-                if kpis['region_revenue'] is not None:
-                    st.markdown("#### 🌍 Revenue by Region")
-                    fig = px.bar(
-                        x=kpis['region_revenue'].values,
-                        y=kpis['region_revenue'].index,
-                        orientation='h',
-                        title="Revenue by Region (Top 10)",
-                        labels={'x': 'Revenue (₹)', 'y': 'Region'}
+                # Top Products by Units (full width below)
+                st.markdown("#### 📦 Top 10 Products by Units")
+                if not kpis['top_products_units'].empty:
+                    display_df = kpis['top_products_units'].copy()
+                    display_df['Units'] = display_df['quantity'].apply(lambda x: f"{x:,}")
+                    display_df = display_df[['display_name', 'Units']]
+                    display_df.columns = ['Product', 'Units']
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    # Export button
+                    csv = display_df.to_csv(index=False)
+                    st.download_button(
+                        "📥 Export CSV",
+                        csv,
+                        "top_products_units.csv",
+                        "text/csv",
+                        key="export_units"
                     )
-                    st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.markdown("#### 🌍 Revenue by Region")
-                    st.info("No region data available")
-                
-                # Month-based Analysis
-                if comparison_mode in ["Month-over-Month", "Multi-Month Trend"] and len(selected_months) > 1:
-                    st.markdown("---")
-                    st.markdown("### 📊 Month Analysis")
-                    
-                    # Monthly comparison charts
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        if 'monthly_revenue' in kpis and not kpis['monthly_revenue'].empty:
-                            st.markdown("#### 📈 Monthly Revenue Trend")
-                            fig = px.bar(
-                                x=kpis['monthly_revenue'].index,
-                                y=kpis['monthly_revenue'].values,
-                                title="Revenue by Month",
-                                labels={'x': 'Month', 'y': 'Revenue (₹)'}
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("No monthly revenue data available")
-                    
-                    with col2:
-                        if 'monthly_units' in kpis and not kpis['monthly_units'].empty:
-                            st.markdown("#### 📦 Monthly Units Trend")
-                            fig = px.bar(
-                                x=kpis['monthly_units'].index,
-                                y=kpis['monthly_units'].values,
-                                title="Units Sold by Month",
-                                labels={'x': 'Month', 'y': 'Units Sold'}
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("No monthly units data available")
-                    
-                    # MoM Growth Analysis
-                    if len(selected_months) >= 2:
-                        st.markdown("#### 📊 Month-over-Month Growth")
-                        
-                        # Calculate MoM comparison
-                        current_month = selected_months[-1]
-                        previous_month = selected_months[-2]
-                        
-                        # Get data for current and previous months
-                        current_df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, [current_month])
-                        previous_df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, [previous_month])
-                        
-                        if current_df is not None and previous_df is not None:
-                            mom_comparison = calculate_mom_comparison(current_df, previous_df)
-                            
-                            if mom_comparison:
-                                col1, col2, col3 = st.columns(3)
-                                
-                                with col1:
-                                    st.metric(
-                                        label=f"Revenue Growth ({current_month} vs {previous_month})",
-                                        value=f"{mom_comparison['revenue_growth']:+.1f}%",
-                                        help=f"Current: ₹{mom_comparison['current_revenue']:,.2f}, Previous: ₹{mom_comparison['previous_revenue']:,.2f}"
-                                    )
-                                
-                                with col2:
-                                    st.metric(
-                                        label=f"Units Growth ({current_month} vs {previous_month})",
-                                        value=f"{mom_comparison['units_growth']:+.1f}%",
-                                        help=f"Current: {mom_comparison['current_units']:,}, Previous: {mom_comparison['previous_units']:,}"
-                                    )
-                                
-                                with col3:
-                                    st.metric(
-                                        label=f"Orders Growth ({current_month} vs {previous_month})",
-                                        value=f"{mom_comparison['orders_growth']:+.1f}%",
-                                        help=f"Current: {mom_comparison['current_orders']:,}, Previous: {mom_comparison['previous_orders']:,}"
-                                    )
+                    st.info("No product units data available")
                 
                 # Movers & Decliners
                 st.markdown("---")
@@ -3095,7 +3921,7 @@ def main():
                     st.markdown("#### 📉 Decliners (≥30% WoW Drop)")
                     if not movers['decliners'].empty:
                         display_df = movers['decliners'].copy()
-                        display_df['Revenue (₹)'] = display_df['revenue_in_inr_current'].apply(format_inr)
+                        display_df['Revenue (₹)'] = display_df['revenue_calc_current'].apply(format_inr)
                         display_df['WoW Change'] = display_df['wow_change'].apply(lambda x: f"{x:.1f}%")
                         display_df = display_df[['display_name', 'Revenue (₹)', 'WoW Change']]
                         display_df.columns = ['Product', 'Revenue', 'WoW Change']
@@ -3111,13 +3937,13 @@ def main():
                             key="export_decliners"
                         )
                     else:
-                        st.info("No decliners found")
+                        st.info("No significant decliners found this period")
                 
                 with col2:
                     st.markdown("#### 📈 Fast Movers (≥30% WoW Growth)")
                     if not movers['fast_movers'].empty:
                         display_df = movers['fast_movers'].copy()
-                        display_df['Revenue (₹)'] = display_df['revenue_in_inr_current'].apply(format_inr)
+                        display_df['Revenue (₹)'] = display_df['revenue_calc_current'].apply(format_inr)
                         display_df['WoW Change'] = display_df['wow_change'].apply(lambda x: f"+{x:.1f}%")
                         display_df = display_df[['display_name', 'Revenue (₹)', 'WoW Change']]
                         display_df.columns = ['Product', 'Revenue', 'WoW Change']
@@ -3133,7 +3959,7 @@ def main():
                             key="export_movers"
                         )
                     else:
-                        st.info("No fast movers found")
+                        st.info("No significant fast movers found this period")
                 
                 # Data summary
                 st.markdown("---")
