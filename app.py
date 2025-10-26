@@ -1626,7 +1626,7 @@ def debug_check_duplicates(df: pd.DataFrame, mappings: Dict[str, Optional[str]])
     except Exception as e:
         return f"❌ Error checking duplicates: {e}"
 
-def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str = None) -> Optional[pd.DataFrame]:
+def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str = None, month_tags: list = None) -> Optional[pd.DataFrame]:
     """Get filtered data for date range and optional transaction type"""
     if not os.path.exists(DB_FILE): 
         print(f"Database file not found: {DB_FILE}")
@@ -1652,7 +1652,7 @@ def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str
         print(f"📅 Database date range: {db_date_range[0]} to {db_date_range[1]}")
         print(f"📅 Requested date range: {start_date} to {end_date}")
         
-        # Build query with optional transaction type filter
+        # Build query with optional transaction type and month filters
         base_query = f"""
             SELECT * FROM {TABLE_NAME} 
             WHERE order_date >= ? AND order_date <= ?
@@ -1662,6 +1662,12 @@ def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str
         if transaction_type and transaction_type != "All":
             base_query += " AND transaction_type = ?"
             params.append(transaction_type)
+        
+        # Add month_tag filtering if specified
+        if month_tags and len(month_tags) > 0:
+            placeholders = ','.join(['?' for _ in month_tags])
+            base_query += f" AND month_tag IN ({placeholders})"
+            params.extend(month_tags)
         
         base_query += " ORDER BY order_date"
         
@@ -1726,6 +1732,54 @@ def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str
         import traceback
         traceback.print_exc()
         return None
+
+def get_available_months() -> list:
+    """Get list of available months from database"""
+    if not os.path.exists(DB_FILE):
+        return []
+    
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT DISTINCT month_tag FROM {TABLE_NAME} WHERE month_tag IS NOT NULL ORDER BY month_tag")
+        months = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return months
+    except Exception as e:
+        print(f"Error getting available months: {e}")
+        return []
+
+def calculate_mom_comparison(current_df: pd.DataFrame, previous_df: pd.DataFrame) -> Dict:
+    """Calculate Month-over-Month comparison metrics"""
+    if current_df.empty or previous_df.empty:
+        return {}
+    
+    # Calculate current month metrics
+    current_revenue = current_df['revenue_calc'].sum() if 'revenue_calc' in current_df.columns else 0
+    current_units = current_df['units_sold_calc'].sum() if 'units_sold_calc' in current_df.columns else 0
+    current_orders = current_df['order_id'].nunique() if 'order_id' in current_df.columns else 0
+    
+    # Calculate previous month metrics
+    prev_revenue = previous_df['revenue_calc'].sum() if 'revenue_calc' in previous_df.columns else 0
+    prev_units = previous_df['units_sold_calc'].sum() if 'units_sold_calc' in previous_df.columns else 0
+    prev_orders = previous_df['order_id'].nunique() if 'order_id' in previous_df.columns else 0
+    
+    # Calculate growth rates
+    revenue_growth = ((current_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
+    units_growth = ((current_units - prev_units) / prev_units * 100) if prev_units > 0 else 0
+    orders_growth = ((current_orders - prev_orders) / prev_orders * 100) if prev_orders > 0 else 0
+    
+    return {
+        'current_revenue': current_revenue,
+        'previous_revenue': prev_revenue,
+        'revenue_growth': revenue_growth,
+        'current_units': current_units,
+        'previous_units': prev_units,
+        'units_growth': units_growth,
+        'current_orders': current_orders,
+        'previous_orders': prev_orders,
+        'orders_growth': orders_growth
+    }
 
 def compute_business_kpis(df: pd.DataFrame) -> Dict:
     """Compute business-grade KPIs from filtered data using transaction-based logic"""
@@ -1849,6 +1903,42 @@ def compute_business_kpis(df: pd.DataFrame) -> Dict:
         kpis['revenue_trend'] = daily_revenue
     else:
         kpis['revenue_trend'] = pd.DataFrame(columns=['date', 'revenue'])
+    
+    # Month-based breakdowns
+    if 'month_tag' in df.columns:
+        # Monthly revenue breakdown
+        monthly_revenue = df.groupby('month_tag')['revenue_calc'].sum().sort_index()
+        kpis['monthly_revenue'] = monthly_revenue
+        
+        # Monthly units breakdown
+        monthly_units = df.groupby('month_tag')['units_sold_calc'].sum().sort_index()
+        kpis['monthly_units'] = monthly_units
+        
+        # Monthly orders breakdown
+        monthly_orders = df.groupby('month_tag')['order_id'].nunique().sort_index()
+        kpis['monthly_orders'] = monthly_orders
+        
+        # Top products by month
+        if sku_col and asin_col:
+            monthly_products = df.groupby(['month_tag', sku_col, asin_col]).agg({
+                'revenue_calc': 'sum',
+                'units_sold_calc': 'sum'
+            }).reset_index()
+            
+            # Create display names
+            monthly_products['display_name'] = monthly_products.apply(
+                lambda row: create_product_identifier(row[sku_col], row[asin_col]),
+                axis=1
+            )
+            
+            kpis['monthly_products'] = monthly_products
+        else:
+            kpis['monthly_products'] = pd.DataFrame()
+    else:
+        kpis['monthly_revenue'] = pd.Series()
+        kpis['monthly_units'] = pd.Series()
+        kpis['monthly_orders'] = pd.Series()
+        kpis['monthly_products'] = pd.DataFrame()
     
     return kpis
 
@@ -2447,7 +2537,7 @@ def main():
         with tab1:
             st.header("📊 Business Dashboard")
             
-            # Date and Transaction Type filters
+            # Date, Month, and Transaction Type filters
             st.markdown("### 📅 Filters")
             col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
             
@@ -2556,6 +2646,41 @@ def main():
                 st.markdown("**Range:**")
                 st.markdown(f"{start_date} to {end_date}")
             
+            # Month-based filtering
+            st.markdown("### 📊 Month Analysis")
+            col1, col2, col3 = st.columns([2, 2, 2])
+            
+            with col1:
+                # Get available months
+                available_months = get_available_months()
+                if available_months:
+                    selected_months = st.multiselect(
+                        "Select Months:",
+                        options=available_months,
+                        default=available_months[-1:] if available_months else [],  # Default to latest month
+                        help="Select one or more months for analysis"
+                    )
+                else:
+                    selected_months = []
+                    st.info("No month data available")
+            
+            with col2:
+                comparison_mode = st.selectbox(
+                    "Comparison Mode:",
+                    ["Single Month", "Month-over-Month", "Multi-Month Trend"],
+                    help="Choose how to display and compare data"
+                )
+            
+            with col3:
+                if comparison_mode == "Month-over-Month" and len(selected_months) >= 2:
+                    st.success(f"✅ Comparing {len(selected_months)} months")
+                elif comparison_mode == "Multi-Month Trend" and len(selected_months) > 1:
+                    st.success(f"✅ Showing trend across {len(selected_months)} months")
+                elif comparison_mode == "Single Month" and len(selected_months) == 1:
+                    st.success(f"✅ Analyzing {selected_months[0]}")
+                else:
+                    st.info("Select months for analysis")
+            
             # Debug section
             with st.expander("🔍 Debug Information", expanded=False):
                 if os.path.exists(DB_FILE):
@@ -2595,8 +2720,9 @@ def main():
             if st.button("🔄 Refresh Dashboard", type="primary"):
                 st.rerun()
             
-            # Load and compute KPIs
-            df = get_date_filtered_data(str(start_date), str(end_date), transaction_type)
+            # Load and compute KPIs with month filtering
+            month_tags = selected_months if selected_months else None
+            df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, month_tags)
             
             # Debug: Show data loading status
             if df is None:
@@ -2811,6 +2937,79 @@ def main():
                 else:
                     st.markdown("#### 🌍 Revenue by Region")
                     st.info("No region data available")
+                
+                # Month-based Analysis
+                if comparison_mode in ["Month-over-Month", "Multi-Month Trend"] and len(selected_months) > 1:
+                    st.markdown("---")
+                    st.markdown("### 📊 Month Analysis")
+                    
+                    # Monthly comparison charts
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        if 'monthly_revenue' in kpis and not kpis['monthly_revenue'].empty:
+                            st.markdown("#### 📈 Monthly Revenue Trend")
+                            fig = px.bar(
+                                x=kpis['monthly_revenue'].index,
+                                y=kpis['monthly_revenue'].values,
+                                title="Revenue by Month",
+                                labels={'x': 'Month', 'y': 'Revenue (₹)'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No monthly revenue data available")
+                    
+                    with col2:
+                        if 'monthly_units' in kpis and not kpis['monthly_units'].empty:
+                            st.markdown("#### 📦 Monthly Units Trend")
+                            fig = px.bar(
+                                x=kpis['monthly_units'].index,
+                                y=kpis['monthly_units'].values,
+                                title="Units Sold by Month",
+                                labels={'x': 'Month', 'y': 'Units Sold'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No monthly units data available")
+                    
+                    # MoM Growth Analysis
+                    if len(selected_months) >= 2:
+                        st.markdown("#### 📊 Month-over-Month Growth")
+                        
+                        # Calculate MoM comparison
+                        current_month = selected_months[-1]
+                        previous_month = selected_months[-2]
+                        
+                        # Get data for current and previous months
+                        current_df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, [current_month])
+                        previous_df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, [previous_month])
+                        
+                        if current_df is not None and previous_df is not None:
+                            mom_comparison = calculate_mom_comparison(current_df, previous_df)
+                            
+                            if mom_comparison:
+                                col1, col2, col3 = st.columns(3)
+                                
+                                with col1:
+                                    st.metric(
+                                        label=f"Revenue Growth ({current_month} vs {previous_month})",
+                                        value=f"{mom_comparison['revenue_growth']:+.1f}%",
+                                        help=f"Current: ₹{mom_comparison['current_revenue']:,.2f}, Previous: ₹{mom_comparison['previous_revenue']:,.2f}"
+                                    )
+                                
+                                with col2:
+                                    st.metric(
+                                        label=f"Units Growth ({current_month} vs {previous_month})",
+                                        value=f"{mom_comparison['units_growth']:+.1f}%",
+                                        help=f"Current: {mom_comparison['current_units']:,}, Previous: {mom_comparison['previous_units']:,}"
+                                    )
+                                
+                                with col3:
+                                    st.metric(
+                                        label=f"Orders Growth ({current_month} vs {previous_month})",
+                                        value=f"{mom_comparison['orders_growth']:+.1f}%",
+                                        help=f"Current: {mom_comparison['current_orders']:,}, Previous: {mom_comparison['previous_orders']:,}"
+                                    )
                 
                 # Movers & Decliners
                 st.markdown("---")
