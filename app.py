@@ -2396,10 +2396,39 @@ def initialize_ai_assistant():
         try:
             with st.spinner("🤖 Initializing AI Assistant..."):
                 st.session_state.ai_assistant = AIAssistant()
-            return True
+            
+            # Check if initialization was successful
+            if st.session_state.ai_assistant.is_ollama_available:
+                st.success("✅ AI Assistant initialized successfully!")
+                return True
+            else:
+                st.warning("⚠️ AI Assistant initialized with limited functionality")
+                st.info("🔧 Ollama is not available. Some AI features will be disabled.")
+                return True  # Still return True as it's initialized, just limited
+                
+        except ConnectionError as e:
+            st.error("❌ **AI Assistant Connection Failed**")
+            st.info("🔧 Cannot connect to Ollama service. Please ensure Ollama is running: `ollama serve`")
+            st.session_state.ai_assistant = None
+            return False
+        except TimeoutError as e:
+            st.error("❌ **AI Assistant Initialization Timeout**")
+            st.info("⏱️ Ollama is taking too long to respond. Please check if it's running properly.")
+            st.session_state.ai_assistant = None
+            return False
         except Exception as e:
-            st.error(f"❌ Failed to initialize AI Assistant: {str(e)}")
-            st.info("💡 Make sure Ollama is running: `ollama serve`")
+            # Log the error for debugging
+            import logging
+            logging.error(f"Unexpected error initializing AI Assistant: {e}")
+            
+            st.error("❌ **AI Assistant Initialization Failed**")
+            st.info("🔧 I encountered an unexpected error. Please try again or check if Ollama is running.")
+            
+            # Show technical details in expander for debugging
+            with st.expander("🔍 Technical Details (for debugging)", expanded=False):
+                st.code(f"Error: {str(e)}", language='text')
+            
+            st.session_state.ai_assistant = None
             return False
     return st.session_state.ai_assistant is not None
 
@@ -3821,8 +3850,23 @@ def main():
                 with col1:
                     if st.button("🤖 Ask AI", type="primary"):
                         if question.strip():
+                            # Create progress indicators for different stages
+                            progress_container = st.container()
+                            
+                            with progress_container:
+                                st.info("🤖 **AI Assistant Status**")
+                                status_col1, status_col2, status_col3 = st.columns(3)
+                                
+                                with status_col1:
+                                    st.markdown("🔍 **Analyzing Question**")
+                                with status_col2:
+                                    st.markdown("📊 **Generating SQL**")
+                                with status_col3:
+                                    st.markdown("🧠 **Creating Analysis**")
+                            
                             with st.spinner("🤖 AI is thinking..."):
                                 try:
+                                    # Call AI assistant (timeout handling is now built into the AI assistant)
                                     result = st.session_state.ai_assistant.ask_question(question)
                                     
                                     if result['success']:
@@ -3831,7 +3875,8 @@ def main():
                                             'question': question,
                                             'answer': result['response'],
                                             'sql': result.get('sql', ''),
-                                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                            'offline_mode': result.get('offline_mode', False)
                                         })
                                         
                                         # Display the response
@@ -3843,14 +3888,49 @@ def main():
                                             with st.expander("🔍 View Generated SQL Query", expanded=False):
                                                 st.code(result['sql'], language='sql')
                                         
+                                        # Show offline mode warning if applicable
+                                        if result.get('offline_mode'):
+                                            st.warning("⚠️ AI features are limited. Ollama is not available.")
+                                        
+                                        # Show cache indicator if applicable
+                                        if result.get('cached'):
+                                            st.info("📋 **Cached Result** - This question was answered before")
+                                        
                                         st.rerun()
                                     else:
-                                        st.error(f"❌ **Error:** {result['error']}")
-                                        st.info("💡 Try rephrasing your question or check if Ollama is running.")
+                                        # Handle different error types with specific messages
+                                        error_type = result.get('error_type', 'unknown')
+                                        
+                                        if error_type == 'connection_error':
+                                            st.error("❌ **AI Assistant Unavailable**")
+                                            st.info("🔧 Please ensure Ollama is running: `ollama serve`")
+                                        elif error_type == 'timeout_error':
+                                            st.error("❌ **Query Timeout**")
+                                            st.info("⏱️ This query is taking too long. Try a simpler question.")
+                                        elif error_type == 'sql_error' or error_type == 'sql_generation_failed':
+                                            st.error("❌ **Question Not Understood**")
+                                            st.info("💡 I couldn't understand that question. Could you rephrase it?")
+                                        elif error_type == 'database_query_failed':
+                                            st.error("❌ **Data Retrieval Failed**")
+                                            st.info("📊 Unable to retrieve data. Please try again.")
+                                        elif error_type == 'offline_mode':
+                                            st.error("❌ **AI Assistant Offline**")
+                                            st.info("🔧 AI assistant is currently unavailable. Please ensure Ollama is running.")
+                                        else:
+                                            st.error(f"❌ **Error:** {result['error']}")
+                                            st.info("💡 Try rephrasing your question or check if Ollama is running.")
                                         
                                 except Exception as e:
-                                    st.error(f"❌ **Unexpected error:** {str(e)}")
-                                    st.info("💡 Make sure Ollama is running: `ollama serve`")
+                                    # Log the error for debugging
+                                    import logging
+                                    logging.error(f"Unexpected error in chat: {e}")
+                                    
+                                    st.error("❌ **Unexpected Error**")
+                                    st.info("🔧 I encountered an unexpected error. Please try again or check if Ollama is running.")
+                                    
+                                    # Show technical details in expander for debugging
+                                    with st.expander("🔍 Technical Details (for debugging)", expanded=False):
+                                        st.code(f"Error: {str(e)}", language='text')
                         else:
                             st.warning("Please enter a question.")
                 
