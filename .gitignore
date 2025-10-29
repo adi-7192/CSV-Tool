@@ -28,3 +28,16 @@ Thumbs.db
 # *.db
 # *.duckdb
 
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Databases (persisted via volumes in Docker)
+*.duckdb
+*.db
+data/analytics.duckdb

@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# Data (will be mounted as volume)
+data/
+*.duckdb
+*.db
+*.csv
+!data/.gitkeep
+
+# Logs
+*.log
+logs/
+!logs/.gitkeep
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Environment
+.env
+.env.*
+*.env
+!.env.example
+
+# Documentation
+*.md
+!README.md
+docs/
+ARCHITECTURE.md
+PHASE_0_1_AUDIT_REPORT.md
+FEATURE_DOCUMENTATION.md
+DOCKER_SETUP.md
+
+# Tests
+tests/
+test_*.py
+*_test.py
+pytest_cache/
+.coverage
+.pytest_cache/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+

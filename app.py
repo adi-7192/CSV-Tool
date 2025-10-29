@@ -12,11 +12,16 @@ import hashlib
 import json
 import time
 import numpy as np
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import plotly.express as px
 import plotly.graph_objects as go
-from db_manager import store_data, query_data, clear_database, get_row_count, table_exists
+from db_manager import (
+    store_data, query_data, clear_database, get_row_count, table_exists, 
+    validate_no_duplicates, create_ingestion_log_table, log_upload, 
+    get_upload_history, get_data_by_source, get_unique_sources
+)
 
 # Import AI Assistant
 try:
@@ -555,6 +560,14 @@ def clean_dataframe_transaction_aware(df: pd.DataFrame, mappings: Dict[str, Opti
     print("="*80)
     print(f"Starting with {len(df)} rows\n")
     
+    # Initialize cleaning report to track deduplication and other stats
+    cleaning_report = {
+        'initial_row_count': len(df),
+        'duplicates_removed': 0,
+        'final_row_count': 0,
+        'business_key_cols': []
+    }
+    
     # Step 1: Copy and trim whitespace
     cleaned_df = df.copy()
     for col in cleaned_df.select_dtypes(include=['object']).columns:
@@ -634,11 +647,64 @@ def clean_dataframe_transaction_aware(df: pd.DataFrame, mappings: Dict[str, Opti
         cleaned_df['transaction_type'] = None
         print(f"⚠️ Created empty 'transaction_type' column")
     
-    # Step 8: Deduplication - only drop EXACT duplicates (all columns identical)
+    # Step 8: Business-Key-Based Deduplication
     initial_count = len(cleaned_df)
-    cleaned_df = cleaned_df.drop_duplicates(keep='first')
-    duplicates_removed = initial_count - len(cleaned_df)
-    print(f"🔄 Removed {duplicates_removed} EXACT duplicates (all columns identical)")
+    
+    # Define business key columns for deduplication
+    # A transaction is uniquely identified by: order_id + transaction_type + sku (if multi-line orders)
+    business_key_cols = []
+    
+    # Add order_id to business key
+    if mappings.get('order_id') and mappings['order_id'] in cleaned_df.columns:
+        business_key_cols.append(mappings['order_id'])
+        print(f"🔑 Business key includes: {mappings['order_id']} (order_id)")
+    
+    # Add transaction_type (standardized column name)
+    if 'transaction_type' in cleaned_df.columns:
+        business_key_cols.append('transaction_type')
+        print(f"🔑 Business key includes: transaction_type")
+    
+    # Add SKU to business key if present (handles multi-line orders where same order has different SKUs)
+    if mappings.get('sku') and mappings['sku'] in cleaned_df.columns:
+        business_key_cols.append(mappings['sku'])
+        print(f"🔑 Business key includes: {mappings['sku']} (sku)")
+    
+    # Optional: Add order_date if needed to distinguish same order on different dates
+    # This is typically not needed, but included as safety measure
+    if mappings.get('order_date') and mappings['order_date'] in cleaned_df.columns:
+        business_key_cols.append(mappings['order_date'])
+        print(f"🔑 Business key includes: {mappings['order_date']} (order_date)")
+    
+    # Perform deduplication based on business key
+    if len(business_key_cols) >= 2:  # Need at least order_id + transaction_type
+        # Remove rows with duplicate business keys, keeping the last occurrence
+        # (more recent data if same file uploaded twice)
+        duplicates_before = len(cleaned_df)
+        
+        # Drop rows where business key combination is duplicate
+        # Keep 'last' to preserve most recent data if same record appears multiple times
+        cleaned_df = cleaned_df.drop_duplicates(subset=business_key_cols, keep='last')
+        
+        duplicates_removed = duplicates_before - len(cleaned_df)
+        print(f"🔄 Removed {duplicates_removed} duplicates based on business key: {business_key_cols}")
+        
+        # Also remove any remaining EXACT duplicates (all columns identical) as safety measure
+        exact_dups_before = len(cleaned_df)
+        cleaned_df = cleaned_df.drop_duplicates(keep='first')
+        exact_dups_removed = exact_dups_before - len(cleaned_df)
+        if exact_dups_removed > 0:
+            print(f"🔄 Removed {exact_dups_removed} additional EXACT duplicates (all columns identical)")
+    else:
+        # Fallback to exact duplicate removal if business key columns not available
+        print(f"⚠️ WARNING: Insufficient business key columns ({len(business_key_cols)} found, need 2+), using exact duplicate removal")
+        cleaned_df = cleaned_df.drop_duplicates(keep='first')
+        duplicates_removed = initial_count - len(cleaned_df)
+        print(f"🔄 Removed {duplicates_removed} EXACT duplicates (all columns identical)")
+    
+    # Store deduplication stats for validation report
+    cleaning_report['duplicates_removed'] = initial_count - len(cleaned_df)
+    cleaning_report['final_row_count'] = len(cleaned_df)
+    cleaning_report['business_key_cols'] = business_key_cols
     
     # Step 9: Create derived transaction-aware columns
     print(f"\n📊 Creating derived columns based on Transaction logic...")
@@ -769,24 +835,34 @@ def clean_dataframe_transaction_aware(df: pd.DataFrame, mappings: Dict[str, Opti
         print(cleaned_df[display_cols].head())
     
     print("\n" + "="*80)
-    print(f"✅ CLEANING COMPLETE: {len(cleaned_df)} rows kept, {duplicates_removed} exact duplicates removed")
+    final_duplicates_removed = cleaning_report.get('duplicates_removed', 0)
+    print(f"✅ CLEANING COMPLETE: {len(cleaned_df)} rows kept, {final_duplicates_removed} duplicates removed")
     print("="*80 + "\n")
     
+    # Update final counts in cleaning report
+    cleaning_report['final_row_count'] = len(cleaned_df)
+    
     # Build report for UI
+    business_key_display = '+'.join(cleaning_report.get('business_key_cols', []))
+    if not business_key_display:
+        business_key_display = "order_id + transaction_type"
+    
     report = {
         'total_rows_read': len(df),
         'rows_kept': len(cleaned_df),
-        'rows_dropped': duplicates_removed,
-        'duplicates_found': duplicates_removed,
+        'rows_dropped': final_duplicates_removed,
+        'duplicates_found': final_duplicates_removed,
         'columns_with_missing': [],
         'invalid_revenue_rows': 0,
         'problematic_rows': [],
         'cleaning_steps': [
             "📋 Transaction-aware cleaning (no legitimate data dropped)",
             f"💰 Preserved {(cleaned_df[rev_col] < 0).sum() if rev_col else 0} negative Invoice Amounts",
-            f"🔄 Removed {duplicates_removed} exact duplicates only",
+            f"🔄 Removed {final_duplicates_removed} duplicates using business key: {business_key_display}",
             f"✅ Created derived columns with proper transaction logic"
-        ]
+        ],
+        'business_key_cols': cleaning_report.get('business_key_cols', []),
+        'duplicates_removed': final_duplicates_removed
     }
     
     # Add month tag for easy filtering
@@ -1293,8 +1369,8 @@ def debug_check_duplicates(df: pd.DataFrame, mappings: Dict[str, Optional[str]])
     except Exception as e:
         return f"❌ Error checking duplicates: {e}"
 
-def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str = None, month_tags: list = None) -> Optional[pd.DataFrame]:
-    """Get filtered data for date range and optional transaction type"""
+def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str = None, month_tags: list = None, source_file: str = None) -> Optional[pd.DataFrame]:
+    """Get filtered data for date range and optional transaction type and source file"""
     if not table_exists('sales'): 
         print(f"DuckDB table 'sales' not found")
         return None
@@ -1314,18 +1390,23 @@ def get_date_filtered_data(start_date: str, end_date: str, transaction_type: str
             db_date_range = (date_range_query.iloc[0]['min_date'], date_range_query.iloc[0]['max_date'])
             print(f"📅 DuckDB date range: {db_date_range[0]} to {db_date_range[1]}")
         print(f"📅 Requested date range: {start_date} to {end_date}")
+        if source_file:
+            print(f"📁 Filtering by source file: {source_file}")
         
         # Build query with parameters inline (DuckDB doesn't support parameterized queries the same way)
+        where_conditions = [f'"Invoice Date" >= \'{start_date}\'', f'"Invoice Date" <= \'{end_date}\'']
+        
         if transaction_type and transaction_type != "All":
-            base_query = f"""
-                SELECT * FROM sales 
-                WHERE "Invoice Date" >= '{start_date}' AND "Invoice Date" <= '{end_date}' AND "Transaction Type" = '{transaction_type}'
-            """
-        else:
-            base_query = f"""
-                SELECT * FROM sales 
-                WHERE "Invoice Date" >= '{start_date}' AND "Invoice Date" <= '{end_date}'
-            """
+            where_conditions.append(f'"Transaction Type" = \'{transaction_type}\'')
+        
+        # Add source file filtering if specified
+        if source_file:
+            where_conditions.append(f'source_file = \'{source_file}\'')
+        
+        base_query = f"""
+            SELECT * FROM sales 
+            WHERE {' AND '.join(where_conditions)}
+        """
         
         # Add month_tag filtering if specified
         if month_tags and len(month_tags) > 0:
@@ -2446,13 +2527,206 @@ def get_suggested_questions():
         "Compare September vs August performance"
     ]
 
+def format_ai_response(response_text: str, question: str = "") -> None:
+    """
+    Display AI response using simple Streamlit chat_message pattern
+    
+    Args:
+        response_text: The AI response text (may contain markdown)
+        question: The user's question (optional, for display)
+    """
+    # Simple, clean display using Streamlit's native chat_message
+    with st.chat_message("assistant", avatar="🤖"):
+        # Show question if provided
+        if question:
+            st.markdown(f"**💬 Your Question:** {question}")
+            st.markdown("---")
+        
+        # Display the response text - Streamlit handles formatting automatically
+        st.markdown(response_text)
+
+def create_validation_report(df_cleaned: pd.DataFrame, cleaning_report: Dict, mappings: Dict) -> Dict:
+    """
+    Create a comprehensive validation report for uploaded data
+    
+    Returns:
+        Dictionary with validation metrics and issues
+    """
+    report = {
+        'total_rows': len(df_cleaned),
+        'data_quality_issues': [],
+        'date_range': {},
+        'transaction_distribution': {},
+        'warnings': [],
+        'success': True,
+        'duplicates_removed': cleaning_report.get('duplicates_removed', 0),
+        'initial_row_count': cleaning_report.get('initial_row_count', len(df_cleaned)),
+        'business_key_cols': cleaning_report.get('business_key_cols', [])
+    }
+    
+    # Check date range
+    if mappings.get('order_date'):
+        date_col = mappings['order_date']
+        if date_col in df_cleaned.columns:
+            try:
+                dates = pd.to_datetime(df_cleaned[date_col], errors='coerce')
+                valid_dates = dates.dropna()
+                if len(valid_dates) > 0:
+                    report['date_range'] = {
+                        'start': valid_dates.min().strftime('%Y-%m-%d'),
+                        'end': valid_dates.max().strftime('%Y-%m-%d'),
+                        'valid_dates': len(valid_dates),
+                        'invalid_dates': len(dates) - len(valid_dates)
+                    }
+                    if report['date_range']['invalid_dates'] > 0:
+                        report['data_quality_issues'].append(
+                            f"⚠️ {report['date_range']['invalid_dates']} rows have invalid dates"
+                        )
+            except Exception as e:
+                report['warnings'].append(f"Could not parse dates: {str(e)}")
+    
+    # Check transaction type distribution
+    if 'transaction_type' in df_cleaned.columns:
+        txn_counts = df_cleaned['transaction_type'].value_counts(dropna=False)
+        report['transaction_distribution'] = txn_counts.to_dict()
+        
+        # Check for issues
+        if txn_counts.isna().any():
+            na_count = df_cleaned['transaction_type'].isna().sum()
+            if na_count > 0:
+                report['data_quality_issues'].append(
+                    f"⚠️ {na_count} rows have missing transaction types"
+                )
+    
+    # Check revenue amounts
+    if mappings.get('revenue_amount'):
+        rev_col = mappings['revenue_amount']
+        if rev_col in df_cleaned.columns:
+            # Check for negative amounts in shipments (should be positive)
+            if 'transaction_type' in df_cleaned.columns:
+                shipments = df_cleaned[df_cleaned['transaction_type'] == 'Shipment']
+                if len(shipments) > 0:
+                    negative_shipments = shipments[shipments[rev_col] < 0]
+                    if len(negative_shipments) > 0:
+                        report['data_quality_issues'].append(
+                            f"⚠️ {len(negative_shipments)} Shipment transactions have negative amounts"
+                        )
+            
+            # Check for missing revenue
+            missing_rev = df_cleaned[rev_col].isna().sum()
+            if missing_rev > 0:
+                report['data_quality_issues'].append(
+                    f"⚠️ {missing_rev} rows have missing revenue amounts"
+                )
+    
+    # Check required columns
+    required_cols = ['order_date', 'order_id', 'sku']
+    missing_cols = [col for col in required_cols if not mappings.get(col)]
+    if missing_cols:
+        report['data_quality_issues'].append(
+            f"⚠️ Missing required columns: {', '.join(missing_cols)}"
+        )
+    
+    # Add deduplication information from cleaning report
+    if cleaning_report:
+        duplicates_removed = cleaning_report.get('duplicates_removed', report.get('duplicates_removed', 0))
+        initial_count = cleaning_report.get('initial_row_count', report.get('initial_row_count', len(df_cleaned)))
+        business_keys = cleaning_report.get('business_key_cols', report.get('business_key_cols', []))
+        
+        if duplicates_removed > 0:
+            business_key_display = '+'.join(business_keys) if business_keys else "order_id + transaction_type + sku"
+            report['data_quality_issues'].append(
+                f"✅ {duplicates_removed} duplicate rows removed using business key: {business_key_display}"
+            )
+        else:
+            report['warnings'].append(
+                f"ℹ️ No duplicates found in uploaded file"
+            )
+    
+    return report
+
+def show_validation_modal(report: Dict, filename: str):
+    """
+    Display validation report in a modal-like interface
+    
+    Args:
+        report: Validation report dictionary
+        filename: Name of uploaded file
+    """
+    st.markdown("---")
+    st.markdown("### ✅ Data Validation Report")
+    
+    # Success header
+    if report['success']:
+        st.success(f"**{filename}** processed successfully!")
+    
+    # Total rows
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Total Rows", f"{report['total_rows']:,}")
+    
+    # Date range
+    if report['date_range']:
+        with col2:
+            date_range = report['date_range']
+            if date_range.get('start') and date_range.get('end'):
+                st.metric("Date Range", f"{date_range['start']} to {date_range['end']}")
+    
+    # Deduplication information
+    if report.get('duplicates_removed', 0) > 0 or report.get('business_key_cols'):
+        st.markdown("#### 🔄 Duplicate Handling")
+        business_key_display = '+'.join(report.get('business_key_cols', [])) if report.get('business_key_cols') else "order_id + transaction_type + sku"
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"**Business Key:** {business_key_display}")
+        with col2:
+            st.success(f"**Duplicates Removed:** {report.get('duplicates_removed', 0)} rows")
+        
+        initial_count = report.get('initial_row_count', report['total_rows'] + report.get('duplicates_removed', 0))
+        st.caption(f"Initial rows: {initial_count:,} → Final rows: {report['total_rows']:,}")
+    
+    # Transaction distribution
+    if report['transaction_distribution']:
+        st.markdown("#### 📊 Transaction Types")
+        txn_df = pd.DataFrame(list(report['transaction_distribution'].items()), 
+                             columns=['Transaction Type', 'Count'])
+        st.dataframe(txn_df, use_container_width=True, hide_index=True)
+    
+    # Data quality issues
+    if report['data_quality_issues']:
+        st.markdown("#### ⚠️ Data Quality Issues")
+        for issue in report['data_quality_issues']:
+            st.warning(issue)
+    
+    # Warnings (non-critical)
+    if report['warnings']:
+        st.markdown("#### ℹ️ Notes")
+        for warning in report['warnings']:
+            st.info(warning)
+    
+    # User acknowledgment
+    st.markdown("---")
+    if st.button("✅ I understand - Proceed to Dashboard", type="primary", use_container_width=True):
+        st.session_state.show_validation_report = False
+        # Clear validation reports after acknowledgment
+        st.session_state.validation_reports = []
+        st.rerun()
+
 def main():
     """Main Streamlit app"""
     st.set_page_config(
         page_title="CSV Analytics Dashboard",
         page_icon="📊",
-        layout="wide"
+        layout="wide",
+        initial_sidebar_state="expanded"
     )
+    
+    # Initialize ingestion_log table on startup
+    try:
+        create_ingestion_log_table()
+    except Exception as e:
+        print(f"⚠️ Warning: Could not initialize ingestion_log table: {e}")
     
     # Initialize session state
     if 'uploaded_df' not in st.session_state:
@@ -2485,6 +2759,16 @@ def main():
         st.session_state.ai_assistant = None
     if 'ai_chat_history' not in st.session_state:
         st.session_state.ai_chat_history = []
+    if 'show_validation_report' not in st.session_state:
+        st.session_state.show_validation_report = False
+    if 'validation_report_data' not in st.session_state:
+        st.session_state.validation_report_data = None
+    if 'show_onboarding' not in st.session_state:
+        st.session_state.show_onboarding = not st.session_state.has_existing_data
+    if 'has_completed_first_upload' not in st.session_state:
+        st.session_state.has_completed_first_upload = False
+    if 'validation_reports' not in st.session_state:
+        st.session_state.validation_reports = []
     
     # Header
     st.title("📊 CSV Analytics Dashboard")
@@ -2542,28 +2826,176 @@ def main():
                 st.session_state.has_existing_data = check_existing_data()
                 st.rerun()
     else:
-        # Beautiful welcome message for new users
-        st.markdown("---")
-        st.markdown("### 🚀 Welcome to Your Analytics Dashboard!")
-        st.markdown("""
-        **Get started in 3 simple steps:**
-        1. 📁 **Upload your CSV files** using the sidebar
-        2. 🔄 **Auto-mapping** will handle column detection
-        3. 📊 **Explore insights** with interactive charts and KPIs
-        
-        *Your data will be automatically processed and ready for analysis!*
-        """)
-        st.markdown("---")
+        # Onboarding welcome screen for first-time users
+        if st.session_state.show_onboarding:
+            st.markdown("---")
+            st.markdown("# 🎉 Welcome to Your Analytics Dashboard!")
+            st.markdown("")
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.markdown("""
+                ### Get Started in 3 Simple Steps:
+                
+                **1. 📁 Upload Your First CSV File**
+                - Use the sidebar on the left to upload your CSV
+                - The app will automatically detect and map your columns
+                
+                **2. ✅ Review Data Validation**
+                - See a summary of your data after upload
+                - Check data quality and date ranges
+                
+                **3. 📊 Explore Your Data**
+                - View KPIs and interactive charts
+                - Ask questions using the AI chat
+                
+                ---
+                """)
+                
+                # Primary CTA
+                st.markdown("### 🚀 Ready to Start?")
+                st.info("👈 **Click the file upload button in the sidebar to upload your first CSV file!**")
+                
+                # Sample CSV option
+                st.markdown("---")
+                st.markdown("#### 📋 Need a Sample File?")
+                st.markdown("Download a sample CSV to test the application:")
+                
+                # Create sample CSV
+                sample_data = {
+                    'Invoice Date': ['2025-01-01', '2025-01-02', '2025-01-03'],
+                    'Invoice Number': ['INV001', 'INV002', 'INV003'],
+                    'Sku': ['SKU001', 'SKU002', 'SKU001'],
+                    'Asin': ['B001XXX', 'B002XXX', 'B001XXX'],
+                    'Item Description': ['Product A', 'Product B', 'Product A'],
+                    'Quantity': [2, 1, 3],
+                    'Invoice Amount': [1000, 500, 1500],
+                    'Transaction Type': ['Shipment', 'Shipment', 'Shipment'],
+                    'Ship To City': ['Mumbai', 'Delhi', 'Mumbai']
+                }
+                sample_df = pd.DataFrame(sample_data)
+                sample_csv = sample_df.to_csv(index=False)
+                
+                st.download_button(
+                    label="📥 Download Sample CSV",
+                    data=sample_csv,
+                    file_name="sample_data.csv",
+                    mime="text/csv",
+                    help="Download a sample CSV file to test the application"
+                )
+                
+                if st.button("➡️ Skip Introduction", help="Skip onboarding and go to upload"):
+                    st.session_state.show_onboarding = False
+                    st.rerun()
+            
+            with col2:
+                st.markdown("### ✨ Features:")
+                st.markdown("""
+                - 🤖 **AI Chat** - Ask questions about your data
+                - 📊 **Interactive Dashboards** - Visual analytics
+                - 📅 **Date Filtering** - Analyze specific periods
+                - 💾 **Persistent Storage** - Your data is saved
+                - 🔄 **Multi-file Support** - Upload multiple CSVs
+                """)
+                
+                st.markdown("### 💡 Tips:")
+                st.markdown("""
+                - Supported columns are auto-detected
+                - Date formats are automatically parsed
+                - Transaction types are normalized
+                - Duplicates are removed automatically
+                """)
+        else:
+            # Show welcome message if no data but onboarding skipped
+            st.markdown("---")
+            st.markdown("### 🚀 Welcome to Your Analytics Dashboard!")
+            st.markdown("""
+            **Get started in 3 simple steps:**
+            1. 📁 **Upload your CSV files** using the sidebar
+            2. 🔄 **Auto-mapping** will handle column detection
+            3. 📊 **Explore insights** with interactive charts and KPIs
+            
+            *Your data will be automatically processed and ready for analysis!*
+            """)
+            st.markdown("---")
     
     # Data Management Section
     if st.session_state.show_data_management:
         st.markdown("---")
         st.markdown("### 📁 Data Sources Management")
         
-        # Show processed files summary
+        # Upload History from ingestion_log table
+        try:
+            upload_history = get_upload_history(limit=20)
+            if not upload_history.empty:
+                st.markdown("#### 📋 Upload History")
+                st.markdown("Complete history of all CSV file uploads:")
+                
+                # Display upload history in a formatted table
+                for idx, row in upload_history.iterrows():
+                    with st.expander(f"📄 {row['filename']} - Uploaded {row['uploaded_at']}", expanded=False):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Raw Rows", f"{row['rows_raw']:,}")
+                            st.metric("Cleaned Rows", f"{row['rows_cleaned']:,}")
+                        with col2:
+                            st.metric("Inserted Rows", f"{row['rows_inserted']:,}")
+                            st.metric("Processing Time", f"{row['processing_time_seconds']:.2f}s")
+                        with col3:
+                            status_color = "🟢" if row['validation_status'] == 'passed' else "🔴"
+                            st.markdown(f"**Status**: {status_color} {row['validation_status'].title()}")
+                            if pd.notna(row['date_range_start']) and pd.notna(row['date_range_end']):
+                                st.markdown(f"**Date Range**: {row['date_range_start']} to {row['date_range_end']}")
+                        
+                        st.caption(f"**Ingestion ID**: `{row['ingestion_id']}`")
+                
+                # Summary statistics
+                st.markdown("---")
+                total_uploads = len(upload_history)
+                total_rows_inserted = upload_history['rows_inserted'].sum()
+                st.markdown(f"**Total Uploads**: {total_uploads} files | **Total Rows Inserted**: {total_rows_inserted:,}")
+            else:
+                st.info("No upload history available yet. Upload your first CSV file to see history.")
+        except Exception as e:
+            st.warning(f"Could not load upload history: {e}")
+        
+        st.markdown("---")
+        
+        # Source File Filtering
+        try:
+            unique_sources = get_unique_sources('sales')
+            if unique_sources:
+                st.markdown("#### 🔍 Filter Data by Source File")
+                selected_source = st.selectbox(
+                    "Select source file to view data:",
+                    options=['All Sources'] + unique_sources,
+                    help="Filter dashboard data to show only rows from selected source file",
+                    key="source_file_filter"
+                )
+                
+                if selected_source and selected_source != 'All Sources':
+                    # Store selected source in session state for dashboard filtering
+                    st.session_state.selected_source_file = selected_source
+                    source_data = get_data_by_source(selected_source)
+                    if not source_data.empty:
+                        st.success(f"✅ Found {len(source_data):,} rows from **{selected_source}**")
+                        st.caption(f"Use this filter to view data exclusively from {selected_source} in the dashboard")
+                    else:
+                        st.warning(f"No data found for source: {selected_source}")
+                else:
+                    if 'selected_source_file' in st.session_state:
+                        del st.session_state.selected_source_file
+                    st.info("Selecting 'All Sources' shows data from all uploaded files")
+        except Exception as e:
+            st.warning(f"Could not load source file list: {e}")
+        
+        st.markdown("---")
+        
+        # Show processed files summary (session-based, for reference)
         if st.session_state.processed_files:
-            st.markdown("#### 📊 Recent Uploads")
-            st.markdown(f"**Files Loaded**: {len(st.session_state.processed_files)}")
+            st.markdown("#### 📊 Current Session Uploads")
+            st.markdown(f"**Files Loaded This Session**: {len(st.session_state.processed_files)}")
             st.markdown(f"**Total Rows**: {st.session_state.total_rows_loaded:,}")
             if st.session_state.last_upload_time:
                 st.markdown(f"**Last Upload**: {st.session_state.last_upload_time}")
@@ -2753,13 +3185,36 @@ def main():
                         df_cleaned, cleaning_report = clean_dataframe_transaction_aware(df_raw, mappings)
                         print(f"✅ Cleaned {filename}: {len(df_cleaned)} rows")
                         
+                        # Generate unique ingestion ID for this upload
+                        ingestion_id = str(uuid.uuid4())
+                        source_filename = filename  # Original filename from upload
+                        loaded_timestamp = datetime.now().isoformat()
+                        
+                        # Add source tracking columns to DataFrame BEFORE storage
+                        df_cleaned['source_file'] = source_filename
+                        df_cleaned['ingestion_id'] = ingestion_id
+                        df_cleaned['loaded_at'] = loaded_timestamp
+                        df_cleaned['updated_at'] = loaded_timestamp  # Initially same as loaded_at
+                        
+                        print(f"📋 Added source tracking: {source_filename} (ID: {ingestion_id[:8]}...)")
+                        
+                        # Collect validation data (will show after all files are processed)
+                        validation_report = create_validation_report(df_cleaned, cleaning_report, mappings)
+                        st.session_state.validation_reports.append({
+                            'report': validation_report,
+                            'filename': filename,
+                            'df_cleaned': df_cleaned,
+                            'ingestion_id': ingestion_id
+                        })
+                        
                         # Ensure DataFrame has consistent columns for database storage
                         # This prevents column mismatch errors when appending
                         expected_columns = [
                             'Invoice Date', 'Invoice Number', 'Sku', 'Asin', 'Item Description',
                             'Quantity', 'Invoice Amount', 'Transaction Type', 'Ship To City',
                             'transaction_type', 'revenue_calc', 'shipping_loss_calc', 'units_sold_calc',
-                            'needs_estimation', 'month_tag'
+                            'needs_estimation', 'month_tag',
+                            'source_file', 'ingestion_id', 'loaded_at', 'updated_at'  # Source tracking columns
                         ]
                         
                         # Add missing columns with default values
@@ -2774,8 +3229,23 @@ def main():
                             else:
                                     df_cleaned[col] = None
                         
+                        # Make sure source tracking columns are added BEFORE filtering
+                        # They should already be added above, but ensure they're in expected_columns
+                        if 'source_file' not in df_cleaned.columns:
+                            df_cleaned['source_file'] = source_filename
+                        if 'ingestion_id' not in df_cleaned.columns:
+                            df_cleaned['ingestion_id'] = ingestion_id
+                        if 'loaded_at' not in df_cleaned.columns:
+                            df_cleaned['loaded_at'] = loaded_timestamp
+                        if 'updated_at' not in df_cleaned.columns:
+                            df_cleaned['updated_at'] = loaded_timestamp
+                        
                         # Remove extra columns that aren't in expected schema
-                        df_cleaned = df_cleaned[expected_columns]
+                        # But keep all columns if they include source tracking
+                        available_columns = list(df_cleaned.columns)
+                        columns_to_keep = [col for col in expected_columns if col in available_columns]
+                        # Also keep any additional columns that exist (for backward compatibility)
+                        df_cleaned = df_cleaned[columns_to_keep]
                         
                         print(f"✅ Aligned columns for {filename}: {len(df_cleaned.columns)} columns")
                         
@@ -2802,10 +3272,75 @@ def main():
                                 use_append = False
                                 mode = "replace"
                         
+                        # Track processing time for ingestion log
+                        processing_start_time = time.time()
+                        
                         result = store_data(df_cleaned, 'sales', append=use_append)
                         print(f"📊 DuckDB storage result for {filename}: {result}")
                         
+                        processing_time = time.time() - processing_start_time
+                        
+                        # Validate no duplicates exist in database after storage
                         if result.get('success', False):
+                            is_valid, duplicates_df = validate_no_duplicates('sales')
+                            if not is_valid:
+                                print(f"⚠️ WARNING: Duplicates detected in database after upload!")
+                                if duplicates_df is not None and len(duplicates_df) > 0:
+                                    print(f"   Found {len(duplicates_df)} duplicate business key combinations")
+                                    print(f"   Sample duplicates:\n{duplicates_df.head()}")
+                            else:
+                                print(f"✅ Data integrity verified: No duplicates found in database")
+                        
+                        if result.get('success', False):
+                            # Log upload to ingestion_log table
+                            try:
+                                log_upload(
+                                    ingestion_id=ingestion_id,
+                                    filename=source_filename,
+                                    df_raw=df_raw,
+                                    df_clean=df_cleaned,
+                                    validation_report=validation_report,
+                                    processing_time=processing_time
+                                )
+                                print(f"✅ Logged upload to ingestion_log: {source_filename}")
+                            except Exception as e:
+                                print(f"⚠️ Warning: Could not log upload to ingestion_log: {e}")
+                            
+                            # Run reconciliation check to validate data accuracy
+                            try:
+                                from reconcile import reconcile_single_file
+                                
+                                # Get the raw CSV path (files are saved with _raw suffix by save_raw_and_cleaned function)
+                                base_name = os.path.splitext(filename)[0]
+                                raw_csv_path = os.path.join(RAW_DATA_FOLDER, f"{base_name}_raw.csv")
+                                
+                                if os.path.exists(raw_csv_path):
+                                    # Use the same database path as db_manager
+                                    db_path = 'data/analytics.duckdb'
+                                    if not os.path.exists(db_path):
+                                        db_path = 'data.db'  # Fallback to default
+                                    
+                                    reconciliation_passed, discrepancies = reconcile_single_file(
+                                        raw_csv_path, 
+                                        tolerance=1.0,
+                                        db_path=db_path
+                                    )
+                                    
+                                    if reconciliation_passed:
+                                        print(f"✅ Reconciliation passed for {filename}: Dashboard metrics match source CSV")
+                                    else:
+                                        print(f"⚠️ Reconciliation issues detected for {filename}:")
+                                        for disc in discrepancies:
+                                            if "FAIL" in disc.get('status', ''):
+                                                print(f"   ❌ {disc.get('metric', 'Unknown')}: {disc.get('status', '')}")
+                                                print(f"      CSV: {disc.get('csv_display', 'N/A')}, DB: {disc.get('db_display', 'N/A')}")
+                                else:
+                                    print(f"⚠️ Could not find raw CSV for reconciliation: {raw_csv_path} (reconciliation skipped)")
+                            except ImportError:
+                                print("⚠️ Reconciliation module not available - skipping validation")
+                            except Exception as e:
+                                print(f"⚠️ Reconciliation check failed: {e}")
+                            
                             successful_files += 1
                             rows_stored = result.get('rows_stored', len(df_cleaned))
                             total_rows_processed += rows_stored
@@ -2867,31 +3402,60 @@ def main():
                 st.session_state.last_upload_time = current_time
                 st.session_state.has_existing_data = True
                 
+                # Mark first upload as complete
+                if not st.session_state.has_completed_first_upload:
+                    st.session_state.has_completed_first_upload = True
+                    st.session_state.show_onboarding = False
+                
                 # Clear AI Assistant caches when new data is uploaded
                 if st.session_state.ai_assistant:
                     st.session_state.ai_assistant.clear_all_caches()
-                    st.info("🧹 **Caches cleared** - AI Assistant will learn from new data")
                 
                 # Show results
                 if successful_files > 0:
-                    st.success(f"✅ **Processed {successful_files}/{len(new_files)} files successfully!**")
-                    st.success(f"📊 **Total rows loaded**: {total_rows_processed:,}")
+                    # Show validation reports after all files are processed
+                    if st.session_state.validation_reports:
+                        # Show combined validation report
+                        for val_data in st.session_state.validation_reports:
+                            show_validation_modal(
+                                val_data['report'],
+                                val_data['filename']
+                            )
+                        
+                        # Clear validation reports after showing (user must acknowledge)
+                        # Reports will be cleared when user clicks "Proceed to Dashboard"
+                    else:
+                        st.success(f"✅ **Processed {successful_files}/{len(new_files)} files successfully!**")
+                        st.success(f"📊 **Total rows loaded**: {total_rows_processed:,}")
+                        
+                        # Verify total data in database using DuckDB
+                        try:
+                            total_db_rows = get_row_count('sales')
+                            st.info(f"🗄️ **Total rows in database**: {total_db_rows:,}")
+                            print(f"✅ PROCESSING COMPLETE: {successful_files}/{len(new_files)} files, {total_rows_processed} rows")
+                        except Exception as e:
+                            st.warning(f"⚠️ Could not verify database count: {e}")
+                            print(f"⚠️ Database verification failed: {e}")
                     
-                    # Verify total data in database using DuckDB
-                    try:
-                        total_db_rows = get_row_count('sales')
-                        st.info(f"🗄️ **Total rows in database**: {total_db_rows:,}")
-                        print(f"✅ PROCESSING COMPLETE: {successful_files}/{len(new_files)} files, {total_rows_processed} rows")
-                    except Exception as e:
-                        st.warning(f"⚠️ Could not verify database count: {e}")
-                        print(f"⚠️ Database verification failed: {e}")
+                    # Show quick tour for first upload
+                    if st.session_state.has_completed_first_upload and len(st.session_state.processed_files) == 1:
+                        st.markdown("---")
+                        st.markdown("### 🎓 Quick Tour")
+                        st.info("""
+                        **Welcome! Here's what you can do:**
+                        - 📊 **KPIs Tab**: View your key metrics and charts
+                        - 💬 **Chat Tab**: Ask questions about your data using AI
+                        - 📅 **Filter**: Use date filters to analyze specific periods
+                        """)
                 
                 if failed_files > 0:
                     st.warning(f"⚠️ **{failed_files} files failed to process**")
                 
-                # Only rerun if we successfully processed at least one file
+                # Rerun after processing
                 if successful_files > 0:
-                    st.rerun()
+                    # Don't rerun if validation modal is showing - let user acknowledge first
+                    if not st.session_state.validation_reports:
+                        st.rerun()
                 else:
                     st.error("❌ No files were successfully processed. Please check the error messages above.")
             else:
@@ -3191,7 +3755,9 @@ def main():
                 pass  # Range display removed - redundant with Start/End Date fields
             
             # Get filtered data for dashboard (no month filtering needed - handled automatically above)
-            df = get_date_filtered_data(str(start_date), str(end_date), transaction_type)
+            # Get source file filter from session state if set
+            source_filter = st.session_state.get('selected_source_file', None)
+            df = get_date_filtered_data(str(start_date), str(end_date), transaction_type, source_file=source_filter)
             
             # Month Analysis - Original Layout with Accurate Data
             st.markdown("### 📊 Month Analysis")
@@ -3916,23 +4482,21 @@ def main():
                     
                     st.markdown("---")
                 
-                # Question input with better width
+                # Question input with full-width layout
                 st.markdown("---")
                 st.markdown("### 💬 Ask AI Assistant")
                 
-                # Use wider columns for question input
-                col1, col2, col3 = st.columns([1, 4, 1])
-                with col2:
-                    question = st.text_area(
-                        "Ask a question about your data:",
-                        placeholder="e.g., What's the total revenue? Show me top products by city...",
-                        key="ai_chat_question",
-                        height=100,
-                        help="Ask any question about your business data in natural language"
-                    )
+                # Use full width for question input
+                question = st.text_area(
+                    "Ask a question about your data:",
+                    placeholder="e.g., What's the total revenue? Show me top products by city...",
+                    key="ai_chat_question",
+                    height=100,
+                    help="Ask any question about your business data in natural language"
+                )
                 
-                # Center the buttons
-                col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+                # Buttons in a row
+                col1, col2, col3, col4 = st.columns([2, 2, 2, 4])
                 with col1:
                     if st.button("🤖 Ask AI", type="primary", use_container_width=True):
                         if question.strip():
@@ -3965,70 +4529,122 @@ def main():
                                             'offline_mode': result.get('offline_mode', False)
                                         })
                                         
-                                        # Display the response in full width with simple formatting
+                                        # Display the response with proper formatting
+                                        format_ai_response(result['response'], question)
+                                        
+                                        # Navigation and metadata in consistent layout
                                         st.markdown("---")
-                                        st.markdown("### 🤖 AI Response")
                                         
-                                        # Use simple, readable formatting that matches the page design
-                                        st.markdown(result['response'])
-                                        
-                                        # Add navigation buttons
-                                        col1, col2, col3 = st.columns([1, 1, 1])
+                                        # Action buttons row
+                                        col1, col2, col3 = st.columns([1, 1, 6])
                                         with col1:
-                                            if st.button("⬆️ Back to Top", help="Scroll to the top of the chat"):
-                                                st.markdown("---")
-                                                st.markdown("### 💬 Chat History")
+                                            if st.button("💬 Ask Another", type="secondary", help="Ask a follow-up question", use_container_width=True):
+                                                st.session_state.ai_chat_question = ""  # Clear the question
+                                                st.rerun()
                                         
-                                        with col2:
-                                            if st.button("💬 Ask Another Question", type="secondary", help="Ask a follow-up question"):
-                                                st.markdown("---")
-                                                st.markdown("### 💬 Ask AI Assistant")
+                                        # SQL query and metadata in full width
+                                        col_left, col_right = st.columns([3, 1])
                                         
-                                        # Question input will be cleared by user manually
+                                        with col_left:
+                                            # Show SQL query in expander
+                                            if result.get('sql'):
+                                                with st.expander("🔍 View Generated SQL Query", expanded=False):
+                                                    st.code(result['sql'], language='sql')
+                                            
+                                            # Show offline mode warning if applicable
+                                            if result.get('offline_mode'):
+                                                st.warning("⚠️ AI features are limited. Ollama is not available.")
+                                            
+                                            # Show cache indicator if applicable
+                                            if result.get('cached'):
+                                                if result.get('similarity'):
+                                                    st.info(f"📋 **Similar Cached Result** - Similarity: {result['similarity']:.1%}")
+                                                else:
+                                                    st.info("📋 **Cached Result** - This question was answered before")
                                         
-                                        # Show SQL query in expander
-                                        if result.get('sql'):
-                                            with st.expander("🔍 View Generated SQL Query", expanded=False):
-                                                st.code(result['sql'], language='sql')
-                                        
-                                        # Show offline mode warning if applicable
-                                        if result.get('offline_mode'):
-                                            st.warning("⚠️ AI features are limited. Ollama is not available.")
-                                        
-                                        # Show cache indicator if applicable
-                                        if result.get('cached'):
-                                            if result.get('similarity'):
-                                                st.info(f"📋 **Similar Cached Result** - Similarity: {result['similarity']:.1%}")
-                                            else:
-                                                st.info("📋 **Cached Result** - This question was answered before")
-                                        
-                                        # Show response time
-                                        if result.get('response_time'):
-                                            st.caption(f"⏱️ Response time: {result['response_time']:.2f} seconds")
+                                        with col_right:
+                                            # Show response time
+                                            if result.get('response_time'):
+                                                st.metric("⏱️ Response Time", f"{result['response_time']:.2f}s")
                                         
                                         # Don't rerun - let the chat interface update naturally
                                     else:
-                                        # Handle different error types with specific messages
+                                        # Handle errors with beautiful center-aligned UI
                                         error_type = result.get('error_type', 'unknown')
                                         
+                                        # Full-width error container with consistent alignment
+                                        st.markdown("---")
+                                        st.error("❌ **Unable to Answer Your Question**")
+                                        
+                                        # Friendly error message based on type
                                         if error_type == 'connection_error':
-                                            st.error("❌ **AI Assistant Unavailable**")
-                                            st.info("🔧 Please ensure Ollama is running: `ollama serve`")
+                                            st.warning("**AI Assistant Unavailable**")
+                                            st.info("🔧 Please ensure Ollama is running locally: `ollama serve`")
                                         elif error_type == 'timeout_error':
-                                            st.error("❌ **Query Timeout**")
+                                            st.warning("**Query Timeout**")
                                             st.info("⏱️ This query is taking too long. Try a simpler question.")
                                         elif error_type == 'sql_error' or error_type == 'sql_generation_failed':
-                                            st.error("❌ **Question Not Understood**")
-                                            st.info("💡 I couldn't understand that question. Could you rephrase it?")
+                                            st.warning("**I couldn't understand that question**")
+                                            
+                                            # Show helpful suggestions
+                                            st.markdown("#### 💡 Try asking one of these instead:")
+                                            suggestions = [
+                                                "What is my total revenue?",
+                                                "Show me top 5 products",
+                                                "How many orders do I have?"
+                                            ]
+                                            for i, sugg in enumerate(suggestions, 1):
+                                                st.markdown(f"{i}. {sugg}")
+                                            
+                                            col1, col2, col3 = st.columns([1, 1, 1])
+                                            with col2:
+                                                if st.button("📊 Show me what data you have", key="show_data_on_error", use_container_width=True):
+                                                    try:
+                                                        sample_query = "SELECT * FROM sales LIMIT 5"
+                                                        sample_data = query_data(sample_query)
+                                                        if not sample_data.empty:
+                                                            st.markdown("#### 📋 Sample of your data:")
+                                                            st.dataframe(sample_data, use_container_width=True)
+                                                    except:
+                                                        st.info("Could not retrieve sample data")
                                         elif error_type == 'database_query_failed':
-                                            st.error("❌ **Data Retrieval Failed**")
-                                            st.info("📊 Unable to retrieve data. Please try again.")
+                                            st.error("**Data Retrieval Failed**")
+                                            st.info("📊 Unable to retrieve data. The question may reference data that doesn't exist.")
+                                            
+                                            st.markdown("#### 💡 Try asking:")
+                                            st.markdown("- What columns do you have?")
+                                            st.markdown("- Show me a sample of the data")
+                                            
+                                            col1, col2, col3 = st.columns([1, 1, 1])
+                                            with col2:
+                                                if st.button("📊 Show me what data you have", key="show_data_db_error", use_container_width=True):
+                                                    try:
+                                                        sample_query = "SELECT * FROM sales LIMIT 5"
+                                                        sample_data = query_data(sample_query)
+                                                        if not sample_data.empty:
+                                                            st.markdown("#### 📋 Sample of your data:")
+                                                            st.dataframe(sample_data, use_container_width=True)
+                                                    except:
+                                                        st.info("Could not retrieve sample data")
                                         elif error_type == 'offline_mode':
-                                            st.error("❌ **AI Assistant Offline**")
-                                            st.info("🔧 AI assistant is currently unavailable. Please ensure Ollama is running.")
+                                            st.warning("**AI Assistant Offline**")
+                                            st.info("🔧 AI features are currently unavailable. Please ensure Ollama is running: `ollama serve`")
                                         else:
-                                            st.error(f"❌ **Error:** {result['error']}")
-                                            st.info("💡 Try rephrasing your question or check if Ollama is running.")
+                                            st.error("**Unable to process your question**")
+                                            st.info("💡 I couldn't understand that question. Try rephrasing it with simpler terms.")
+                                            
+                                            st.markdown("#### 💡 Example questions that work well:")
+                                            examples = [
+                                                "What is the total revenue?",
+                                                "Show me top 5 products by revenue",
+                                                "How many orders in the last 30 days?"
+                                            ]
+                                            for ex in examples:
+                                                st.markdown(f"- {ex}")
+                                            
+                                            # Hide technical error from user
+                                            with st.expander("🔍 Technical Details (for support)", expanded=False):
+                                                st.code(f"Error type: {error_type}\nError message: {result.get('error', 'Unknown')}")
                                 
                                 except Exception as e:
                                     # Log the error for debugging
@@ -4054,6 +4670,7 @@ def main():
                         st.rerun()
                 
                 with col4:
+                    st.markdown("")
                     st.caption("💡 **Tip:** Ask specific questions like 'What's my total revenue?' or 'Show me top 5 products'")
                 
                 # Show AI status
