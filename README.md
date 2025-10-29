@@ -1,118 +1,129 @@
-# CSV Analytics Dashboard
+# 📊 CSV Analytics Dashboard
 
-Simple, clean CSV analytics with automatic column mapping and natural language chat.
+**Production-ready business analytics platform** with AI-powered insights.
 
-## Features
+**Status**: ✅ Phase 0 Complete | 🚀 Phase 1: FastAPI Backend (In Progress)
 
-✅ **Automatic Column Mapping** - Upload CSV and columns are mapped automatically  
-✅ **Business-Grade Dashboard** - Comprehensive KPIs with date filtering and visualizations  
-✅ **Date Range Filtering** - Quick presets (Last 7/30 days, This/Last Month) + custom ranges  
-✅ **Advanced Analytics** - WoW comparisons, movers & decliners, trend analysis  
-✅ **Interactive Charts** - Revenue trends, status breakdowns, regional analysis  
-✅ **Export Functionality** - Download CSV reports for all data tables  
-✅ **INR Currency** - All amounts displayed in Indian Rupees (₹)  
-✅ **Natural Language Chat** - Ask questions about your data  
-✅ **Persistent Mappings** - Remembers your column choices for future uploads  
+---
 
-## Quick Start
+## 🎯 Quick Start
 
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+### **Option 1: New FastAPI Backend (Recommended)**
 
-2. **Run the app:**
-   ```bash
-   streamlit run app.py
-   ```
+```bash
+# Install backend dependencies
+cd backend
+pip install -r requirements.txt
 
-3. **Upload CSV:**
-   - Click "Upload CSV File" in sidebar
-   - Select your file
-   - Click "Store Data" to process
+# Run FastAPI server
+uvicorn main:app --reload
 
-4. **View Business Dashboard:**
-   - Select date range (presets or custom)
-   - See comprehensive KPIs with WoW comparisons
-   - View interactive charts and trend analysis
-   - Export data tables as CSV
+# API available at http://localhost:8000
+# API docs at http://localhost:8000/api/docs
+```
 
-5. **Chat about data:**
-   - Go to "💬 Chat" tab
-   - Ask questions like "What's the total revenue?" or "Show me top products"
+### **Option 2: Legacy Streamlit App (Reference Only)**
 
-## Supported CSV Format
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
-The app automatically recognizes these columns:
+# Run Streamlit app
+cd legacy
+streamlit run app.py
+```
 
-| Field | Recognized Headers |
-|-------|-------------------|
-| **Order Date** | Order Date, Invoice Date, Shipment Date, Date |
-| **Order ID** | Order ID, Order Number, Invoice ID, Order No |
-| **SKU** | SKU, ASIN, Product ID, Item ID |
-| **Product Name** | Product Name, Item Description, Title, Product |
-| **Quantity** | Quantity, Qty, Units |
-| **Revenue** | Invoice Amount, Order Amount, Total Amount, Revenue |
-| **Region** | Region, City, Market |
-| **Status** | Status, Order Status |
+---
 
-## Example Questions
+## 📁 Project Structure
 
-### Numeric Questions
-- "What's the total revenue?"
-- "How many orders?"
-- "Top 5 SKUs by revenue?"
-- "Total units sold?"
+```
+Nisarg Project/
+│
+├── backend/              ← 🆕 FastAPI backend (NEW)
+│   ├── main.py          # FastAPI app entry point
+│   ├── api/             # API routes
+│   ├── core/            # Configuration, database, AI service
+│   ├── models/          # Pydantic request/response models
+│   ├── services/        # Business logic layer
+│   └── tests/           # API tests
+│
+├── legacy/               ← Original Streamlit app (reference)
+│   ├── app.py
+│   ├── ai_assistant.py
+│   └── db_manager.py
+│
+├── data/                 ← Shared database (both use this)
+│   ├── analytics.duckdb
+│   ├── raw/
+│   └── cleaned/
+│
+└── tests/                ← Test suite (works for both)
+```
 
-### Descriptive Questions
-- "Show me performance trends"
-- "What's our best product?"
-- "Any declining trends?"
-- "Overall business summary"
+---
 
-## How It Works
+## 🚀 Features
 
-1. **Upload CSV** → App automatically maps columns using synonyms
-2. **Confirm Mapping** → Only if ambiguous (rare)
-3. **Store Data** → Saves to SQLite with standardized schema
-4. **View KPIs** → Instant metrics and charts
-5. **Chat** → Ask questions, get grounded answers
+✅ **Multi-File CSV Upload** - Automatic column mapping  
+✅ **Business Intelligence** - Comprehensive KPIs and analytics  
+✅ **AI-Powered Insights** - Natural language queries (Ollama)  
+✅ **Data Trust** - Validation, deduplication, lineage tracking  
+✅ **Production Ready** - Docker, tests, reconciliation  
 
-## Data Storage
+---
 
-- **Database:** `data.db` (SQLite)
-- **Table:** `sales` with standardized columns
-- **Mappings:** `data/mapping.json` (saved for reuse)
+## 📚 Documentation
 
-## Requirements
+- **AFTER_PHASE_0_IMPLEMENTATION.md** - Complete Phase 0 summary
+- **ARCHITECTURE.md** - System architecture details
+- **DOCKER_SETUP.md** - Docker deployment guide
+- **backend/** - FastAPI backend (NEW)
 
-- Python 3.8+
-- streamlit
-- pandas
-- plotly
-- numpy
+---
 
-## Architecture
+## 🔧 Development
 
-- **Single file app** - Everything in `app.py`
-- **Auto-mapping** - Uses synonym matching + type inference
-- **SQL queries** - For numeric questions (never guesses)
-- **Simple chat** - Direct answers based on actual data
-- **Clean UI** - Sidebar upload, main tabs for KPIs/Chat
+### Backend API
 
-## Troubleshooting
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
 
-**Issue:** Columns not mapping correctly  
-**Solution:** Use "Change Column Mapping" button to adjust
+### Testing
 
-**Issue:** Chat not working  
-**Solution:** Make sure data is stored first (click "Store Data")
+```bash
+# Run all tests
+pytest tests/ -v
 
-**Issue:** Wrong currency format  
-**Solution:** App uses INR (₹). Revenue column should contain numeric values.
+# Run backend API tests
+pytest backend/tests/ -v
+```
 
-## Support
+### Docker
 
-The app is designed to be simple and self-contained. All logic is in `app.py` with clear comments.
+```bash
+docker-compose up --build
+```
 
-For issues, check the console logs - the app prints debugging information.
+---
+
+## 📝 Status
+
+**Phase 0**: ✅ Complete
+- Streamlit app functional
+- All features implemented
+- Tests passing (38/38)
+
+**Phase 1**: 🚀 In Progress
+- FastAPI backend structure created
+- Health endpoints working
+- Migration of business logic ongoing
+
+---
+
+## 📄 License
+
+Internal project - See project documentation
