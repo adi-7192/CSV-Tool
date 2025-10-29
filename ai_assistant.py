@@ -26,11 +26,16 @@ from datetime import datetime, timedelta
 import os
 import sys
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import math
 import logging
 import traceback
 from functools import wraps
+import threading
+import time
+import hashlib
+from difflib import SequenceMatcher
+import csv
 
 # Import our existing database manager
 try:
@@ -49,6 +54,92 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Query logging functions
+def log_ai_query(timestamp: str, question: str, sql_generated: str, query_success: bool, 
+                 total_time_seconds: float, sql_generation_time: float, sql_execution_time: float,
+                 response_generation_time: float, error_message: str, rows_returned: int):
+    """Log AI query details to CSV file"""
+    try:
+        log_file = 'ai_query_log.csv'
+        
+        # Check if file exists, if not create with headers
+        if not os.path.exists(log_file):
+            with open(log_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'timestamp', 'question', 'sql_generated', 'query_success', 
+                    'total_time_seconds', 'sql_generation_time', 'sql_execution_time',
+                    'response_generation_time', 'error_message', 'rows_returned'
+                ])
+        
+        # Append the query record
+        with open(log_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                timestamp, question, sql_generated, query_success,
+                total_time_seconds, sql_generation_time, sql_execution_time,
+                response_generation_time, error_message, rows_returned
+            ])
+            
+    except Exception as e:
+        logger.error(f"Error logging query: {e}")
+
+def get_query_history(limit: int = 20) -> pd.DataFrame:
+    """Get last N queries from log file"""
+    try:
+        log_file = 'ai_query_log.csv'
+        if not os.path.exists(log_file):
+            return pd.DataFrame()
+        
+        df = pd.read_csv(log_file)
+        return df.tail(limit)
+        
+    except Exception as e:
+        logger.error(f"Error reading query history: {e}")
+        return pd.DataFrame()
+
+def calculate_performance_stats() -> Dict:
+    """Calculate performance statistics from log file"""
+    try:
+        log_file = 'ai_query_log.csv'
+        if not os.path.exists(log_file):
+            return {
+                'total_queries': 0,
+                'avg_response_time': 0.0,
+                'success_rate': 0.0,
+                'fastest_query_time': 0.0
+            }
+        
+        df = pd.read_csv(log_file)
+        if df.empty:
+            return {
+                'total_queries': 0,
+                'avg_response_time': 0.0,
+                'success_rate': 0.0,
+                'fastest_query_time': 0.0
+            }
+        
+        total_queries = len(df)
+        avg_response_time = df['total_time_seconds'].mean()
+        success_rate = (df['query_success'].sum() / total_queries) * 100
+        fastest_query_time = df['total_time_seconds'].min()
+        
+        return {
+            'total_queries': total_queries,
+            'avg_response_time': round(avg_response_time, 2),
+            'success_rate': round(success_rate, 1),
+            'fastest_query_time': round(fastest_query_time, 2)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating performance stats: {e}")
+        return {
+            'total_queries': 0,
+            'avg_response_time': 0.0,
+            'success_rate': 0.0,
+            'fastest_query_time': 0.0
+        }
 
 # Error handling decorators
 def handle_ollama_errors(func):
@@ -479,7 +570,24 @@ class AIAssistant:
         self.model = "llama3.1:8b"
         self.is_ollama_available = False
         self.database_schema = {}
-        self.query_cache = {}  # Simple cache for repeated questions
+        
+        # Intelligent caching system
+        self.question_cache = OrderedDict()  # LRU cache for questions
+        self.sql_cache = OrderedDict()  # LRU cache for SQL generation
+        self.analysis_cache = OrderedDict()  # LRU cache for LLM analysis
+        self.schema_cache = {}  # Schema cache
+        self.cache_max_size = 50  # Maximum cache entries
+        self.cache_hit_count = 0
+        self.cache_miss_count = 0
+        
+        # Performance monitoring
+        self.performance_stats = {
+            'total_questions': 0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'avg_response_time': 0,
+            'slow_queries': []
+        }
         
         try:
             # Test Ollama connection
@@ -494,7 +602,7 @@ class AIAssistant:
             
             # Load database schema safely
             self.database_schema = self._get_database_schema()
-            
+        
             # Initialize predictive analytics
             self.predictive_analytics = PredictiveAnalytics()
             
@@ -502,6 +610,110 @@ class AIAssistant:
             logger.error(f"Error initializing AI Assistant: {e}\n{traceback.format_exc()}")
             print("⚠️ AI Assistant initialized with limited functionality due to initialization error")
             self.is_ollama_available = False
+    
+    def _normalize_question(self, question: str) -> str:
+        """Normalize question for better cache matching"""
+        # Convert to lowercase and remove extra whitespace
+        normalized = question.lower().strip()
+        
+        # Remove common variations
+        variations = {
+            'what is': 'what',
+            'what are': 'what',
+            'show me': 'show',
+            'give me': 'give',
+            'tell me': 'tell',
+            'can you': 'can',
+            'could you': 'could'
+        }
+        
+        for old, new in variations.items():
+            normalized = normalized.replace(old, new)
+        
+        # Remove punctuation
+        normalized = re.sub(r'[^\w\s]', '', normalized)
+        
+        return normalized
+    
+    def _calculate_similarity(self, question1: str, question2: str) -> float:
+        """Calculate similarity between two questions"""
+        norm1 = self._normalize_question(question1)
+        norm2 = self._normalize_question(question2)
+        
+        # Use SequenceMatcher for similarity
+        similarity = SequenceMatcher(None, norm1, norm2).ratio()
+        
+        # Boost similarity for questions with same keywords
+        keywords1 = set(norm1.split())
+        keywords2 = set(norm2.split())
+        common_keywords = keywords1.intersection(keywords2)
+        
+        if common_keywords:
+            keyword_boost = len(common_keywords) / max(len(keywords1), len(keywords2))
+            similarity = max(similarity, keyword_boost * 0.8)
+        
+        return similarity
+    
+    def _find_similar_cached_question(self, question: str, threshold: float = 0.8) -> Optional[Dict]:
+        """Find similar cached question above similarity threshold"""
+        for cached_question, cached_data in self.question_cache.items():
+            similarity = self._calculate_similarity(question, cached_question)
+            if similarity >= threshold:
+                return {
+                    'question': cached_question,
+                    'data': cached_data,
+                    'similarity': similarity
+                }
+        return None
+    
+    def _manage_cache_size(self, cache: OrderedDict) -> None:
+        """Manage cache size using LRU eviction"""
+        while len(cache) > self.cache_max_size:
+            cache.popitem(last=False)  # Remove least recently used
+    
+    def _add_to_cache(self, cache: OrderedDict, key: str, value: Any) -> None:
+        """Add item to cache with LRU management"""
+        if key in cache:
+            # Move to end (most recently used)
+            cache.move_to_end(key)
+        else:
+            cache[key] = value
+            self._manage_cache_size(cache)
+    
+    def _get_from_cache(self, cache: OrderedDict, key: str) -> Optional[Any]:
+        """Get item from cache and update LRU order"""
+        if key in cache:
+            cache.move_to_end(key)  # Move to end (most recently used)
+            return cache[key]
+        return None
+    
+    def clear_all_caches(self) -> None:
+        """Clear all caches (called when new data is uploaded)"""
+        self.question_cache.clear()
+        self.sql_cache.clear()
+        self.analysis_cache.clear()
+        self.schema_cache.clear()
+        logger.info("All caches cleared due to data update")
+    
+    def clear_sql_cache(self) -> None:
+        """Clear SQL cache (called when SQL generation rules change)"""
+        self.sql_cache.clear()
+        logger.info("SQL cache cleared due to rule changes")
+    
+    def get_cache_stats(self) -> Dict:
+        """Get cache performance statistics"""
+        total_requests = self.cache_hit_count + self.cache_miss_count
+        hit_rate = (self.cache_hit_count / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            'question_cache_size': len(self.question_cache),
+            'sql_cache_size': len(self.sql_cache),
+            'analysis_cache_size': len(self.analysis_cache),
+            'cache_hit_rate': f"{hit_rate:.1f}%",
+            'total_hits': self.cache_hit_count,
+            'total_misses': self.cache_miss_count,
+            'performance_stats': self.performance_stats
+        }
     
     def _test_ollama_connection(self) -> bool:
         """Test connection to Ollama service"""
@@ -538,8 +750,13 @@ class AIAssistant:
             return False
     
     def _get_database_schema(self) -> Dict[str, Any]:
-        """Get database schema information"""
+        """Get database schema information with caching"""
         try:
+            # Check schema cache first
+            if 'schema' in self.schema_cache:
+                print("📋 Using cached schema")
+                return self.schema_cache['schema']
+            
             if not table_exists('sales'):
                 logger.warning("Sales table does not exist")
                 return {}
@@ -576,7 +793,9 @@ class AIAssistant:
                 'statistics': stats_result.iloc[0].to_dict() if not stats_result.empty else {}
             }
             
-            print(f"📊 Database schema loaded: {len(schema_info['columns'])} columns")
+            # Cache the schema
+            self.schema_cache['schema'] = schema_info
+            print(f"📊 Database schema loaded and cached: {len(schema_info['columns'])} columns")
             return schema_info
             
         except Exception as e:
@@ -1097,7 +1316,7 @@ class AIAssistant:
     @timeout_handler(seconds=45)
     def ask_question(self, question: str) -> Dict[str, Any]:
         """
-        Process a natural language question and return formatted response
+        Process a natural language question and return formatted response with timing and logging
         
         Args:
             question: Natural language business question
@@ -1105,20 +1324,102 @@ class AIAssistant:
         Returns:
             Dictionary with response, SQL, and metadata
         """
+        start_time = time.time()
+        self.performance_stats['total_questions'] += 1
+        
+        # Initialize timing variables
+        sql_generation_time = 0.0
+        sql_execution_time = 0.0
+        response_generation_time = 0.0
+        sql_generated = ""
+        rows_returned = 0
+        query_success = False
+        error_message = ""
+        
         try:
             print(f"🤔 Processing question: {question}")
             
-            # Check cache first for repeated questions
+            # Check for exact match in cache first
             question_key = question.lower().strip()
-            if question_key in self.query_cache:
-                print("📋 Using cached result")
-                cached_result = self.query_cache[question_key]
+            cached_result = self._get_from_cache(self.question_cache, question_key)
+            if cached_result:
+                print("📋 Using exact cached result")
+                self.cache_hit_count += 1
+                self.performance_stats['cache_hits'] += 1
                 cached_result['cached'] = True
+                cached_result['response_time'] = time.time() - start_time
+                
+                # Log cached query
+                total_time = time.time() - start_time
+                log_ai_query(
+                    timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    question=question,
+                    sql_generated=cached_result.get('sql', ''),
+                    query_success=True,
+                    total_time_seconds=total_time,
+                    sql_generation_time=0.0,
+                    sql_execution_time=0.0,
+                    response_generation_time=0.0,
+                    error_message='',
+                    rows_returned=cached_result.get('result_rows', 0)
+                )
+                
                 return cached_result
+            
+            # Check for similar questions in cache
+            similar_cached = self._find_similar_cached_question(question, threshold=0.85)
+            if similar_cached:
+                print(f"📋 Using similar cached result (similarity: {similar_cached['similarity']:.2f})")
+                self.cache_hit_count += 1
+                self.performance_stats['cache_hits'] += 1
+                result = similar_cached['data'].copy()
+                result['cached'] = True
+                result['similarity'] = similar_cached['similarity']
+                result['response_time'] = time.time() - start_time
+                
+                # Log similar cached query
+                total_time = time.time() - start_time
+                log_ai_query(
+                    timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    question=question,
+                    sql_generated=result.get('sql', ''),
+                    query_success=True,
+                    total_time_seconds=total_time,
+                    sql_generation_time=0.0,
+                    sql_execution_time=0.0,
+                    response_generation_time=0.0,
+                    error_message='',
+                    rows_returned=result.get('result_rows', 0)
+                )
+                
+                return result
+            
+            # Cache miss - process normally
+            self.cache_miss_count += 1
+            self.performance_stats['cache_misses'] += 1
             
             # Check if Ollama is available
             if not self.is_ollama_available:
-                return self._handle_offline_mode(question)
+                result = self._handle_offline_mode(question)
+                query_success = result.get('success', False)
+                error_message = result.get('error', '') if not query_success else ''
+                
+                # Log offline mode query
+                total_time = time.time() - start_time
+                log_ai_query(
+                    timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    question=question,
+                    sql_generated='',
+                    query_success=query_success,
+                    total_time_seconds=total_time,
+                    sql_generation_time=0.0,
+                    sql_execution_time=0.0,
+                    response_generation_time=0.0,
+                    error_message=error_message,
+                    rows_returned=0
+                )
+                
+                return result
             
             # Check if this is a predictive analytics question
             if self.predictive_analytics.is_predictive_question(question):
@@ -1127,16 +1428,72 @@ class AIAssistant:
             else:
                 # Use intelligent SQL generation for all other questions
                 print("🧠 Using intelligent SQL generation...")
-                result = self._handle_intelligent_sql_question(question)
+                result = self._handle_intelligent_sql_question_with_timing(question)
             
-            # Cache successful results (limit cache size)
-            if result['success'] and len(self.query_cache) < 50:
-                self.query_cache[question_key] = result.copy()
+            # Extract timing information from result
+            sql_generation_time = result.get('sql_generation_time', 0.0)
+            sql_execution_time = result.get('sql_execution_time', 0.0)
+            response_generation_time = result.get('response_generation_time', 0.0)
+            sql_generated = result.get('sql', '')
+            rows_returned = result.get('result_rows', 0)
+            query_success = result.get('success', False)
+            error_message = result.get('error', '') if not query_success else ''
+            
+            # Cache successful results
+            if result['success']:
+                self._add_to_cache(self.question_cache, question_key, result.copy())
+                print(f"💾 Cached result (cache size: {len(self.question_cache)})")
+            
+            # Update performance stats
+            response_time = time.time() - start_time
+            result['response_time'] = response_time
+            
+            # Track slow queries
+            if response_time > 5.0:  # Queries taking more than 5 seconds
+                self.performance_stats['slow_queries'].append({
+                    'question': question,
+                    'time': response_time,
+                    'timestamp': datetime.now().isoformat()
+                })
+                # Keep only last 20 slow queries
+                if len(self.performance_stats['slow_queries']) > 20:
+                    self.performance_stats['slow_queries'] = self.performance_stats['slow_queries'][-20:]
+            
+            # Log the query
+            log_ai_query(
+                timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                question=question,
+                sql_generated=sql_generated,
+                query_success=query_success,
+                total_time_seconds=response_time,
+                sql_generation_time=sql_generation_time,
+                sql_execution_time=sql_execution_time,
+                response_generation_time=response_generation_time,
+                error_message=error_message,
+                rows_returned=rows_returned
+            )
             
             return result
             
         except Exception as e:
             logger.error(f"Error processing question '{question}': {e}\n{traceback.format_exc()}")
+            error_message = str(e)
+            
+            # Log the error
+            total_time = time.time() - start_time
+            log_ai_query(
+                timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                question=question,
+                sql_generated='',
+                query_success=False,
+                total_time_seconds=total_time,
+                sql_generation_time=0.0,
+                sql_execution_time=0.0,
+                response_generation_time=0.0,
+                error_message=error_message,
+                rows_returned=0
+            )
+            
             return {
                 'success': False,
                 'error': 'I encountered an unexpected error. Please try rephrasing your question.',
@@ -1186,6 +1543,126 @@ class AIAssistant:
                 'error_type': 'offline_mode'
             }
     
+    def _handle_intelligent_sql_question_with_timing(self, question: str) -> Dict[str, Any]:
+        """
+        Handle any business question using intelligent SQL generation with detailed timing
+        
+        Args:
+            question: Natural language business question
+            
+        Returns:
+            Dictionary with response, SQL, timing, and metadata
+        """
+        try:
+            print(f"🧠 Analyzing question: {question}")
+            
+            # Time SQL generation
+            sql_start = time.time()
+            sql = self._generate_intelligent_sql(question)
+            sql_generation_time = time.time() - sql_start
+            
+            if not sql:
+                logger.warning(f"Could not generate SQL for question: {question}")
+                return {
+                    'success': False,
+                    'error': 'I couldn\'t understand that question. Could you rephrase it?',
+                    'question': question,
+                    'error_type': 'sql_generation_failed',
+                    'sql_generation_time': sql_generation_time,
+                    'sql_execution_time': 0.0,
+                    'response_generation_time': 0.0
+                }
+            
+            print(f"🔍 Generated SQL: {sql}")
+            
+            # Validate SQL safety
+            is_safe, error_msg = self._validate_sql_safety(sql)
+            if not is_safe:
+                logger.warning(f"SQL safety validation failed: {error_msg}")
+                return {
+                    'success': False,
+                    'error': 'I couldn\'t understand that question. Could you rephrase it?',
+                    'question': question,
+                    'sql': sql,
+                    'error_type': 'sql_safety_failed',
+                    'sql_generation_time': sql_generation_time,
+                    'sql_execution_time': 0.0,
+                    'response_generation_time': 0.0
+                }
+            
+            # Time SQL execution
+            sql_exec_start = time.time()
+            print("📊 Executing SQL query...")
+            try:
+                # Ensure query has LIMIT clause for performance
+                optimized_sql = self._optimize_query(sql)
+                
+                result = query_data(optimized_sql)
+                
+                # Check result size for performance
+                if len(result) > 1000:
+                    logger.warning(f"Large result set ({len(result)} rows), limiting for performance")
+                    result = result.head(1000)  # Limit to 1000 rows for performance
+                    
+            except Exception as e:
+                logger.error(f"Database query execution failed: {e}")
+                
+                # Clear SQL cache if there's a column error
+                error_msg = str(e).lower()
+                if 'not found' in error_msg or 'referenced column' in error_msg:
+                    logger.info("Clearing SQL cache due to column error")
+                    self.clear_sql_cache()
+                
+                return {
+                    'success': False,
+                    'error': 'Unable to retrieve data. Please try again.',
+                    'question': question,
+                    'sql': sql,
+                    'error_type': 'database_query_failed',
+                    'sql_generation_time': sql_generation_time,
+                    'sql_execution_time': time.time() - sql_exec_start,
+                    'response_generation_time': 0.0
+                }
+            
+            sql_execution_time = time.time() - sql_exec_start
+            
+            # Time response generation
+            response_start = time.time()
+            print("🧠 Generating intelligent analysis...")
+            try:
+                # Use professional formatting instead of LLM analysis
+                intelligent_response = self._format_response_professionally(question, result, sql)
+            except Exception as e:
+                logger.error(f"Response formatting failed: {e}")
+                # Fallback to basic formatting
+                intelligent_response = self._format_conversational_fallback(question, result)
+            
+            response_generation_time = time.time() - response_start
+            
+            return {
+                'success': True,
+                'response': intelligent_response,
+                'question': question,
+                'sql': sql,
+                'result_rows': len(result),
+                'result_columns': len(result.columns) if not result.empty else 0,
+                'sql_generation_time': sql_generation_time,
+                'sql_execution_time': sql_execution_time,
+                'response_generation_time': response_generation_time
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in intelligent SQL question handling: {e}\n{traceback.format_exc()}")
+            return {
+                'success': False,
+                'error': 'I encountered an unexpected error. Please try rephrasing your question.',
+                'question': question,
+                'error_type': 'unexpected_error',
+                'sql_generation_time': 0.0,
+                'sql_execution_time': 0.0,
+                'response_generation_time': 0.0
+            }
+    
     def _handle_intelligent_sql_question(self, question: str) -> Dict[str, Any]:
         """
         Handle any business question using intelligent SQL generation
@@ -1224,10 +1701,13 @@ class AIAssistant:
                     'error_type': 'sql_safety_failed'
                 }
             
-            # Execute SQL query
+            # Execute SQL query with optimization
             print("📊 Executing SQL query...")
             try:
-                result = query_data(sql)
+                # Ensure query has LIMIT clause for performance
+                optimized_sql = self._optimize_query(sql)
+                
+                result = query_data(optimized_sql)
                 
                 # Check result size for performance
                 if len(result) > 1000:
@@ -1236,6 +1716,13 @@ class AIAssistant:
                     
             except Exception as e:
                 logger.error(f"Database query execution failed: {e}")
+                
+                # Clear SQL cache if there's a column error
+                error_msg = str(e).lower()
+                if 'not found' in error_msg or 'referenced column' in error_msg:
+                    logger.info("Clearing SQL cache due to column error")
+                    self.clear_sql_cache()
+                
                 return {
                     'success': False,
                     'error': 'Unable to retrieve data. Please try again.',
@@ -1283,6 +1770,13 @@ class AIAssistant:
             Generated SQL query or None if failed
         """
         try:
+            # Check SQL cache first
+            question_hash = hashlib.md5(question.lower().encode()).hexdigest()
+            cached_sql = self._get_from_cache(self.sql_cache, question_hash)
+            if cached_sql:
+                print("📋 Using cached SQL")
+                return cached_sql
+            
             # Create comprehensive prompt for LLM
             prompt = self._create_intelligent_sql_prompt(question)
             
@@ -1306,6 +1800,10 @@ class AIAssistant:
             
             # Clean up SQL
             sql = self._clean_sql_query(sql)
+            
+            # Cache the generated SQL
+            self._add_to_cache(self.sql_cache, question_hash, sql)
+            print(f"💾 Cached SQL (cache size: {len(self.sql_cache)})")
             
             return sql
             
@@ -1365,10 +1863,12 @@ class AIAssistant:
         This is an e-commerce sales database. Key business concepts:
         - Revenue: Use "revenue_calc" column for accurate revenue calculations
         - Orders: Count distinct "Invoice Number" for order counts
-        - Products: Use "Sku" and "Asin" for product identification
+        - Products: Use "Sku" and "Asin" for product identification (NOT "Asset")
         - Regions: Use "Ship To City" for geographic analysis
         - Time: Use "Invoice Date" for temporal analysis
         - Transaction Types: "transaction_type" includes Shipment, Refund, FreeReplacement, etc.
+        
+        IMPORTANT: When users ask about "assets", "products", or "items", use "Asin" column, NOT "Asset"
 
         BUSINESS QUESTION ANALYSIS:
         Understand what the user is asking for:
@@ -1423,7 +1923,7 @@ class AIAssistant:
         Question: "Show me top 10 best sellers"
         SQL: SELECT "Sku", SUM("revenue_calc") as total_revenue,
              COUNT(DISTINCT "Invoice Number") as order_count
-             FROM sales WHERE "transaction_type" IN ('Shipment', 'Fulfillment') 
+             FROM sales WHERE "transaction_type" IN ('Shipment', 'Fulfillment')
              AND CAST("Invoice Date" AS DATE) >= CURRENT_DATE - INTERVAL '6 MONTH'
              GROUP BY "Sku" 
              ORDER BY total_revenue DESC LIMIT 10
@@ -1459,11 +1959,20 @@ class AIAssistant:
              COUNT(DISTINCT "Invoice Number") as total_orders,
              (COUNT(DISTINCT CASE WHEN "transaction_type" = 'Refund' THEN "Invoice Number" END) * 100.0 / 
               COUNT(DISTINCT "Invoice Number")) as refund_rate
-             FROM sales WHERE "Sku" IS NOT NULL 
+             FROM sales WHERE "Sku" IS NOT NULL
              AND CAST("Invoice Date" AS DATE) >= CURRENT_DATE - INTERVAL '6 MONTH'
              GROUP BY "Sku"
              HAVING refund_rate > 20
              ORDER BY refund_rate DESC LIMIT 10
+
+        Question: "worst performing assets per city"
+        SQL: SELECT "Asin", "Ship To City", SUM("revenue_calc") as revenue, 
+             COUNT(DISTINCT "Invoice Number") as orders, 
+             COUNT(CASE WHEN "transaction_type" = 'Refund' THEN 1 END) as refunds
+             FROM sales 
+             WHERE CAST("Invoice Date" AS DATE) >= CURRENT_DATE - INTERVAL '6 MONTH'
+             GROUP BY "Asin", "Ship To City" 
+             ORDER BY revenue ASC LIMIT 10
 
         CRITICAL DUCKDB COMPATIBILITY RULES:
         - NEVER use DATE_SUB() function - use CURRENT_DATE - INTERVAL '6 MONTH' instead
@@ -1471,6 +1980,8 @@ class AIAssistant:
         - NEVER use NOW() function - use CURRENT_DATE instead
         - ALWAYS use INTERVAL '6 MONTH' (with quotes) not INTERVAL 6 MONTH
         - ALWAYS use double quotes around column names
+        - NEVER use "Asset" column - use "Asin" for product identification
+        - When users ask about "assets", "products", or "items", use "Asin" column
         - ALWAYS use CAST(column AS DATE) with DATE_PART functions
         - CRITICAL: "Invoice Date" is VARCHAR - must cast to DATE for comparisons
         - For date filtering: CAST("Invoice Date" AS DATE) >= CURRENT_DATE - INTERVAL '6 MONTH'
@@ -1610,6 +2121,192 @@ class AIAssistant:
             print(f"❌ Error cleaning SQL: {e}")
             return sql
     
+    def _optimize_query(self, sql: str) -> str:
+        """
+        Optimize SQL query for performance
+        
+        Args:
+            sql: SQL query to optimize
+            
+        Returns:
+            Optimized SQL query
+        """
+        try:
+            sql_upper = sql.upper()
+            
+            # Add LIMIT clause if not present
+            if 'LIMIT' not in sql_upper:
+                # Determine appropriate limit based on query type
+                if 'COUNT(' in sql_upper or 'SUM(' in sql_upper or 'AVG(' in sql_upper:
+                    # Aggregation queries - limit to 1000
+                    limit_value = 1000
+                elif 'GROUP BY' in sql_upper:
+                    # Grouped queries - limit to 500
+                    limit_value = 500
+                else:
+                    # Regular queries - limit to 200
+                    limit_value = 200
+                
+                sql = f"{sql.rstrip()} LIMIT {limit_value}"
+                print(f"🔧 Added LIMIT {limit_value} for performance")
+            
+            # Optimize ORDER BY clauses
+            if 'ORDER BY' in sql_upper and 'LIMIT' in sql_upper:
+                # If we have both ORDER BY and LIMIT, ensure ORDER BY is efficient
+                # This is already handled by the LIMIT addition above
+                pass
+            
+            return sql
+            
+        except Exception as e:
+            logger.error(f"Error optimizing query: {e}")
+            return sql
+    
+    def _format_indian_currency(self, amount: float) -> str:
+        """
+        Format currency with Indian numbering system (lakhs, crores)
+        
+        Args:
+            amount: Amount to format
+            
+        Returns:
+            Formatted currency string
+        """
+        try:
+            if amount >= 10000000:  # 1 crore
+                return f"{amount/10000000:.1f} Cr"
+            elif amount >= 100000:  # 1 lakh
+                return f"{amount/100000:.1f} L"
+            elif amount >= 1000:  # 1 thousand
+                return f"{amount/1000:.1f} K"
+            else:
+                return f"{amount:,.0f}"
+        except Exception as e:
+            logger.error(f"Error formatting currency: {e}")
+            return f"{amount:,.0f}"
+    
+    def _format_response_professionally(self, question: str, result: pd.DataFrame, sql: str = "") -> str:
+        """
+        Format AI response with professional markdown structure
+        """
+        try:
+            if result.empty:
+                return f"""### 📊 Query Results
+
+**❌ No Data Found:**
+- No records match your criteria
+- Try adjusting your question or date range
+
+**💡 Suggestion:** Check if the data exists for the specified criteria or try a different question.
+
+**✅ Summary:** No data found for the current query"""
+
+            # Extract key metrics from the result
+            response_parts = []
+            
+            # Determine the type of analysis based on question
+            question_lower = question.lower()
+            
+            if any(word in question_lower for word in ['revenue', 'total', 'sum', 'amount']):
+                response_parts.append("### 📊 Revenue Analysis")
+            elif any(word in question_lower for word in ['order', 'count', 'number']):
+                response_parts.append("### 📊 Order Analysis")
+            elif any(word in question_lower for word in ['product', 'sku', 'item']):
+                response_parts.append("### 📊 Product Analysis")
+            elif any(word in question_lower for word in ['city', 'region', 'location']):
+                response_parts.append("### 📊 Regional Analysis")
+            elif any(word in question_lower for word in ['trend', 'month', 'time', 'period']):
+                response_parts.append("### 📊 Trend Analysis")
+            else:
+                response_parts.append("### 📊 Data Analysis")
+
+            # Format results with better structure
+            response_parts.append("**📈 Results Found:**")
+            
+            # Format each row with cleaner structure
+            for i, (_, row) in enumerate(result.iterrows()):
+                if len(result) <= 10:  # Show individual rows for small results
+                    formatted_row = []
+                    for col, value in row.items():
+                        if pd.isna(value):
+                            continue
+                        if isinstance(value, (int, float)) and 'revenue' in col.lower():
+                            # Format revenue with Indian numbering
+                            formatted_value = f"₹{self._format_indian_currency(value)}"
+                        elif isinstance(value, (int, float)):
+                            formatted_value = f"{value:,.0f}"
+                        else:
+                            formatted_value = str(value)
+                        formatted_row.append(f"{col}: {formatted_value}")
+                    response_parts.append(f"**{i+1}.** {' | '.join(formatted_row)}")
+                else:
+                    # For large results, show summary
+                    break
+            
+            if len(result) > 10:
+                response_parts.append(f"- Total Records: {len(result):,} rows")
+                response_parts.append(f"- Data spans multiple entries")
+            
+            # Add business insight
+            response_parts.append("")
+            response_parts.append("**💡 Business Insight:**")
+            
+            # Generate concise, readable insight based on actual data
+            if len(result) == 1:
+                row = result.iloc[0]
+                if 'sku' in [col.lower() for col in result.columns]:
+                    sku_col = next(col for col in result.columns if 'sku' in col.lower())
+                    response_parts.append(f"Your top performing SKU is **{row[sku_col]}** with strong performance metrics.")
+                else:
+                    response_parts.append("This query returned specific data for your business analysis.")
+            elif len(result) <= 5:
+                if 'sku' in [col.lower() for col in result.columns]:
+                    sku_col = next(col for col in result.columns if 'sku' in col.lower())
+                    top_skus = result[sku_col].head(3).tolist()
+                    response_parts.append(f"Your top performing SKUs are: **{', '.join(top_skus)}**. These show strong performance across your business metrics.")
+                else:
+                    response_parts.append("The results show detailed information across a focused set of records.")
+            else:
+                if 'sku' in [col.lower() for col in result.columns]:
+                    sku_col = next(col for col in result.columns if 'sku' in col.lower())
+                    top_skus = result[sku_col].head(3).tolist()
+                    response_parts.append(f"Your top performing SKUs are: **{', '.join(top_skus)}**. Analysis covers {len(result)} data points.")
+                else:
+                    response_parts.append(f"Analysis covers {len(result)} data points with comprehensive insights.")
+            
+            # Add summary
+            response_parts.append("")
+            response_parts.append("**✅ Summary:**")
+            
+            if len(result) == 1:
+                if 'sku' in [col.lower() for col in result.columns]:
+                    sku_col = next(col for col in result.columns if 'sku' in col.lower())
+                    response_parts.append(f"Top performing SKU: **{result.iloc[0][sku_col]}**")
+                else:
+                    response_parts.append("Single data point retrieved successfully")
+            else:
+                if 'sku' in [col.lower() for col in result.columns]:
+                    sku_col = next(col for col in result.columns if 'sku' in col.lower())
+                    top_sku = result.iloc[0][sku_col]
+                    response_parts.append(f"Top {len(result)} performing SKUs analyzed, with **{top_sku}** leading")
+                else:
+                    response_parts.append(f"Retrieved {len(result):,} records with detailed analysis")
+            
+            return "\n".join(response_parts)
+            
+        except Exception as e:
+            logger.error(f"Error formatting response: {e}")
+            return f"""### 📊 Query Results
+
+**📈 Results Found:**
+- Data retrieved successfully
+- {len(result):,} records found
+
+**💡 Business Insight:**
+Your query has been processed and data has been retrieved for analysis.
+
+**✅ Summary:** Query completed with {len(result):,} results"""
+    
     def _analyze_with_llm(self, question: str, result: pd.DataFrame) -> str:
         """
         Use LLM to analyze SQL results and generate business insights
@@ -1632,6 +2329,16 @@ This might mean:
 • The data might be in a different format than expected
 • Try rephrasing your question or being more specific"""
             
+            # Check analysis cache first
+            data_hash = hashlib.md5(str(result.values.tolist()).encode()).hexdigest()
+            question_hash = hashlib.md5(question.lower().encode()).hexdigest()
+            cache_key = f"{question_hash}_{data_hash}"
+            
+            cached_analysis = self._get_from_cache(self.analysis_cache, cache_key)
+            if cached_analysis:
+                print("📋 Using cached analysis")
+                return cached_analysis
+            
             # Convert DataFrame to a readable format for LLM
             data_summary = self._prepare_data_for_llm(result)
             
@@ -1642,6 +2349,11 @@ This might mean:
             print("🤖 Generating insights with LLM...")
             try:
                 analysis = self._call_ollama(prompt)
+                
+                # Cache the analysis
+                self._add_to_cache(self.analysis_cache, cache_key, analysis)
+                print(f"💾 Cached analysis (cache size: {len(self.analysis_cache)})")
+                
                 return analysis
             except ConnectionError as e:
                 logger.error(f"Ollama connection error in analysis: {e}")

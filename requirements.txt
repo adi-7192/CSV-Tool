@@ -2,6 +2,7 @@ streamlit
 duckdb
 pandas
 plotly
+requests
 langchain
 langchain-community
 chromadb

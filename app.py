@@ -35,7 +35,6 @@ RAW_DATA_FOLDER = 'data/raw'
 CLEANED_DATA_FOLDER = 'data/cleaned'
 
 # Database path logging
-import os
 DB_ABSOLUTE_PATH = os.path.abspath(DB_FILE)
 print(f"🗄️ Database path: {DB_ABSOLUTE_PATH}")
 
@@ -2868,6 +2867,11 @@ def main():
                 st.session_state.last_upload_time = current_time
                 st.session_state.has_existing_data = True
                 
+                # Clear AI Assistant caches when new data is uploaded
+                if st.session_state.ai_assistant:
+                    st.session_state.ai_assistant.clear_all_caches()
+                    st.info("🧹 **Caches cleared** - AI Assistant will learn from new data")
+                
                 # Show results
                 if successful_files > 0:
                     st.success(f"✅ **Processed {successful_files}/{len(new_files)} files successfully!**")
@@ -2900,6 +2904,66 @@ def main():
                 status_icon = "✅" if pf['status'] == 'success' else "❌"
                 st.text(f"{status_icon} {pf['filename']} ({pf['rows']} rows)")
     
+    # Query History & Performance Tracking
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📋 Query History & Performance")
+    
+    try:
+        # Import the logging functions
+        from ai_assistant import get_query_history, calculate_performance_stats
+        
+        # Get performance statistics
+        perf_stats = calculate_performance_stats()
+        
+        # Display performance metrics
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            st.sidebar.metric("Total Queries", perf_stats['total_queries'])
+            st.sidebar.metric("Success Rate", f"{perf_stats['success_rate']}%")
+        with col2:
+            st.sidebar.metric("Avg Response Time", f"{perf_stats['avg_response_time']}s")
+            st.sidebar.metric("Fastest Query", f"{perf_stats['fastest_query_time']}s")
+        
+        # Show recent query history
+        query_history = get_query_history(limit=10)
+        if not query_history.empty:
+            st.sidebar.markdown("**Recent Queries:**")
+            # Display only user-friendly columns
+            display_cols = ['timestamp', 'question', 'total_time_seconds', 'query_success', 'rows_returned']
+            if all(col in query_history.columns for col in display_cols):
+                # Format the display
+                display_df = query_history[display_cols].copy()
+                display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%H:%M')
+                display_df['question'] = display_df['question'].str[:30] + '...'
+                display_df['total_time_seconds'] = display_df['total_time_seconds'].round(2)
+                display_df['query_success'] = display_df['query_success'].map({True: '✅', False: '❌'})
+                display_df['rows_returned'] = display_df['rows_returned'].astype(str)
+                
+                # Rename columns for display
+                display_df.columns = ['Time', 'Question', 'Time(s)', 'Success', 'Rows']
+                
+                st.sidebar.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Export button
+        if st.sidebar.button("📥 Download Complete Log", help="Download full query log as CSV"):
+            try:
+                full_history = get_query_history(limit=1000)  # Get all history
+                if not full_history.empty:
+                    csv_data = full_history.to_csv(index=False)
+                    st.sidebar.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=f"ai_query_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.sidebar.warning("No query history available")
+            except Exception as e:
+                st.sidebar.error(f"Error downloading log: {e}")
+                
+    except Exception as e:
+        st.sidebar.error(f"Error loading query history: {e}")
+
     # Main content area
     if st.session_state.uploaded_df is not None or st.session_state.has_existing_data or st.session_state.processed_files:
         # Show mapping modal if needed
@@ -3827,28 +3891,50 @@ def main():
                 # AI-powered chat interface
                 st.success("✅ **AI Assistant Ready!** Ask any question about your data.")
                 
-                # Chat history
+                # Chat history with improved, centered layout
                 if st.session_state.ai_chat_history:
                     st.markdown("### 💬 Chat History")
-                    for i, chat_item in enumerate(st.session_state.ai_chat_history[-5:]):  # Show last 5
-                        with st.expander(f"Q{i+1}: {chat_item['question'][:50]}{'...' if len(chat_item['question']) > 50 else ''}", expanded=False):
+                    
+                    # Show chat history in reverse order (newest first)
+                    chat_items = st.session_state.ai_chat_history[-5:]  # Show last 5
+                    chat_items.reverse()  # Show newest first
+                    
+                    for i, chat_item in enumerate(chat_items):
+                        # Make the first (most recent) item expanded by default
+                        is_expanded = (i == 0)
+                        
+                        with st.expander(f"Q{len(st.session_state.ai_chat_history) - i}: {chat_item['question'][:50]}{'...' if len(chat_item['question']) > 50 else ''}", expanded=is_expanded):
                             st.markdown(f"**Question:** {chat_item['question']}")
-                            st.markdown(f"**Answer:** {chat_item['answer']}")
+                            
+                            # Display answer with simple formatting
+                            st.markdown("**Answer:**")
+                            st.markdown(chat_item['answer'])
+                            
                             if chat_item.get('sql'):
                                 with st.expander("🔍 View SQL Query", expanded=False):
                                     st.code(chat_item['sql'], language='sql')
+                    
                     st.markdown("---")
                 
-                # Question input
-                question = st.text_input(
-                    "Ask a question about your data:",
-                    placeholder="e.g., What's the total revenue? Show me top products by city...",
-                    key="ai_chat_question"
-                )
+                # Question input with better width
+                st.markdown("---")
+                st.markdown("### 💬 Ask AI Assistant")
                 
-                col1, col2 = st.columns([1, 4])
+                # Use wider columns for question input
+                col1, col2, col3 = st.columns([1, 4, 1])
+                with col2:
+                    question = st.text_area(
+                        "Ask a question about your data:",
+                        placeholder="e.g., What's the total revenue? Show me top products by city...",
+                        key="ai_chat_question",
+                        height=100,
+                        help="Ask any question about your business data in natural language"
+                    )
+                
+                # Center the buttons
+                col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
                 with col1:
-                    if st.button("🤖 Ask AI", type="primary"):
+                    if st.button("🤖 Ask AI", type="primary", use_container_width=True):
                         if question.strip():
                             # Create progress indicators for different stages
                             progress_container = st.container()
@@ -3879,9 +3965,26 @@ def main():
                                             'offline_mode': result.get('offline_mode', False)
                                         })
                                         
-                                        # Display the response
+                                        # Display the response in full width with simple formatting
+                                        st.markdown("---")
                                         st.markdown("### 🤖 AI Response")
+                                        
+                                        # Use simple, readable formatting that matches the page design
                                         st.markdown(result['response'])
+                                        
+                                        # Add navigation buttons
+                                        col1, col2, col3 = st.columns([1, 1, 1])
+                                        with col1:
+                                            if st.button("⬆️ Back to Top", help="Scroll to the top of the chat"):
+                                                st.markdown("---")
+                                                st.markdown("### 💬 Chat History")
+                                        
+                                        with col2:
+                                            if st.button("💬 Ask Another Question", type="secondary", help="Ask a follow-up question"):
+                                                st.markdown("---")
+                                                st.markdown("### 💬 Ask AI Assistant")
+                                        
+                                        # Question input will be cleared by user manually
                                         
                                         # Show SQL query in expander
                                         if result.get('sql'):
@@ -3894,9 +3997,16 @@ def main():
                                         
                                         # Show cache indicator if applicable
                                         if result.get('cached'):
-                                            st.info("📋 **Cached Result** - This question was answered before")
+                                            if result.get('similarity'):
+                                                st.info(f"📋 **Similar Cached Result** - Similarity: {result['similarity']:.1%}")
+                                            else:
+                                                st.info("📋 **Cached Result** - This question was answered before")
                                         
-                                        st.rerun()
+                                        # Show response time
+                                        if result.get('response_time'):
+                                            st.caption(f"⏱️ Response time: {result['response_time']:.2f} seconds")
+                                        
+                                        # Don't rerun - let the chat interface update naturally
                                     else:
                                         # Handle different error types with specific messages
                                         error_type = result.get('error_type', 'unknown')
@@ -3919,7 +4029,7 @@ def main():
                                         else:
                                             st.error(f"❌ **Error:** {result['error']}")
                                             st.info("💡 Try rephrasing your question or check if Ollama is running.")
-                                        
+                                
                                 except Exception as e:
                                     # Log the error for debugging
                                     import logging
@@ -3935,22 +4045,16 @@ def main():
                             st.warning("Please enter a question.")
                 
                 with col2:
-                    st.caption("💡 Try: 'What's the total revenue?', 'Top 5 products by city', 'Compare last month vs this month'")
+                    if st.button("🗑️ Clear", help="Clear the question input", use_container_width=True):
+                        st.rerun()
                 
-                # Suggested questions
-                st.markdown("---")
-                st.markdown("### 💡 Suggested Questions")
+                with col3:
+                    if st.button("💬 New Chat", help="Start a new conversation", use_container_width=True):
+                        st.session_state.ai_chat_history = []
+                        st.rerun()
                 
-                suggested_questions = get_suggested_questions()
-                
-                # Create clickable buttons for suggested questions
-                cols = st.columns(2)
-                for i, suggested_q in enumerate(suggested_questions):
-                    with cols[i % 2]:
-                        if st.button(f"💡 {suggested_q}", key=f"suggested_{i}", help="Click to ask this question"):
-                            # Set the question in the text input
-                            st.session_state.ai_chat_question = suggested_q
-                            st.rerun()
+                with col4:
+                    st.caption("💡 **Tip:** Ask specific questions like 'What's my total revenue?' or 'Show me top 5 products'")
                 
                 # Show AI status
                 st.markdown("---")
@@ -3962,6 +4066,41 @@ def main():
                     st.info(f"🤖 **Model:** llama3.1:8b")
                 with col3:
                     st.info(f"💬 **Chat History:** {len(st.session_state.ai_chat_history)} questions")
+                
+                # Show cache statistics
+                if st.session_state.ai_assistant:
+                    cache_stats = st.session_state.ai_assistant.get_cache_stats()
+                    st.markdown("### 📊 Performance Stats")
+                    st.info(f"🚀 **Cache Hit Rate:** {cache_stats['cache_hit_rate']}")
+                    st.info(f"💾 **Question Cache:** {cache_stats['question_cache_size']} items")
+                    st.info(f"🔍 **SQL Cache:** {cache_stats['sql_cache_size']} items")
+                    st.info(f"🧠 **Analysis Cache:** {cache_stats['analysis_cache_size']} items")
+                    
+                    # Cache management buttons
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("🗑️ Clear SQL Cache", help="Clear cached SQL queries (useful when rules change)"):
+                            st.session_state.ai_assistant.clear_sql_cache()
+                            st.success("SQL cache cleared!")
+                            st.rerun()
+                    with col2:
+                        if st.button("🗑️ Clear All Caches", help="Clear all caches"):
+                            st.session_state.ai_assistant.clear_all_caches()
+                            st.success("All caches cleared!")
+                            st.rerun()
+                    
+                    # Show performance stats
+                    perf_stats = cache_stats['performance_stats']
+                    if perf_stats['total_questions'] > 0:
+                        avg_time = perf_stats.get('avg_response_time', 0)
+                        st.info(f"⏱️ **Avg Response Time:** {avg_time:.2f}s")
+                        st.info(f"📈 **Total Questions:** {perf_stats['total_questions']}")
+                        
+                        # Show slow queries if any
+                        if perf_stats['slow_queries']:
+                            with st.expander("🐌 Slow Queries", expanded=False):
+                                for query in perf_stats['slow_queries'][-5:]:  # Show last 5
+                                    st.text(f"{query['time']:.2f}s - {query['question'][:50]}...")
     
     else:
         st.info("👆 Upload a CSV file in the sidebar to begin")
