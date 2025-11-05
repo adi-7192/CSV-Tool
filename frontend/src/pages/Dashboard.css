@@ -1,0 +1,154 @@
+/* Dashboard Page Styles */
+.dashboard {
+  padding: 24px;
+  background-color: #FFFFFF;
+  min-height: 100%;
+}
+
+.dashboard-container {
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.dashboard-main-layout {
+  display: flex;
+  gap: 24px;
+  flex-direction: column;
+}
+
+.dashboard-main-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.dashboard-section {
+  width: 100%;
+}
+
+.dashboard-section-title {
+  margin-bottom: 16px;
+  color: #030712;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.dashboard-sidebar {
+  flex: 0 0 auto;
+  min-width: 300px;
+  max-width: 400px;
+}
+
+.dashboard-sidebar-content {
+  position: sticky;
+  top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dashboard-sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.dashboard-sidebar-toggle {
+  color: #64748B;
+  padding: 4px 8px;
+}
+
+.dashboard-sidebar-toggle:hover {
+  color: #030712;
+  background-color: #F1F5F9;
+}
+
+.dashboard-insights-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dashboard-empty-insights {
+  padding: 24px;
+  text-align: center;
+  color: #94A3B8;
+  font-size: 14px;
+  background-color: #F8FAFC;
+  border-radius: 8px;
+  border: 1px solid #E2E8F0;
+}
+
+.dashboard-sidebar-toggle-floating {
+  position: fixed;
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100;
+}
+
+.dashboard-sidebar-toggle-button {
+  background-color: #6366F1;
+  border-color: #6366F1;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.dashboard-sidebar-toggle-button:hover {
+  background-color: #4F46E5;
+  border-color: #4F46E5;
+}
+
+/* Responsive Design */
+@media (min-width: 768px) {
+  .dashboard-main-layout {
+    flex-direction: row;
+  }
+
+  .dashboard-main-content {
+    flex: 0.7;
+  }
+
+  .dashboard-sidebar {
+    flex: 0.3;
+  }
+}
+
+@media (max-width: 767px) {
+  .dashboard {
+    padding: 16px;
+  }
+
+  .dashboard-sidebar {
+    min-width: 100%;
+    max-width: 100%;
+  }
+
+  .dashboard-sidebar-content {
+    position: relative;
+    top: 0;
+  }
+
+  .dashboard-sidebar-toggle-floating {
+    display: none;
+  }
+}
+
+/* Prevent horizontal scroll */
+.dashboard-container {
+  overflow-x: hidden;
+}
+
+.dashboard-main-layout {
+  overflow-x: hidden;
+}
+
