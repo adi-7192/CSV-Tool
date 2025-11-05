@@ -83,6 +83,13 @@
   border: 1px solid #E2E8F0;
 }
 
+.dashboard-loading-insights {
+  padding: 16px;
+  background-color: #FFFFFF;
+  border-radius: 8px;
+  border: 1px solid #E2E8F0;
+}
+
 .dashboard-sidebar-toggle-floating {
   position: fixed;
   right: 24px;
@@ -106,6 +113,98 @@
 .dashboard-sidebar-toggle-button:hover {
   background-color: #4F46E5;
   border-color: #4F46E5;
+}
+
+/* Error Boundary Styles */
+.error-boundary-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  background-color: #FFFFFF;
+}
+
+.error-boundary-content {
+  text-align: center;
+  max-width: 500px;
+  padding: 48px;
+  background-color: #FEF2F2;
+  border: 1px solid #FECACA;
+  border-radius: 12px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.error-boundary-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: #DC2626;
+  margin-bottom: 16px;
+}
+
+.error-boundary-message {
+  font-size: 14px;
+  color: #991B1B;
+  margin-bottom: 24px;
+  line-height: 1.6;
+}
+
+.error-boundary-reload-button {
+  background-color: #2563EB;
+  border-color: #2563EB;
+  height: 40px;
+  padding: 0 24px;
+  font-weight: 500;
+}
+
+.error-boundary-reload-button:hover {
+  background-color: #1D4ED8;
+  border-color: #1D4ED8;
+}
+
+/* Loading Skeleton Styles */
+.loading-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.skeleton-row {
+  background: linear-gradient(
+    90deg,
+    #F1F5F9 25%,
+    #E2E8F0 50%,
+    #F1F5F9 75%
+  );
+  background-size: 200% 100%;
+  border-radius: 4px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Error Alert Styles */
+.dashboard-error-alert {
+  border-radius: 8px;
+  border: 1px solid #FECACA;
+  background-color: #FEF2F2;
+}
+
+.dashboard-error-alert .ant-alert-message {
+  color: #DC2626;
+  font-weight: 600;
+}
+
+.dashboard-error-alert .ant-alert-description {
+  color: #991B1B;
 }
 
 /* Responsive Design */
@@ -151,4 +250,14 @@
 .dashboard-main-layout {
   overflow-x: hidden;
 }
+
+/* Smooth transitions */
+.dashboard-section {
+  transition: opacity 0.3s ease-in-out;
+}
+
+.dashboard-section.loading {
+  opacity: 0.6;
+}
+
 
