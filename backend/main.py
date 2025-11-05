@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.routes import health, upload, metrics, charts, chat, verification, data_status
+from api.routes import health, upload, metrics, charts, chat, verification, data_status, data_routes
 from core.config import settings
 from core.database import init_database
 
@@ -56,6 +56,7 @@ app.include_router(charts.router, prefix="/api/charts", tags=["Charts"])
 app.include_router(chat.router, prefix="/api/chat", tags=["AI Chat"])
 app.include_router(verification.router, prefix="/api/verification", tags=["Verification"])
 app.include_router(data_status.router, prefix="/api/data", tags=["Data Status"])
+app.include_router(data_routes.router, prefix="/api/data", tags=["Data"])
 
 
 # Root endpoint

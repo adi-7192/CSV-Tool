@@ -2,6 +2,7 @@ import React from 'react';
 import { DatePicker, Dropdown, Avatar, Button } from 'antd';
 import type { MenuProps } from 'antd';
 import { UserOutlined, SettingOutlined, QuestionCircleOutlined, LogoutOutlined } from '@ant-design/icons';
+import { useNavigate, useLocation } from 'react-router-dom';
 import dayjs, { Dayjs } from 'dayjs';
 import { useDataStore } from '@/store/dataStore';
 
@@ -9,6 +10,8 @@ const { RangePicker } = DatePicker;
 
 const TopBar: React.FC = () => {
   const { dateRange, setDateRange } = useDataStore();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   // Handle date range change
   const handleDateRangeChange = (dates: [Dayjs | null, Dayjs | null] | null) => {
@@ -82,7 +85,7 @@ const TopBar: React.FC = () => {
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: '12px',
+          gap: '24px',
         }}
       >
         <div
@@ -91,9 +94,42 @@ const TopBar: React.FC = () => {
             fontWeight: '700',
             color: '#6366F1',
             letterSpacing: '-0.5px',
+            cursor: 'pointer',
           }}
+          onClick={() => navigate('/dashboard')}
         >
           Analytics Dashboard
+        </div>
+        
+        {/* Navigation Links */}
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <Button
+            type={location.pathname === '/dashboard' ? 'primary' : 'text'}
+            onClick={() => navigate('/dashboard')}
+            style={{
+              fontWeight: location.pathname === '/dashboard' ? '600' : '400',
+            }}
+          >
+            Dashboard
+          </Button>
+          <Button
+            type={location.pathname === '/workspace' ? 'primary' : 'text'}
+            onClick={() => navigate('/workspace')}
+            style={{
+              fontWeight: location.pathname === '/workspace' ? '600' : '400',
+            }}
+          >
+            Data Workspace
+          </Button>
+          <Button
+            type={location.pathname === '/analyst' ? 'primary' : 'text'}
+            onClick={() => navigate('/analyst')}
+            style={{
+              fontWeight: location.pathname === '/analyst' ? '600' : '400',
+            }}
+          >
+            AI Analyst
+          </Button>
         </div>
       </div>
 
