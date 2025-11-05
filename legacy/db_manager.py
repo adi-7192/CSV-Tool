@@ -92,17 +92,66 @@ def store_data(df: pd.DataFrame, table_name: str = DEFAULT_TABLE, append: bool =
             # UPSERT approach: Delete existing records matching business keys, then insert new ones
             # This prevents duplicate data when same CSV is uploaded twice
             
-            # Get existing table columns to determine business key columns
+            # Get existing table columns to align DataFrame columns
             try:
                 table_info = conn.execute(f"DESCRIBE {table_name}").df()
                 existing_columns = table_info['column_name'].tolist() if not table_info.empty else []
                 
-                # Define business key columns (these identify unique transactions)
-                # Business key: order_id + transaction_type + sku (if exists)
+                # Align DataFrame columns with table columns
+                # Add missing columns (fill with NULL) and reorder to match table
+                df_aligned = df.copy()
+                
+                # Find columns in DataFrame that don't exist in table (new columns)
+                df_columns = df_aligned.columns.tolist()
+                new_columns = [col for col in df_columns if col not in existing_columns]
+                
+                # Add new columns to table if any exist
+                if new_columns:
+                    logger.info(f"➕ Adding {len(new_columns)} new columns to table: {new_columns[:5]}...")
+                    for new_col in new_columns:
+                        try:
+                            # Try to infer column type from DataFrame
+                            col_type = "VARCHAR"
+                            if df_aligned[new_col].dtype in ['int64', 'Int64']:
+                                col_type = "BIGINT"
+                            elif df_aligned[new_col].dtype in ['float64', 'Float64']:
+                                col_type = "DOUBLE"
+                            elif pd.api.types.is_datetime64_any_dtype(df_aligned[new_col]):
+                                col_type = "TIMESTAMP"
+                            elif pd.api.types.is_bool_dtype(df_aligned[new_col]):
+                                col_type = "BOOLEAN"
+                            
+                            # Escape column name for DuckDB
+                            new_col_escaped = f'"{new_col}"'
+                            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {new_col_escaped} {col_type}")
+                            logger.info(f"✅ Added column {new_col} ({col_type}) to table")
+                            # Update existing_columns list to include new column
+                            existing_columns.append(new_col)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not add column {new_col}: {e}")
+                
+                # Find columns in table that don't exist in DataFrame (missing columns)
+                missing_columns = [col for col in existing_columns if col not in df_columns]
+                
+                # Add missing columns to DataFrame (fill with NULL)
+                if missing_columns:
+                    logger.info(f"📝 Adding {len(missing_columns)} missing columns to DataFrame (filled with NULL): {missing_columns[:5]}...")
+                    for missing_col in missing_columns:
+                        df_aligned[missing_col] = None
+                
+                # Reorder DataFrame columns to match table column order exactly
+                df_aligned = df_aligned[existing_columns]
+                
+                # Re-register aligned DataFrame
+                conn.register('temp_df', df_aligned)
+                
+                logger.info(f"✅ Aligned DataFrame: {len(df_columns)} original → {len(existing_columns)} table columns")
+                
+                # Define business key columns for deduplication
                 business_keys = []
                 
                 # Check for order_id column (may be named "Invoice Number", "Order Id", etc.)
-                order_id_cols = [col for col in existing_columns if any(keyword in col.lower() for keyword in ['invoice number', 'order id', 'orderid', 'invoice id'])]
+                order_id_cols = [col for col in existing_columns if any(keyword in col.lower() for keyword in ['invoice number', 'order id', 'orderid', 'invoice id', 'order_id'])]
                 if order_id_cols:
                     business_keys.append(order_id_cols[0])
                 
@@ -117,8 +166,8 @@ def store_data(df: pd.DataFrame, table_name: str = DEFAULT_TABLE, append: bool =
                 if sku_cols:
                     business_keys.append(sku_cols[0])
                 
-                # Also check corresponding columns in temp_df
-                temp_columns = df.columns.tolist()
+                # Also check corresponding columns in temp_df (aligned DataFrame)
+                temp_columns = df_aligned.columns.tolist()
                 matching_keys = []
                 for key in business_keys:
                     if key in temp_columns:
@@ -151,11 +200,28 @@ def store_data(df: pd.DataFrame, table_name: str = DEFAULT_TABLE, append: bool =
                     logger.warning(f"⚠️ Insufficient business key columns matched ({len(matching_keys)} found, need 2+). Skipping deduplication check.")
                 
             except Exception as e:
-                logger.warning(f"⚠️ Could not determine business keys for deduplication: {e}. Proceeding with insert.")
+                logger.warning(f"⚠️ Could not align columns or determine business keys: {e}. Proceeding with insert.")
+                # Fallback: try to insert without alignment (may fail if column count mismatch)
+                logger.warning(f"⚠️ DataFrame has {len(df.columns)} columns, table may have different count")
             
-            # Insert all records from temp table
-            conn.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
-            logger.info(f"📊 Inserted {len(df)} rows into existing table '{table_name}'")
+            # Insert all records from temp table (now aligned)
+            try:
+                conn.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
+                logger.info(f"📊 Inserted {len(df)} rows into existing table '{table_name}'")
+            except Exception as e:
+                # If still fails, try explicit column names
+                if "columns" in str(e).lower() or "values" in str(e).lower():
+                    logger.error(f"❌ Column alignment failed: {e}")
+                    logger.info("🔄 Trying explicit column insert...")
+                    # Get current table columns
+                    table_info = conn.execute(f"DESCRIBE {table_name}").df()
+                    table_cols = table_info['column_name'].tolist()
+                    # Build explicit column list
+                    col_list = ', '.join([f'"{col}"' for col in table_cols])
+                    conn.execute(f"INSERT INTO {table_name} ({col_list}) SELECT {col_list} FROM temp_df")
+                    logger.info(f"✅ Inserted {len(df)} rows using explicit columns")
+                else:
+                    raise
         else:
             # Create new table or replace existing
             conn.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM temp_df")

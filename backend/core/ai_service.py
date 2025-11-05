@@ -6,11 +6,19 @@ Extracted from legacy/ai_assistant.py
 import requests
 import json
 import logging
-from typing import Dict, Optional, Tuple
+import re
+from typing import Dict, Optional, Tuple, Any
+from datetime import datetime
+from calendar import monthrange
 from core.config import settings
 from core.database import execute_query, get_connection
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_header(header: str) -> str:
+    """Normalize header for matching (lowercase, strip, collapse spaces)"""
+    return re.sub(r'\s+', ' ', str(header).strip().lower())
 
 
 def check_ollama_connection() -> bool:
@@ -31,12 +39,11 @@ def check_ollama_connection() -> bool:
         return False
 
 
-def get_database_schema() -> Dict[str, any]:
+def get_database_schema() -> Dict[str, Any]:
     """
-    Get database schema information (columns, sample data, statistics)
+    Get database schema information for LLM context
     
-    Returns:
-        Dictionary with schema information
+    Returns detailed schema with column names, types, and business meaning
     """
     try:
         conn = get_connection()
@@ -44,35 +51,143 @@ def get_database_schema() -> Dict[str, any]:
         # Check if sales table exists
         tables = conn.execute("SHOW TABLES").fetchdf()
         if 'sales' not in tables['name'].values:
-            return {'columns': [], 'sample_data': [], 'statistics': {}}
+            return {
+                'table': 'sales',
+                'columns': [],
+                'columns_with_descriptions': [],
+                'important_notes': ['Table does not exist yet']
+            }
         
-        # Get column information
+        # Get column information with types
         columns_df = conn.execute("DESCRIBE sales").fetchdf()
         columns = columns_df['column_name'].tolist()
+        column_types = dict(zip(columns_df['column_name'], columns_df['column_type']))
         
-        # Get sample data (first 5 rows)
-        sample_df = execute_query("SELECT * FROM sales LIMIT 5")
-        sample_data = sample_df.to_dict('records') if not sample_df.empty else []
+        # Get sample data to understand actual column names
+        sample_df = execute_query("SELECT * FROM sales LIMIT 3")
         
-        # Get basic statistics
-        stats = {}
-        if sample_df.shape[0] > 0:
-            row_count_df = execute_query("SELECT COUNT(*) as count FROM sales")
-            stats['row_count'] = int(row_count_df['count'].iloc[0]) if not row_count_df.empty else 0
+        # Map actual columns to business meaning
+        # The table may have original CSV column names or standardized names
+        column_descriptions = {}
+        
+        # Check for common revenue column names
+        revenue_cols = [c for c in columns if any(word in normalize_header(c) for word in ['revenue_calc', 'invoice amount', 'order amount', 'revenue_amount'])]
+        if revenue_cols:
+            primary_rev_col = revenue_cols[0]
+            column_descriptions[primary_rev_col] = 'Revenue amount in Indian Rupees (₹). Already in INR - DO NOT multiply or convert. For shipments use this directly, for refunds take absolute value.'
+        
+        # Check for transaction type column
+        txn_cols = [c for c in columns if 'transaction_type' in normalize_header(c) or 'transaction type' in normalize_header(c)]
+        if txn_cols:
+            primary_txn_col = txn_cols[0]
+            column_descriptions[primary_txn_col] = 'Transaction type: "Shipment" (revenue), "Refund" (return), "Cancel" (cancellation), "FreeReplacement"'
+        
+        # Check for date columns and detect their actual type
+        date_cols = [c for c in columns if 'date' in normalize_header(c)]
+        if date_cols:
+            primary_date_col = date_cols[0]
+            date_col_type = column_types.get(primary_date_col, '').upper()
+            # Check if it's VARCHAR/TEXT - needs casting
+            if 'VARCHAR' in date_col_type or 'TEXT' in date_col_type or 'CHAR' in date_col_type:
+                column_descriptions[primary_date_col] = f'Order/invoice date (VARCHAR/TEXT - MUST CAST to DATE: CAST("{primary_date_col}" AS DATE)). For month extraction use DATE_PART(\'month\', CAST("{primary_date_col}" AS DATE)) or EXTRACT(MONTH FROM CAST("{primary_date_col}" AS DATE))'
+            else:
+                column_descriptions[primary_date_col] = f'Order/invoice date ({date_col_type}). Use for filtering by date ranges.'
+        
+        # Check for order ID columns
+        id_cols = [c for c in columns if any(word in normalize_header(c) for word in ['invoice number', 'order id', 'invoice_number', 'order_id'])]
+        if id_cols:
+            primary_id_col = id_cols[0]
+            column_descriptions[primary_id_col] = 'Unique order/invoice identifier (TEXT)'
+        
+        # Check for SKU columns
+        sku_cols = [c for c in columns if 'sku' in normalize_header(c)]
+        if sku_cols:
+            primary_sku_col = sku_cols[0]
+            column_descriptions[primary_sku_col] = 'Product SKU identifier (TEXT)'
+        
+        # Build column list with descriptions and types
+        columns_with_desc = []
+        for col in columns[:20]:  # Limit to first 20 columns to avoid overwhelming prompt
+            col_type = column_types.get(col, '')
+            desc = column_descriptions.get(col, '')
+            if desc:
+                columns_with_desc.append(f'"{col}" ({col_type}) - {desc}')
+            else:
+                columns_with_desc.append(f'"{col}" ({col_type})')
+        
+        # Important notes for SQL generation
+        important_notes = [
+            'Revenue is ALREADY in Indian Rupees (₹). DO NOT multiply by any conversion factor.',
+            'For revenue queries, filter by transaction_type = \'Shipment\' (use actual column name from schema)',
+            'For refunds, use transaction_type = \'Refund\' and take ABS() of revenue amount',
+            'CRITICAL: NET REVENUE calculation must include ALL components:',
+            '  When user asks about "net revenue", "net earnings", "profit", "after costs", or "after deductions":',
+            '  Formula: net_revenue = gross_revenue - refund_amount - cancellation_amount - free_replacement_amount',
+            '  gross_revenue = SUM(revenue_amount) WHERE transaction_type = \'Shipment\'',
+            '  refund_amount = ABS(SUM(revenue_amount)) WHERE transaction_type = \'Refund\'',
+            '  cancellation_amount = ABS(SUM(revenue_amount)) WHERE transaction_type = \'Cancel\'',
+            '  free_replacement_amount = ABS(SUM(revenue_amount)) WHERE transaction_type = \'FreeReplacement\'',
+            '  Example SQL for net revenue:',
+            '    SELECT SUM(CASE WHEN transaction_type = \'Shipment\' THEN revenue_amount ELSE 0 END) as gross_revenue,',
+            '           ABS(SUM(CASE WHEN transaction_type = \'Refund\' THEN revenue_amount ELSE 0 END)) as refund_amount,',
+            '           ABS(SUM(CASE WHEN transaction_type = \'Cancel\' THEN revenue_amount ELSE 0 END)) as cancel_amount,',
+            '           ABS(SUM(CASE WHEN transaction_type = \'FreeReplacement\' THEN revenue_amount ELSE 0 END)) as free_repl_amount,',
+            '           (SUM(CASE WHEN transaction_type = \'Shipment\' THEN revenue_amount ELSE 0 END)',
+            '            - ABS(SUM(CASE WHEN transaction_type = \'Refund\' THEN revenue_amount ELSE 0 END))',
+            '            - ABS(SUM(CASE WHEN transaction_type = \'Cancel\' THEN revenue_amount ELSE 0 END))',
+            '            - ABS(SUM(CASE WHEN transaction_type = \'FreeReplacement\' THEN revenue_amount ELSE 0 END))) as net_revenue',
+            '    FROM sales WHERE [date filters]',
+            '  DO NOT just calculate refunds - net revenue requires ALL 4 components!',
+            'Use actual column names from the schema above - they may have spaces (use double quotes)',
+            'DO NOT reference columns that do not exist in the schema (e.g., needs_estimation)',
+            'Use standard DuckDB SQL syntax (DATE_TRUNC, CURRENT_DATE, INTERVAL)',
+            'CRITICAL: Date columns may be VARCHAR/TEXT - ALWAYS cast to DATE before using date functions',
+            'For month extraction: Use DATE_PART(\'month\', CAST("Invoice Date" AS DATE)) or EXTRACT(MONTH FROM CAST("Invoice Date" AS DATE))',
+            'For date filtering: Use CAST("Invoice Date" AS DATE) >= \'2025-07-01\'',
+            'NEVER use EXTRACT or DATE_PART on VARCHAR columns without CAST - always CAST("Column" AS DATE) first'
+        ]
+        
+        # Add specific column warnings based on what exists
+        if revenue_cols:
+            important_notes.insert(0, f'Use column "{revenue_cols[0]}" for revenue (already in INR, no conversion needed)')
+        if txn_cols:
+            important_notes.insert(1, f'Use column "{txn_cols[0]}" for transaction type filtering')
         
         return {
+            'table': 'sales',
             'columns': columns,
-            'sample_data': sample_data,
-            'statistics': stats
+            'columns_with_descriptions': columns_with_desc,
+            'important_notes': important_notes,
+            'sample_row_count': len(sample_df) if not sample_df.empty else 0
         }
+        
     except Exception as e:
-        logger.error(f"Error getting database schema: {e}")
-        return {'columns': [], 'sample_data': [], 'statistics': {}}
+        logger.error(f"Error getting database schema: {str(e)}")
+        # Return fallback schema
+        return {
+            'table': 'sales',
+            'columns': ['Invoice Number', 'Invoice Date', 'Invoice Amount', 'Transaction Type', 'Sku'],
+            'columns_with_descriptions': [
+                '"Invoice Number" (VARCHAR) - Order identifier',
+                '"Invoice Date" (DATE) - Order date',
+                '"Invoice Amount" (DOUBLE) - Revenue in INR (no conversion needed)',
+                '"Transaction Type" (VARCHAR) - Shipment/Refund/Cancel',
+                '"Sku" (VARCHAR) - Product SKU'
+            ],
+            'important_notes': [
+                'Invoice Amount is already in INR - do not convert',
+                'Filter by "Transaction Type" = \'Shipment\' for revenue',
+                'Use double quotes around column names with spaces'
+            ]
+        }
+
+
 
 
 def generate_sql_from_question(
     question: str,
-    schema: Optional[Dict[str, any]] = None,
+    schema: Optional[Dict[str, Any]] = None,
+    source_file: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Generate SQL query from natural language question using Ollama LLM
@@ -80,6 +195,7 @@ def generate_sql_from_question(
     Args:
         question: Natural language question
         schema: Optional database schema information (if None, will fetch)
+        source_file: Optional source file filter to prevent multi-source data mixing
     
     Returns:
         Tuple of (sql_query, error_message)
@@ -90,28 +206,84 @@ def generate_sql_from_question(
     if schema is None:
         schema = get_database_schema()
     
-    columns = schema.get('columns', [])
+    # Check if multiple source files exist (warn about potential data mixing)
+    if source_file:
+        # Add note about source file filtering
+        schema_notes = schema.get('important_notes', [])
+        if 'source_file' in str(schema.get('columns', [])):
+            schema_notes.insert(0, f'IMPORTANT: Filter by source_file = \'{source_file}\' to avoid data from multiple CSV files')
     
-    # Build prompt with schema context
-    prompt = f"""You are a SQL expert. Generate a DuckDB SQL query to answer this question.
-Database Schema:
-Table: sales
-Columns: {', '.join(columns)}
+    # Build detailed prompt with schema context
+    columns_desc = '\n'.join([f'  {col}' for col in schema.get('columns_with_descriptions', [])])
+    important_notes = '\n'.join([f'  - {note}' for note in schema.get('important_notes', [])])
+    
+    # Detect net revenue keywords
+    net_revenue_keywords = ['net revenue', 'net earnings', 'profit', 'after costs', 'after deductions', 
+                           'net profit', 'after refunds', 'after cancels', 'after cancellations']
+    is_net_revenue_query = any(keyword in question.lower() for keyword in net_revenue_keywords)
+    
+    # Build comprehensive prompt
+    net_revenue_instruction = ""
+    if is_net_revenue_query:
+        net_revenue_instruction = """
+CRITICAL: User is asking about NET REVENUE. You MUST include ALL components:
+- gross_revenue (Shipments)
+- refund_amount (Refunds - absolute value)
+- cancel_amount (Cancels - absolute value)
+- free_repl_amount (FreeReplacement - absolute value)
+- net_revenue = gross_revenue - refund_amount - cancel_amount - free_repl_amount
 
-Question: {question}
+DO NOT generate SQL that only calculates refunds or only calculates revenue minus refunds.
+The complete formula requires ALL 4 transaction types!
 
-Instructions:
-- Return ONLY the SQL query, no explanations
-- Use DuckDB syntax
-- Use double quotes around column names (e.g., "Invoice Date")
-- Use proper date functions (CURRENT_DATE, DATE_TRUNC, INTERVAL)
-- Filter by transaction_type for revenue (use 'Shipment' for revenue)
-- Format currency as Indian Rupees
-- Be concise but accurate
-- Only use SELECT statements (never INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER)
-- Add LIMIT clause if querying many rows
+Example SQL structure:
+SELECT 
+  SUM(CASE WHEN transaction_type = 'Shipment' THEN revenue_amount ELSE 0 END) as gross_revenue,
+  ABS(SUM(CASE WHEN transaction_type = 'Refund' THEN revenue_amount ELSE 0 END)) as refund_amount,
+  ABS(SUM(CASE WHEN transaction_type = 'Cancel' THEN revenue_amount ELSE 0 END)) as cancel_amount,
+  ABS(SUM(CASE WHEN transaction_type = 'FreeReplacement' THEN revenue_amount ELSE 0 END)) as free_repl_amount,
+  (SUM(CASE WHEN transaction_type = 'Shipment' THEN revenue_amount ELSE 0 END)
+   - ABS(SUM(CASE WHEN transaction_type = 'Refund' THEN revenue_amount ELSE 0 END))
+   - ABS(SUM(CASE WHEN transaction_type = 'Cancel' THEN revenue_amount ELSE 0 END))
+   - ABS(SUM(CASE WHEN transaction_type = 'FreeReplacement' THEN revenue_amount ELSE 0 END))
+  ) as net_revenue
+FROM sales
+WHERE [date filters]
 
-SQL Query:"""
+"""
+    
+    prompt = f"""You are a SQL expert. Generate a DuckDB SQL query to answer this business question.
+
+DATABASE SCHEMA:
+Table: {schema.get('table', 'sales')}
+Columns:
+{columns_desc if columns_desc else '  (No columns available)'}
+
+CRITICAL RULES - READ CAREFULLY:
+{important_notes}
+{net_revenue_instruction}
+QUESTION: {question}
+
+REQUIREMENTS:
+- Return ONLY the SQL query, no explanations, no markdown, no code blocks
+- Use DuckDB SQL syntax (not MySQL, PostgreSQL, or SQL Server)
+- Use double quotes for column names that contain spaces: "Invoice Date" not Invoice Date
+- Use single quotes for string literals: 'Shipment' not "Shipment"
+- For revenue: SUM the revenue column WHERE transaction_type = 'Shipment'
+- Revenue is already in INR - DO NOT multiply by any number
+- DO NOT use columns that are not in the schema above
+- Add LIMIT 100 if query returns many rows
+- CRITICAL DATE HANDLING:
+  * Date columns are VARCHAR/TEXT - MUST cast to DATE before using date functions
+  * For month extraction: EXTRACT(MONTH FROM CAST("Invoice Date" AS DATE)) or DATE_PART('month', CAST("Invoice Date" AS DATE))
+  * For date filtering: WHERE CAST("Invoice Date" AS DATE) >= '2025-07-01'
+  * NEVER use EXTRACT or DATE_PART directly on VARCHAR columns - always CAST first
+  * CRITICAL: When user asks "in July" or "in month X", ALWAYS filter by YEAR AND MONTH using date range
+  * Use: WHERE CAST("Invoice Date" AS DATE) >= '2025-07-01' AND CAST("Invoice Date" AS DATE) <= '2025-07-31'
+  * NEVER use only EXTRACT(MONTH) = 7 without year filter - this includes ALL years and causes incorrect results
+  * If year not specified, use current year (2025) as default
+
+SQL QUERY (only the query, nothing else):"""
     
     try:
         # Call Ollama API
@@ -121,10 +293,12 @@ SQL Query:"""
                 "model": settings.OLLAMA_MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "options": {
-                    "temperature": 0.1,  # Low temperature for consistent SQL
-                    "num_predict": 200,   # Limit response length
-                }
+            "options": {
+                "temperature": 0.1,  # Low temperature for consistent SQL
+                "num_predict": 300,   # Allow longer queries
+                "top_p": 0.9,
+                "top_k": 40,
+            }
             },
             timeout=settings.OLLAMA_TIMEOUT,
         )
@@ -137,21 +311,289 @@ SQL Query:"""
             if '```sql' in sql:
                 sql = sql.split('```sql')[1].split('```')[0].strip()
             elif '```' in sql:
-                sql = sql.split('```')[1].split('```')[0].strip()
+                parts = sql.split('```')
+                if len(parts) >= 2:
+                    sql = parts[1].strip()
+                    # Remove language identifier if present
+                    if sql.startswith('sql'):
+                        sql = sql[3:].strip()
+            
+            # Remove any leading/trailing whitespace and newlines
+            sql = sql.strip()
+            
+            # Remove any trailing semicolons
+            if sql.endswith(';'):
+                sql = sql[:-1].strip()
+            
+            # Remove any comments (lines starting with --)
+            lines = sql.split('\n')
+            sql = '\n'.join([line for line in lines if not line.strip().startswith('--')]).strip()
             
             # Basic SQL safety check
-            dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'UPDATE', 'INSERT']
-            sql_upper = sql.upper()
-            if any(keyword in sql_upper for keyword in dangerous_keywords):
-                return None, "Query contains dangerous keywords"
+            dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'UPDATE', 'INSERT', 'CREATE', 'REPLACE']
+            sql_upper = sql.upper().strip()
+            
+            # Use word boundaries to match only whole words (not substrings)
+            # This prevents false positives like 'FreeReplacement' matching 'REPLACE'
+            for keyword in dangerous_keywords:
+                # Match keyword as whole word (not substring)
+                # Pattern: word boundary, keyword, word boundary (or end of string)
+                pattern = r'\b' + re.escape(keyword) + r'\b'
+                if re.search(pattern, sql_upper):
+                    return None, f"Query contains dangerous keyword: {keyword}"
             
             if not sql_upper.startswith('SELECT'):
                 return None, "Query must start with SELECT"
             
-            # Clean up SQL
+            # Post-process: Fix common mistakes
+            # Remove currency conversion multipliers
+            # Remove patterns like "* 74.99" or "*74.99" (currency conversion)
+            sql = re.sub(r'\*\s*\d+\.?\d*\s*(?:--.*)?$', '', sql, flags=re.MULTILINE)
             sql = sql.strip()
-            if sql.endswith(';'):
-                sql = sql[:-1]
+            
+            # Fix date function calls that don't cast VARCHAR to DATE
+            # The issue: EXTRACT(MONTH FROM "Invoice Date") fails because "Invoice Date" is VARCHAR
+            # Fix: EXTRACT(MONTH FROM CAST("Invoice Date" AS DATE))
+            
+            original_sql = sql
+            
+            # Pattern 1: EXTRACT(MONTH|YEAR|DAY|QUARTER|WEEK FROM "column")
+            # Replace with: EXTRACT(MONTH|YEAR|DAY|QUARTER|WEEK FROM CAST("column" AS DATE))
+            extract_pattern = r'EXTRACT\s*\(\s*(MONTH|YEAR|DAY|QUARTER|WEEK)\s+FROM\s+"([^"]+)"\s*\)'
+            def fix_extract(match):
+                extract_type = match.group(1)
+                col_name = match.group(2)
+                # Check if this specific match already has CAST (check the full match)
+                match_str = match.group(0)
+                if f'CAST("{col_name}"' not in match_str:
+                    return f'EXTRACT({extract_type} FROM CAST("{col_name}" AS DATE))'
+                return match.group(0)
+            
+            if re.search(extract_pattern, sql, re.IGNORECASE):
+                sql = re.sub(extract_pattern, fix_extract, sql, flags=re.IGNORECASE)
+                logger.info("Post-processed: Fixed EXTRACT calls to include CAST")
+            
+            # Pattern 2: DATE_PART('month', "column") or DATE_PART('month', 'column')  
+            # Replace with: DATE_PART('month', CAST("column" AS DATE))
+            datepart_pattern = r'DATE_PART\s*\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)'
+            def fix_datepart(match):
+                part_type = match.group(1).strip()
+                col_name = match.group(2)
+                # Check if this specific match already has CAST
+                match_str = match.group(0)
+                if f'CAST("{col_name}"' not in match_str:
+                    return f'DATE_PART({part_type}, CAST("{col_name}" AS DATE))'
+                return match.group(0)
+            
+            if re.search(datepart_pattern, sql, re.IGNORECASE):
+                sql = re.sub(datepart_pattern, fix_datepart, sql, flags=re.IGNORECASE)
+                logger.info("Post-processed: Fixed DATE_PART calls to include CAST")
+            
+            # Fix month-only queries that don't specify year (CRITICAL FIX)
+            # Pattern: EXTRACT(MONTH FROM ...) = 7 without year filter
+            # This causes data from multiple years to be included incorrectly
+            month_only_pattern = r"EXTRACT\s*\(\s*MONTH\s+FROM\s+CAST\([^)]+AS\s+DATE\)\s*\)\s*=\s*(\d+)"
+            if re.search(month_only_pattern, sql, re.IGNORECASE):
+                # Check if year filter already exists
+                if 'EXTRACT(YEAR' not in sql.upper() and 'EXTRACT\s*\(\s*YEAR' not in sql.upper():
+                    # Extract month number
+                    match = re.search(month_only_pattern, sql, re.IGNORECASE)
+                    if match:
+                        month_num = int(match.group(1))
+                        
+                        # Find the date column name from the EXTRACT expression
+                        date_col_match = re.search(r'EXTRACT\s*\(\s*MONTH\s+FROM\s+CAST\("([^"]+)"\s+AS\s+DATE\)', sql, re.IGNORECASE)
+                        if date_col_match:
+                            date_col = date_col_match.group(1)
+                            
+                            # Assume current year (2025) if not specified
+                            current_year = datetime.now().year
+                            
+                            # Calculate last day of month (handle different month lengths)
+                            last_day = monthrange(current_year, month_num)[1]
+                            
+                            # Build date range filter
+                            date_range_filter = f'CAST("{date_col}" AS DATE) >= \'{current_year}-{month_num:02d}-01\' AND CAST("{date_col}" AS DATE) <= \'{current_year}-{month_num:02d}-{last_day}\''
+                            
+                            # Check if LIMIT clause exists - we need to preserve it
+                            limit_match = re.search(r'\s+LIMIT\s+\d+', sql, re.IGNORECASE)
+                            limit_clause = limit_match.group(0) if limit_match else ''
+                            
+                            # Replace the EXTRACT(MONTH) = X with the date range
+                            # Try to replace in WHERE clause context
+                            extract_expr = f'EXTRACT(MONTH FROM CAST("{date_col}" AS DATE)) = {month_num}'
+                            extract_expr_spaced = f'EXTRACT(MONTH FROM CAST("{date_col}" AS DATE)) = {month_num}'
+                            
+                            # Replace the expression with date range filter
+                            # Handle case where LIMIT might be directly after the expression
+                            if extract_expr + limit_clause in sql:
+                                # Replace including LIMIT, then add LIMIT back after date range
+                                sql = sql.replace(extract_expr + limit_clause, date_range_filter + limit_clause)
+                            elif extract_expr in sql:
+                                sql = sql.replace(extract_expr, date_range_filter)
+                            elif extract_expr_spaced + limit_clause in sql:
+                                sql = sql.replace(extract_expr_spaced + limit_clause, date_range_filter + limit_clause)
+                            elif extract_expr_spaced in sql:
+                                sql = sql.replace(extract_expr_spaced, date_range_filter)
+                            else:
+                                # Try regex replacement - be careful not to match LIMIT as part of the expression
+                                pattern = rf'EXTRACT\s*\(\s*MONTH\s+FROM\s+CAST\("{re.escape(date_col)}"\s+AS\s+DATE\)\s*\)\s*=\s*{month_num}(?=\s+LIMIT|\s*$|\))'
+                                sql = re.sub(pattern, date_range_filter, sql, flags=re.IGNORECASE)
+                            
+                            logger.info(f"Post-processed: Replaced month-only filter (month={month_num}) with date range filter for {current_year}")
+                            logger.info(f"Date range: {current_year}-{month_num:02d}-01 to {current_year}-{month_num:02d}-{last_day}")
+            
+            # Post-process: Add source_file filter if multiple sources exist (prevent multi-source data mixing)
+            # Check if source_file column exists and if there are multiple source files
+            try:
+                # Quick check: does source_file column exist?
+                conn = get_connection()
+                column_check = conn.execute("SELECT column_name FROM pragma_table_info('sales') WHERE column_name = 'source_file'").fetchdf()
+                
+                if not column_check.empty:
+                    # Check how many source files exist
+                    source_count_sql = 'SELECT COUNT(DISTINCT source_file) as count FROM sales WHERE source_file IS NOT NULL'
+                    source_count_df = execute_query(source_count_sql)
+                    
+                    if not source_count_df.empty and source_count_df.iloc[0]['count'] > 1:
+                        # Multiple sources exist - check if source_file filter is in query
+                        sql_upper_check = sql.upper()
+                        if 'SOURCE_FILE' not in sql_upper_check and 'source_file' not in sql:
+                            # Get which source file to use
+                            target_source_file = None
+                            
+                            if source_file:
+                                target_source_file = source_file
+                                logger.info(f"Using specified source_file: {target_source_file}")
+                            else:
+                                # Try to infer from question (e.g., "July" -> "JulyMonthly.csv")
+                                # Note: question variable is from function parameter, available in this scope
+                                question_lower = question.lower() if isinstance(question, str) else str(question).lower()
+                                
+                                # Get all source files
+                                all_sources_sql = 'SELECT DISTINCT source_file FROM sales WHERE source_file IS NOT NULL'
+                                all_sources_df = execute_query(all_sources_sql)
+                                
+                                if not all_sources_df.empty:
+                                    source_files = all_sources_df['source_file'].tolist()
+                                    
+                                    # Try to match question context (e.g., "july" -> "JulyMonthly.csv")
+                                    matched_source = None
+                                    if 'july' in question_lower or 'jul' in question_lower:
+                                        matched_source = next((s for s in source_files if 'july' in s.lower() or 'jul' in s.lower()), None)
+                                    elif 'august' in question_lower or 'aug' in question_lower:
+                                        matched_source = next((s for s in source_files if 'aug' in s.lower()), None)
+                                    elif 'september' in question_lower or 'sept' in question_lower or 'sep' in question_lower:
+                                        matched_source = next((s for s in source_files if 'sep' in s.lower() or 'sept' in s.lower()), None)
+                                    
+                                    if matched_source:
+                                        target_source_file = matched_source
+                                        logger.info(f"Inferred source_file from question context: {matched_source}")
+                                    else:
+                                        # Fallback: Get most recent source file by loaded_at
+                                        latest_source_sql = """
+                                        SELECT source_file, MAX(loaded_at) as last_loaded
+                                        FROM sales
+                                        WHERE source_file IS NOT NULL
+                                        GROUP BY source_file
+                                        ORDER BY last_loaded DESC
+                                        LIMIT 1
+                                        """
+                                        latest_source_df = execute_query(latest_source_sql)
+                                        if not latest_source_df.empty:
+                                            target_source_file = latest_source_df.iloc[0]['source_file']
+                                            logger.info(f"Using most recent source_file: {target_source_file}")
+                            
+                            # Add source_file filter to SQL
+                            if target_source_file:
+                                # Find WHERE clause position (handle case variations)
+                                sql_upper = sql.upper()
+                                where_pos = -1
+                                for pattern in [' WHERE ', 'WHERE ']:
+                                    pos = sql_upper.find(pattern)
+                                    if pos != -1:
+                                        where_pos = pos + len(pattern) - 1
+                                        break
+                                
+                                limit_pos = -1
+                                for pattern in [' LIMIT ', 'LIMIT ']:
+                                    pos = sql_upper.find(pattern)
+                                    if pos != -1:
+                                        limit_pos = pos
+                                        break
+                                
+                                if where_pos >= 0:
+                                    # WHERE clause exists - add AND before LIMIT or at end
+                                    if limit_pos > 0:
+                                        # Insert AND before LIMIT
+                                        sql = sql[:limit_pos] + f" AND source_file = '{target_source_file}' " + sql[limit_pos:]
+                                    else:
+                                        # Add AND at end (before any existing AND/OR)
+                                        sql = sql.rstrip() + f" AND source_file = '{target_source_file}'"
+                                    logger.info(f"✅ Post-processed: Added source_file filter (using: {target_source_file})")
+                                elif limit_pos > 0:
+                                    # No WHERE clause - add one before LIMIT
+                                    sql = sql[:limit_pos] + f" WHERE source_file = '{target_source_file}' " + sql[limit_pos:]
+                                    logger.info(f"✅ Post-processed: Added source_file WHERE clause (using: {target_source_file})")
+                                else:
+                                    # No WHERE or LIMIT - add WHERE at end
+                                    sql = sql.rstrip() + f" WHERE source_file = '{target_source_file}'"
+                                    logger.info(f"✅ Post-processed: Added source_file WHERE clause at end (using: {target_source_file})")
+                            else:
+                                logger.warning("⚠️ Multiple source files detected but could not determine which one to filter by")
+                        else:
+                            logger.debug("source_file filter already present in query")
+                    else:
+                        logger.debug(f"Single source file or no source files ({source_count_df.iloc[0]['count'] if not source_count_df.empty else 0}) - no filter needed")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not add source_file filter (non-critical): {str(e)}")
+                import traceback
+                logger.debug(traceback.format_exc())
+            
+            # Final safety check: Fix any malformed date strings with LIMIT
+            # Pattern: 'YYYY-MM-DD LIMIT -> 'YYYY-MM-DD' LIMIT
+            # This fixes cases where LIMIT was accidentally placed inside the date string
+            sql = re.sub(r"<=\s*'(\d{4}-\d{2}-\d{2})(\s+LIMIT\s+\d+)", r"<= '\1'\2", sql, flags=re.IGNORECASE)
+            sql = re.sub(r">=\s*'(\d{4}-\d{2}-\d{2})(\s+LIMIT\s+\d+)", r">= '\1'\2", sql, flags=re.IGNORECASE)
+            sql = re.sub(r"=\s*'(\d{4}-\d{2}-\d{2})(\s+LIMIT\s+\d+)", r"= '\1'\2", sql, flags=re.IGNORECASE)
+            
+            # Also fix any date strings that might be missing closing quotes before LIMIT
+            sql = re.sub(r"('(?:\d{4}-\d{2}-\d{2}))(\s+LIMIT\s+\d+)", r"\1'\2", sql, flags=re.IGNORECASE)
+            
+            # Post-process: Detect and warn about incomplete net revenue queries
+            # This helps debug if the AI still generates incomplete SQL despite the prompt
+            if is_net_revenue_query:
+                # Check if SQL includes all required components
+                has_shipment = bool(re.search(r"transaction_type\s*=\s*['\"]Shipment['\"]", sql, re.IGNORECASE))
+                has_refund = bool(re.search(r"transaction_type\s*=\s*['\"]Refund['\"]", sql, re.IGNORECASE))
+                has_cancel = bool(re.search(r"transaction_type\s*=\s*['\"]Cancel['\"]", sql, re.IGNORECASE))
+                has_free_repl = bool(re.search(r"transaction_type\s*=\s*['\"]FreeReplacement['\"]", sql, re.IGNORECASE))
+                
+                # Check if net_revenue calculation exists
+                has_net_revenue_calc = bool(re.search(r'\bnet_revenue\b|\bnet_rev\b', sql, re.IGNORECASE))
+                
+                # Log warning if components are missing
+                if has_net_revenue_calc:
+                    missing_components = []
+                    if not has_shipment:
+                        missing_components.append('Shipment')
+                    if not has_refund:
+                        missing_components.append('Refund')
+                    if not has_cancel:
+                        missing_components.append('Cancel')
+                    if not has_free_repl:
+                        missing_components.append('FreeReplacement')
+                    
+                    if missing_components:
+                        logger.warning(f"⚠️ Net revenue query detected but missing components: {', '.join(missing_components)}")
+                        logger.warning(f"Generated SQL may be incomplete for net revenue calculation")
+            
+            if sql != original_sql:
+                logger.info(f"SQL post-processed. Original: {original_sql[:150]}...")
+                logger.info(f"SQL post-processed. Fixed: {sql[:150]}...")
+            
+            # Log the final SQL for debugging
+            logger.info(f"Final generated SQL: {sql}")
             
             return sql, None
         
@@ -182,10 +624,13 @@ def validate_sql_safety(sql: str) -> Tuple[bool, Optional[str]]:
     if not sql_upper.startswith('SELECT'):
         return False, "Query must start with SELECT"
     
-    # Block dangerous keywords
+    # Block dangerous keywords (using word boundaries to avoid false positives)
+    # Example: 'FreeReplacement' should NOT match 'REPLACE'
     dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'UPDATE', 'INSERT', 'CREATE', 'REPLACE']
     for keyword in dangerous_keywords:
-        if keyword in sql_upper:
+        # Match keyword as whole word (not substring)
+        pattern = r'\b' + re.escape(keyword) + r'\b'
+        if re.search(pattern, sql_upper):
             return False, f"Query contains dangerous keyword: {keyword}"
     
     return True, None

@@ -22,16 +22,23 @@ async def get_metrics(
     source_file: Optional[str] = Query(None, description="Filter by source file"),
 ):
     """
-    Get core business metrics (KPIs)
+    Get core business metrics with transaction-aware calculations
     
     Returns:
-        - revenue: Total revenue from shipments
-        - orders: Number of orders
+        - gross_revenue: Gross revenue from shipments (SUM of Shipment transactions)
+        - refund_amount: Total refund amount (SUM of Refund transactions)
+        - cancellation_amount: Total cancellation amount (SUM of Cancel transactions)
+        - free_replacement_cost: Estimated cost of free replacements (2x ASIN price)
+        - net_revenue: Net revenue after all deductions
+            Formula: gross_revenue - refund_amount - cancellation_amount - free_replacement_cost
+        - net_margin: Net margin percentage (net_revenue / gross_revenue * 100)
+        - shipping_loss: Shipping costs lost on refunds (separate from refund_amount)
+        - orders: Number of successful orders
         - avg_order_value: Average order value
-        - refunds: Total refund amount
-        - net_revenue: Revenue minus refunds
-        - success_rate: Percentage of successful orders
-        - units_sold: Total units sold
+        - success_rate: % of orders not refunded
+        - transaction_breakdown: Count and amounts by transaction type
+        - revenue: Alias for gross_revenue (backward compatibility)
+        - refunds: Alias for refund_amount (backward compatibility)
     """
     try:
         # Default to last 30 days if no dates provided
