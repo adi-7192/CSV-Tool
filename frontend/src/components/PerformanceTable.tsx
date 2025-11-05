@@ -12,7 +12,6 @@ export interface PerformanceTableRow {
   revenue: number;
   refundRatio: number; // 0-100 percentage
   rating: number; // 1-5 stars
-  trend: number; // percentage change
 }
 
 export interface PerformanceTableProps {
@@ -159,16 +158,6 @@ const PerformanceTable: React.FC<PerformanceTableProps> = ({
       sortOrder: sortedInfo.columnKey === 'rating' ? sortedInfo.order : null,
       render: renderRating,
       width: 120,
-    },
-    {
-      title: 'Trend',
-      dataIndex: 'trend',
-      key: 'trend',
-      sorter: (a, b) => a.trend - b.trend,
-      sortOrder: sortedInfo.columnKey === 'trend' ? sortedInfo.order : null,
-      align: 'right',
-      render: renderTrend,
-      width: 100,
     },
   ];
 

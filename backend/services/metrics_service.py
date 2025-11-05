@@ -349,6 +349,7 @@ def calculate_metrics(
             'net_margin': 0.0,
             'refund_rate': 0.0,
             'orders': 0,
+            'units_sold': 0,
             'avg_order_value': 0.0,
             'success_rate': 0.0,
             'transaction_breakdown': {},
@@ -401,7 +402,8 @@ def calculate_metrics(
             shipping_amount,
             sku,
             order_id,
-            order_date
+            order_date,
+            quantity
         FROM sales
         WHERE 1=1 {date_filter} {txn_filter} {source_filter}
         """
@@ -421,6 +423,7 @@ def calculate_metrics(
                 'net_margin': 0.0,
                 'refund_rate': 0.0,
                 'orders': 0,
+                'units_sold': 0,
                 'avg_order_value': 0.0,
                 'success_rate': 0.0,
                 'transaction_breakdown': {},
@@ -512,6 +515,7 @@ def calculate_metrics(
             'net_margin': 0.0,
             'refund_rate': 0.0,
             'orders': 0,
+            'units_sold': 0,
             'avg_order_value': 0.0,
             'success_rate': 0.0,
             'transaction_breakdown': {},
@@ -543,14 +547,25 @@ def calculate_metrics(
                 
                 orders = type_data[order_id_col].nunique() if order_id_col else len(type_data)
                 
+                # Calculate units sold from quantity column
+                quantity_col = None
+                for col in ['quantity', 'Quantity', 'units_sold']:
+                    if col in type_data.columns:
+                        quantity_col = col
+                        break
+                
+                units_sold = int(type_data[quantity_col].sum()) if quantity_col and quantity_col in type_data.columns else 0
+                
                 gross_revenue = float(revenue)
                 results['gross_revenue'] = gross_revenue
                 results['revenue'] = gross_revenue  # Keep for backward compatibility
                 results['orders'] = int(orders)
+                results['units_sold'] = units_sold
                 results['transaction_breakdown']['Shipment'] = {
                     'count': count,
                     'revenue': gross_revenue,
                     'orders': int(orders),
+                    'units_sold': units_sold,
                 }
             
             elif txn_type == 'Refund':
@@ -642,6 +657,204 @@ def calculate_metrics(
         raise
 
 
+def get_daily_trends(
+    start_date: str,
+    end_date: str,
+) -> Dict[str, Any]:
+    """
+    Get daily trends with revenue, refunds, and orders grouped by date
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+    
+    Returns:
+        Dictionary with:
+        - data: List of daily records with date, revenue, refunds, orders
+        - revenue_trend: List of {date, value} for revenue chart
+        - refund_trend: List of {date, value} for refund chart
+        - count: Number of days
+    """
+    if not table_exists('sales'):
+        return {
+            'data': [],
+            'revenue_trend': [],
+            'refund_trend': [],
+            'count': 0,
+        }
+    
+    try:
+        # Get column info
+        column_info = execute_query("DESCRIBE sales")
+        
+        # Find date column
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        if not date_col:
+            return {
+                'data': [],
+                'revenue_trend': [],
+                'refund_trend': [],
+                'count': 0,
+            }
+        
+        # Check if date column needs casting
+        col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+        needs_cast = 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper()
+        
+        # Find revenue column
+        revenue_col = None
+        for col in ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        # Find transaction type column
+        txn_col = None
+        for col in ['Transaction Type', 'transaction_type']:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        # Find order_id column
+        order_id_col = None
+        for col in ['order_id', 'Invoice Number', 'Order ID']:
+            if col in column_info['column_name'].values:
+                order_id_col = col
+                break
+        
+        if not revenue_col:
+            return {
+                'data': [],
+                'revenue_trend': [],
+                'refund_trend': [],
+                'count': 0,
+            }
+        
+        # Build date filter
+        if needs_cast:
+            date_filter = f"CAST(\"{date_col}\" AS DATE) >= '{start_date}' AND CAST(\"{date_col}\" AS DATE) <= '{end_date}'"
+            date_group = f"CAST(\"{date_col}\" AS DATE)"
+        else:
+            date_filter = f"\"{date_col}\" >= '{start_date}' AND \"{date_col}\" <= '{end_date}'"
+            date_group = f"\"{date_col}\""
+        
+        # Query for daily metrics
+        # Revenue from Shipments
+        if txn_col and order_id_col:
+            revenue_sql = f"""
+            SELECT 
+                {date_group} as date,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Refund' THEN ABS({revenue_col}) ELSE 0 END), 0) as refunds,
+                COUNT(DISTINCT CASE WHEN "{txn_col}" = 'Shipment' THEN "{order_id_col}" ELSE NULL END) as orders
+            FROM sales
+            WHERE {date_filter}
+            GROUP BY {date_group}
+            ORDER BY date
+            """
+        elif txn_col:
+            # Has transaction type but no order_id column
+            revenue_sql = f"""
+            SELECT 
+                {date_group} as date,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Refund' THEN ABS({revenue_col}) ELSE 0 END), 0) as refunds,
+                COUNT(CASE WHEN "{txn_col}" = 'Shipment' THEN 1 ELSE NULL END) as orders
+            FROM sales
+            WHERE {date_filter}
+            GROUP BY {date_group}
+            ORDER BY date
+            """
+        else:
+            # No transaction type column - assume all positive amounts are shipments
+            if order_id_col:
+                revenue_sql = f"""
+                SELECT 
+                    {date_group} as date,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue,
+                    COALESCE(SUM(CASE WHEN {revenue_col} < 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as refunds,
+                    COUNT(DISTINCT CASE WHEN {revenue_col} > 0 THEN "{order_id_col}" ELSE NULL END) as orders
+                FROM sales
+                WHERE {date_filter}
+                GROUP BY {date_group}
+                ORDER BY date
+                """
+            else:
+                revenue_sql = f"""
+                SELECT 
+                    {date_group} as date,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue,
+                    COALESCE(SUM(CASE WHEN {revenue_col} < 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as refunds,
+                    COUNT(CASE WHEN {revenue_col} > 0 THEN 1 ELSE NULL END) as orders
+                FROM sales
+                WHERE {date_filter}
+                GROUP BY {date_group}
+                ORDER BY date
+                """
+        
+        df = execute_query(revenue_sql)
+        
+        if df.empty:
+            return {
+                'data': [],
+                'revenue_trend': [],
+                'refund_trend': [],
+                'count': 0,
+            }
+        
+        # Convert to list of dictionaries
+        data = []
+        revenue_trend = []
+        refund_trend = []
+        
+        for _, row in df.iterrows():
+            date_str = str(row['date']).split(' ')[0]  # Extract date part if datetime
+            revenue = float(row['revenue']) if pd.notna(row['revenue']) else 0.0
+            refunds = float(row['refunds']) if pd.notna(row['refunds']) else 0.0
+            orders = int(row['orders']) if pd.notna(row['orders']) else 0
+            
+            data.append({
+                'date': date_str,
+                'revenue': round(revenue, 2),
+                'refunds': round(refunds, 2),
+                'orders': orders,
+            })
+            
+            revenue_trend.append({
+                'date': date_str,
+                'value': round(revenue, 2),
+            })
+            
+            refund_trend.append({
+                'date': date_str,
+                'value': round(refunds, 2),
+            })
+        
+        return {
+            'data': data,
+            'revenue_trend': revenue_trend,
+            'refund_trend': refund_trend,
+            'count': len(data),
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting daily trends: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            'data': [],
+            'revenue_trend': [],
+            'refund_trend': [],
+            'count': 0,
+        }
+
+
 def get_revenue_trend(
     start_date: str,
     end_date: str,
@@ -725,81 +938,329 @@ def get_revenue_trend(
 
 
 def get_top_products(
-    limit: int = 10,
+    limit: int = 50,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    metric: str = 'revenue',
 ) -> pd.DataFrame:
     """
-    Get top products by revenue
+    Get top products by SKU with comprehensive metrics
     
     Args:
-        limit: Number of products to return
-        start_date: Optional start date filter
-        end_date: Optional end date filter
+        limit: Number of products to return (default: 50)
+        start_date: Optional start date filter (YYYY-MM-DD)
+        end_date: Optional end date filter (YYYY-MM-DD)
+        metric: Sort metric (default: 'revenue')
     
     Returns:
-        DataFrame with columns: sku, revenue, orders
+        DataFrame with columns: sku, asin, units_sold, revenue, refund_ratio, rating, trend
     """
-    column_info = execute_query("DESCRIBE sales")
-    sku_columns = ['Sku', 'sku', 'SKU']
-    revenue_columns = ['revenue_calc', 'revenue_in_inr', 'Revenue Amount']
-    txn_columns = ['Transaction Type', 'transaction_type']
-    order_id_columns = ['Invoice Number', 'order_id', 'Order ID']
-    date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+    if not table_exists('sales'):
+        return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
     
-    sku_col = None
-    for col in sku_columns:
-        if col in column_info['column_name'].values:
-            sku_col = col
-            break
+    try:
+        column_info = execute_query("DESCRIBE sales")
+        sku_columns = ['Sku', 'sku', 'SKU']
+        asin_columns = ['asin', 'Asin', 'ASIN', 'Amazon ASIN']
+        revenue_columns = ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']
+        quantity_columns = ['quantity', 'Quantity', 'units_sold']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        order_id_columns = ['Invoice Number', 'order_id', 'Order ID']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        rating_columns = ['rating', 'Rating', 'star_rating']
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        asin_col = None
+        for col in asin_columns:
+            if col in column_info['column_name'].values:
+                asin_col = col
+                break
+        
+        revenue_col = None
+        for col in revenue_columns:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        quantity_col = None
+        for col in quantity_columns:
+            if col in column_info['column_name'].values:
+                quantity_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        rating_col = None
+        for col in rating_columns:
+            if col in column_info['column_name'].values:
+                rating_col = col
+                break
+        
+        if not sku_col or not revenue_col:
+            return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
+        
+        # Check if date column needs casting
+        needs_cast = False
+        if date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            needs_cast = 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper()
+        
+        # Build date filter
+        date_filter = ""
+        if start_date and end_date and date_col:
+            if needs_cast:
+                date_filter = f'AND CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\''
+            else:
+                date_filter = f'AND "{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+        
+        # Build SQL query
+        # Calculate revenue from Shipments, refunds from Refunds, units_sold from Shipments
+        if txn_col:
+            # Build ASIN selection
+            asin_select = f'COALESCE(MAX("{asin_col}"), \'\')' if asin_col else '\'\''
+            # Build rating selection
+            rating_select = f'COALESCE(AVG("{rating_col}"), 0)' if rating_col else '0'
+            
+            sql = f"""
+            SELECT 
+                "{sku_col}" as sku,
+                {asin_select} as asin,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({quantity_col if quantity_col else '1'}) ELSE 0 END), 0) as units_sold,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue,
+                COALESCE(SUM(CASE WHEN "{txn_col}" = 'Refund' THEN ABS({revenue_col}) ELSE 0 END), 0) as refund_amount,
+                {rating_select} as rating
+            FROM sales
+            WHERE 1=1 {date_filter}
+            GROUP BY "{sku_col}"
+            HAVING revenue > 0
+            ORDER BY revenue DESC
+            LIMIT {limit}
+            """
+        else:
+            # No transaction type - use positive amounts for shipments
+            # Build ASIN selection
+            asin_select = f'COALESCE(MAX("{asin_col}"), \'\')' if asin_col else '\'\''
+            # Build rating selection
+            rating_select = f'COALESCE(AVG("{rating_col}"), 0)' if rating_col else '0'
+            
+            sql = f"""
+            SELECT 
+                "{sku_col}" as sku,
+                {asin_select} as asin,
+                COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({quantity_col if quantity_col else '1'}) ELSE 0 END), 0) as units_sold,
+                COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue,
+                COALESCE(SUM(CASE WHEN {revenue_col} < 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as refund_amount,
+                {rating_select} as rating
+            FROM sales
+            WHERE 1=1 {date_filter}
+            GROUP BY "{sku_col}"
+            HAVING revenue > 0
+            ORDER BY revenue DESC
+            LIMIT {limit}
+            """
+        
+        df = execute_query(sql)
+        
+        if df.empty:
+            return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
+        
+        # Calculate refund_ratio (refund_amount / revenue * 100)
+        df['refund_ratio'] = df.apply(
+            lambda row: round((row['refund_amount'] / row['revenue'] * 100) if row['revenue'] > 0 else 0, 1),
+            axis=1
+        )
+        
+        # Calculate trend (period-over-period growth)
+        # Compare current period vs previous period (same duration, shifted back by period length)
+        if start_date and end_date:
+            try:
+                from datetime import datetime, timedelta
+                
+                # Parse dates
+                current_start = datetime.strptime(start_date, '%Y-%m-%d')
+                current_end = datetime.strptime(end_date, '%Y-%m-%d')
+                
+                # Calculate period length in days
+                period_length = (current_end - current_start).days + 1
+                
+                # Calculate previous period dates (same duration, shifted back)
+                prev_end = current_start - timedelta(days=1)
+                prev_start = prev_end - timedelta(days=period_length - 1)
+                
+                prev_start_str = prev_start.strftime('%Y-%m-%d')
+                prev_end_str = prev_end.strftime('%Y-%m-%d')
+                
+                logger.info(f"📊 Trend calculation: Current period {start_date} to {end_date} ({period_length} days)")
+                logger.info(f"📊 Previous period: {prev_start_str} to {prev_end_str}")
+                
+                # Build previous period date filter
+                prev_date_filter = ""
+                if date_col:
+                    if needs_cast:
+                        prev_date_filter = f'AND CAST("{date_col}" AS DATE) >= \'{prev_start_str}\' AND CAST("{date_col}" AS DATE) <= \'{prev_end_str}\''
+                    else:
+                        prev_date_filter = f'AND "{date_col}" >= \'{prev_start_str}\' AND "{date_col}" <= \'{prev_end_str}\''
+                
+                # Query previous period revenue by SKU
+                if txn_col:
+                    prev_sql = f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
+                    FROM sales
+                    WHERE 1=1 {prev_date_filter}
+                    GROUP BY "{sku_col}"
+                    """
+                else:
+                    prev_sql = f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
+                    FROM sales
+                    WHERE 1=1 {prev_date_filter}
+                    GROUP BY "{sku_col}"
+                    """
+                
+                prev_df = execute_query(prev_sql)
+                logger.info(f"Previous period query returned {len(prev_df)} SKUs")
+                
+                if not prev_df.empty:
+                    logger.debug(f"Sample previous period SKUs: {prev_df['sku'].head(5).tolist()}")
+                    logger.debug(f"Sample previous period revenues: {prev_df['prev_revenue'].head(5).tolist()}")
+                
+                # Fallback: If no previous period data, try month-over-month comparison within current period
+                use_fallback = False
+                if prev_df.empty or len(prev_df) == 0:
+                    logger.warning("No previous period data found. Attempting month-over-month comparison within current period.")
+                    use_fallback = True
+                    
+                    # Split current period into two halves for comparison
+                    mid_point = current_start + timedelta(days=period_length // 2)
+                    first_half_end = mid_point - timedelta(days=1)
+                    second_half_start = mid_point
+                    
+                    first_half_str = first_half_end.strftime('%Y-%m-%d')
+                    second_half_start_str = second_half_start.strftime('%Y-%m-%d')
+                    
+                    logger.info(f"Fallback: Comparing first half ({start_date} to {first_half_str}) vs second half ({second_half_start_str} to {end_date})")
+                    
+                    # Build first half date filter
+                    first_half_filter = ""
+                    if date_col:
+                        if needs_cast:
+                            first_half_filter = f'AND CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{first_half_str}\''
+                        else:
+                            first_half_filter = f'AND "{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{first_half_str}\''
+                    
+                    # Query first half revenue by SKU (as "previous")
+                    if txn_col:
+                        fallback_sql = f"""
+                        SELECT 
+                            "{sku_col}" as sku,
+                            COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
+                        FROM sales
+                        WHERE 1=1 {first_half_filter}
+                        GROUP BY "{sku_col}"
+                        """
+                    else:
+                        fallback_sql = f"""
+                        SELECT 
+                            "{sku_col}" as sku,
+                            COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
+                        FROM sales
+                        WHERE 1=1 {first_half_filter}
+                        GROUP BY "{sku_col}"
+                        """
+                    
+                    prev_df = execute_query(fallback_sql)
+                    logger.info(f"Fallback query returned {len(prev_df)} SKUs")
+                
+                # Merge previous period data (or fallback first half data) with current period
+                if not prev_df.empty and 'sku' in prev_df.columns and 'sku' in df.columns:
+                    # Ensure SKU values are strings for proper matching
+                    df['sku'] = df['sku'].astype(str).str.strip()
+                    prev_df['sku'] = prev_df['sku'].astype(str).str.strip()
+                    
+                    logger.debug(f"Current df SKUs (first 5): {df['sku'].head(5).tolist()}")
+                    logger.debug(f"Previous df SKUs (first 5): {prev_df['sku'].head(5).tolist()}")
+                    logger.debug(f"Current df revenue (first 5): {df['revenue'].head(5).tolist()}")
+                    
+                    # Merge on SKU
+                    df = df.merge(prev_df, on='sku', how='left')
+                    
+                    # Check if merge worked
+                    if 'prev_revenue' not in df.columns:
+                        logger.error("Merge failed: prev_revenue column not found after merge")
+                        df['trend'] = 0.0
+                    else:
+                        df['prev_revenue'] = df['prev_revenue'].fillna(0)
+                        
+                        logger.debug(f"After merge - Sample: SKU={df['sku'].iloc[0] if len(df) > 0 else 'N/A'}, Current={df['revenue'].iloc[0] if len(df) > 0 else 'N/A'}, Previous={df['prev_revenue'].iloc[0] if len(df) > 0 else 'N/A'}")
+                        
+                        # Calculate trend: ((current - previous) / previous) * 100
+                        df['trend'] = df.apply(
+                            lambda row: round(
+                                ((row['revenue'] - row['prev_revenue']) / row['prev_revenue'] * 100)
+                                if row['prev_revenue'] > 0 else 0.0,
+                                1
+                            ),
+                            axis=1
+                        )
+                        
+                        # Log some sample trends
+                        if len(df) > 0:
+                            sample_trends = df[['sku', 'revenue', 'prev_revenue', 'trend']].head(5)
+                            logger.info(f"Sample trend calculations:\n{sample_trends.to_string()}")
+                        
+                        # Drop temporary column
+                        if 'prev_revenue' in df.columns:
+                            df = df.drop(columns=['prev_revenue'])
+                else:
+                    # No previous period data available, set trend to 0
+                    logger.warning(f"No previous period data found. prev_df empty: {prev_df.empty}, has sku column: {'sku' in prev_df.columns if not prev_df.empty else False}, df has sku: {'sku' in df.columns}")
+                    df['trend'] = 0.0
+            except Exception as e:
+                logger.error(f"Error calculating trend: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                df['trend'] = 0.0
+        else:
+            # No date range provided, cannot calculate trend
+            logger.warning(f"No date range provided for trend calculation. start_date: {start_date}, end_date: {end_date}")
+            df['trend'] = 0.0
+        
+        # Ensure rating is numeric and rounded
+        if 'rating' in df.columns:
+            df['rating'] = df['rating'].fillna(0).apply(lambda x: round(float(x), 1))
+        else:
+            df['rating'] = 0.0
+        
+        # Round numeric columns
+        df['units_sold'] = df['units_sold'].fillna(0).astype(int)
+        df['revenue'] = df['revenue'].fillna(0).round(2)
+        
+        # Select and order columns
+        result_df = df[['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend']].copy()
+        
+        return result_df
     
-    revenue_col = None
-    for col in revenue_columns:
-        if col in column_info['column_name'].values:
-            revenue_col = col
-            break
-    
-    txn_col = None
-    for col in txn_columns:
-        if col in column_info['column_name'].values:
-            txn_col = col
-            break
-    
-    order_id_col = None
-    for col in order_id_columns:
-        if col in column_info['column_name'].values:
-            order_id_col = col
-            break
-    
-    date_col = None
-    for col in date_columns:
-        if col in column_info['column_name'].values:
-            date_col = col
-            break
-    
-    if not sku_col or not revenue_col:
-        return pd.DataFrame()
-    
-    # Build date filter
-    date_filter = ""
-    if start_date and end_date and date_col:
-        date_filter = f'AND "{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
-    
-    # Build transaction type filter
-    txn_filter = ""
-    if txn_col:
-        txn_filter = f'AND "{txn_col}" = \'Shipment\''
-    
-    sql = f"""
-    SELECT 
-        "{sku_col}" as sku,
-        SUM({revenue_col}) as revenue,
-        COUNT(DISTINCT "{order_id_col}") as orders
-    FROM sales
-    WHERE 1=1 {txn_filter} {date_filter}
-    GROUP BY "{sku_col}"
-    ORDER BY revenue DESC
-    LIMIT {limit}
-    """
-    
-    return execute_query(sql)
+    except Exception as e:
+        logger.error(f"Error getting top products: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
