@@ -110,7 +110,13 @@ def detect_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
             'quantity', 'qty', 'amount', 'units', 'count'
         ],
         'region': [
-            'region', 'city', 'state', 'location', 'area', 'place'
+            # PRIORITY: "Ship To City" is the correct column (customer delivery location)
+            'ship to city',  # Highest priority - customer location
+            'ship_to_city',  # Alternative format
+            # Then other region synonyms
+            'region', 'city', 'state', 'location', 'area', 'place',
+            # EXCLUDE: "Bill From City" - this is seller location, NOT customer location
+            # We explicitly don't include it here to avoid mapping it
         ],
         'shipping_amount': [
             'shipping', 'shipping amount', 'shipping_amount',
@@ -168,25 +174,70 @@ def detect_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
                         break
         else:
             # Normal matching for other columns
-            for original_col, col_lower in columns_lower.items():
-                # Skip if already matched
-                if original_col in mapping.values():
-                    continue
+            # Special handling for region - prioritize "Ship To City" and exclude "Bill From City"
+            if standard_col == 'region':
+                region_found = False
                 
-                # Check if any synonym matches
-                for synonym in synonym_list:
-                    if synonym in col_lower:
-                        # Special handling for revenue_amount - exclude tax columns
-                        if standard_col == 'revenue_amount':
-                            if any(tax_word in col_lower for tax_word in ['tax', 'gst', 'cgst', 'sgst', 'igst']):
-                                continue
-                        
+                # FIRST PRIORITY: Look for "Ship To City" (exact match)
+                for original_col, col_lower in columns_lower.items():
+                    if col_lower == 'ship to city' and original_col not in mapping.values():
                         mapping[standard_col] = original_col
-                        logger.info(f"Mapped '{standard_col}' → '{original_col}'")
+                        logger.info(f"Mapped '{standard_col}' → '{original_col}' (Ship To City - customer location)")
+                        region_found = True
                         break
                 
-                if standard_col in mapping:
-                    break
+                # SECOND PRIORITY: Look for "ship_to_city" (alternative format)
+                if not region_found:
+                    for original_col, col_lower in columns_lower.items():
+                        if col_lower == 'ship_to_city' and original_col not in mapping.values():
+                            mapping[standard_col] = original_col
+                            logger.info(f"Mapped '{standard_col}' → '{original_col}' (ship_to_city - customer location)")
+                            region_found = True
+                            break
+                
+                # THIRD PRIORITY: Other synonyms, but EXCLUDE "Bill From City"
+                if not region_found:
+                    for original_col, col_lower in columns_lower.items():
+                        # Skip if already matched
+                        if original_col in mapping.values():
+                            continue
+                        
+                        # EXCLUDE "Bill From City" - this is seller location, NOT customer location
+                        if col_lower == 'bill from city' or col_lower == 'bill_from_city':
+                            logger.info(f"Skipping '{original_col}' - this is Bill From City (seller location, not customer)")
+                            continue
+                        
+                        # Check if any synonym matches
+                        for synonym in synonym_list:
+                            if synonym in col_lower:
+                                mapping[standard_col] = original_col
+                                logger.info(f"Mapped '{standard_col}' → '{original_col}' (via '{synonym}')")
+                                region_found = True
+                                break
+                        
+                        if region_found:
+                            break
+            else:
+                # Normal matching for other columns
+                for original_col, col_lower in columns_lower.items():
+                    # Skip if already matched
+                    if original_col in mapping.values():
+                        continue
+                    
+                    # Check if any synonym matches
+                    for synonym in synonym_list:
+                        if synonym in col_lower:
+                            # Special handling for revenue_amount - exclude tax columns
+                            if standard_col == 'revenue_amount':
+                                if any(tax_word in col_lower for tax_word in ['tax', 'gst', 'cgst', 'sgst', 'igst']):
+                                    continue
+                            
+                            mapping[standard_col] = original_col
+                            logger.info(f"Mapped '{standard_col}' → '{original_col}'")
+                            break
+                    
+                    if standard_col in mapping:
+                        break
     
     logger.info(f"Column mapping complete: {len(mapping)} columns mapped")
     return mapping

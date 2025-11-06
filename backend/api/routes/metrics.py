@@ -10,6 +10,9 @@ from services.metrics_service import (
     get_revenue_trend,
     get_top_products,
     get_daily_trends,
+    get_revenue_by_city,
+    get_movers_decliners,
+    get_skus_by_city,
 )
 
 router = APIRouter()
@@ -184,3 +187,97 @@ async def get_top_products_endpoint(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/revenue-by-city")
+async def get_revenue_by_city_endpoint(
+    limit: int = Query(10, ge=1, le=50, description="Number of cities to return"),
+):
+    """
+    Get top cities by total revenue (all-time data, no filters).
+    
+    Returns:
+        {
+            "data": [
+                {"city": "Bangalore", "revenue": 1000000},
+                {"city": "Mumbai", "revenue": 850000},
+                ...
+            ],
+            "count": 10,
+            "total_revenue": 5000000
+        }
+    """
+    try:
+        result = get_revenue_by_city(limit)
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in revenue-by-city endpoint: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/revenue-by-city/skus/{city}")
+async def get_city_skus_endpoint(
+    city: str,
+    limit: int = Query(10, ge=1, le=50, description="Number of SKUs to return"),
+):
+    """
+    Get top SKUs for a specific city.
+    
+    Returns:
+        {
+            "city": "Bangalore",
+            "data": [
+                {"sku": "SKU-001", "asin": "B01234567", "units": 100, "revenue": 50000},
+                ...
+            ],
+            "count": 10
+        }
+    """
+    try:
+        result = get_skus_by_city(city, limit)
+        return result
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error in city-skus endpoint: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/movers-decliners")
+async def get_movers_decliners_endpoint(
+    start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    limit: int = Query(10, ge=1, le=50, description="Number of SKUs per category"),
+):
+    """
+    Get movers (fast growing) and decliners (declining) SKUs
+    
+    Compares current period vs previous period (same duration, 1 week before)
+    - Decliners: growth % <= -30%
+    - Fast Movers: growth % >= +30%
+    
+    Returns:
+        {
+            "movers": [
+                {"sku": "SKU-001", "revenue": 100000, "wow_change": 35.5},
+                ...
+            ],
+            "decliners": [
+                {"sku": "SKU-002", "revenue": 50000, "wow_change": -45.2},
+                ...
+            ]
+        }
+    """
+    try:
+        result = get_movers_decliners(start_date, end_date, limit)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+

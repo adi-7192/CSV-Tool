@@ -13,6 +13,7 @@ export interface TrendChartProps {
   color?: string;             // Indigo 500 default
   loading?: boolean;
   error?: string;
+  height?: number;            // Chart height in pixels (default: 400)
 }
 
 const TrendChart: React.FC<TrendChartProps> = ({
@@ -22,6 +23,7 @@ const TrendChart: React.FC<TrendChartProps> = ({
   color = '#6366F1', // Indigo 500 default
   loading = false,
   error,
+  height = 400, // Default height
 }) => {
   // Format Y-axis tick values
   const formatYAxisTick = (value: number) => {
@@ -114,6 +116,9 @@ const TrendChart: React.FC<TrendChartProps> = ({
     );
   }
 
+  // Calculate total card height: title (16px) + gap (16px) + chart height
+  const cardHeight = height + 16 + 16 + 20; // height + title + gap + padding
+  
   return (
     <Card
       style={{
@@ -122,7 +127,7 @@ const TrendChart: React.FC<TrendChartProps> = ({
         boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
         backgroundColor: '#FFFFFF',
         padding: '20px',
-        height: '100%',
+        height: `${cardHeight}px`,
       }}
       bodyStyle={{ padding: 0 }}
     >
@@ -134,6 +139,8 @@ const TrendChart: React.FC<TrendChartProps> = ({
             fontWeight: '600',
             color: '#030712', // Slate 950
             lineHeight: '1.4',
+            textAlign: 'center',
+            width: '100%',
           }}
         >
           {title}
@@ -144,10 +151,10 @@ const TrendChart: React.FC<TrendChartProps> = ({
           style={{
             width: '100%',
             minWidth: '300px',
-            height: '300px',
+            height: `${height}px`,
           }}
         >
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height={height}>
             {type === 'line' ? (
               <LineChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
                 <CartesianGrid

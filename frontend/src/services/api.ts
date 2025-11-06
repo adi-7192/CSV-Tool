@@ -310,6 +310,159 @@ export const insightsService = {
 };
 
 // ============================================================================
+// REGION SERVICE
+// ============================================================================
+
+export interface RegionRevenue {
+  city: string;  // Changed from 'region' to 'city'
+  revenue: number;
+}
+
+export interface RegionRevenueResponse {
+  data: RegionRevenue[];
+  count: number;
+}
+
+export interface RegionSKU {
+  sku: string;
+  asin: string;
+  units: number;
+  revenue: number;
+}
+
+export interface RegionSKUsResponse {
+  data: RegionSKU[];
+  count: number;
+}
+
+export const regionService = {
+  /**
+   * Get revenue by city (all-time data, no filters)
+   * @param limit - Number of cities to return (default: 10)
+   * @returns City revenue data
+   */
+  getRevenueByCity: async (
+    limit = 10
+  ): Promise<RegionRevenueResponse | null> => {
+    try {
+      const url = '/api/metrics/revenue-by-city';
+      const params = { limit };
+      console.log(`[API] Fetching revenue by city: ${url}`, params);
+      const response = await apiClient.get<RegionRevenueResponse>(url, { params });
+      console.log('[API] City revenue response:', response.data);
+      console.log(`[API] City revenue count: ${response.data?.count || 0}`);
+      console.log('[API] City revenue data:', response.data?.data);
+      return response.data;
+    } catch (error) {
+      console.error('[API] Error fetching revenue by city:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+
+  /**
+   * Get top SKUs for a specific city
+   * @param city - City name
+   * @param limit - Number of SKUs to return (default: 10)
+   * @returns City SKUs data
+   */
+  getSKUsByCity: async (
+    city: string,
+    limit = 10
+  ): Promise<RegionSKUsResponse | null> => {
+    try {
+      const url = `/api/metrics/revenue-by-city/skus/${encodeURIComponent(city)}`;
+      const params = { limit };
+      console.log(`[API] Fetching SKUs for city: ${url}`, params);
+      const response = await apiClient.get<RegionSKUsResponse>(url, { params });
+      console.log('[API] City SKUs response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('[API] Error fetching SKUs by city:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+};
+
+// ============================================================================
+// MOVERS & DECLINERS SERVICE
+// ============================================================================
+
+export interface MoverDeclinerItem {
+  sku: string;
+  revenue: number;
+  wow_change: number; // Week-over-week change percentage
+}
+
+export interface MoversDeclinersResponse {
+  movers: MoverDeclinerItem[];
+  decliners: MoverDeclinerItem[];
+}
+
+export const moversDeclinersService = {
+  /**
+   * Get movers and decliners SKUs
+   * @param startDate - Start date (YYYY-MM-DD)
+   * @param endDate - End date (YYYY-MM-DD)
+   * @param limit - Number of SKUs per category (default: 10)
+   * @returns Movers and decliners data
+   */
+  getMoversDecliners: async (
+    startDate: string,
+    endDate: string,
+    limit = 10
+  ): Promise<MoversDeclinersResponse | null> => {
+    try {
+      const url = '/api/metrics/movers-decliners';
+      const params = {
+        start_date: startDate,
+        end_date: endDate,
+        limit,
+      };
+      
+      console.log('\n' + '='.repeat(80));
+      console.log('🔍 API SERVICE DEBUG: MOVERS & DECLINERS');
+      console.log('='.repeat(80));
+      console.log(`[API] Fetching movers & decliners: ${url}`);
+      console.log('[API] Request params:', params);
+      
+      const response = await apiClient.get<MoversDeclinersResponse>(url, { params });
+      
+      console.log('[API] Response status:', response.status);
+      console.log('[API] Full response data:', JSON.stringify(response.data, null, 2));
+      console.log('[API] Response structure:', {
+        hasMovers: !!response.data?.movers,
+        hasDecliners: !!response.data?.decliners,
+        moversCount: response.data?.movers?.length || 0,
+        declinersCount: response.data?.decliners?.length || 0,
+      });
+      
+      if (response.data?.movers && response.data.movers.length > 0) {
+        console.log('[API] Sample movers from response:', response.data.movers.slice(0, 3));
+      }
+      if (response.data?.decliners && response.data.decliners.length > 0) {
+        console.log('[API] Sample decliners from response:', response.data.decliners.slice(0, 3));
+      }
+      
+      console.log('='.repeat(80) + '\n');
+      
+      return response.data;
+    } catch (error) {
+      console.error('[API] ❌ Error fetching movers & decliners:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+};
+
+// ============================================================================
 // EXPORTS
 // ============================================================================
 

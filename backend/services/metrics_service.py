@@ -1264,3 +1264,1381 @@ def get_top_products(
         import traceback
         logger.error(traceback.format_exc())
         return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
+
+
+def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
+    """
+    Get top cities by total revenue (all-time data, no filters).
+    
+    Uses "Ship To City" column with case-insensitive normalization.
+    Handles city name variations (Bangalore/Bengaluru, Delhi/New Delhi, etc.).
+    
+    Args:
+        limit: Number of cities to return (default: 10)
+    
+    Returns:
+        Dictionary with:
+        - data: List of {"city": "...", "revenue": 100000}
+        - count: Number of cities returned
+        - total_revenue: Sum of all city revenues
+    """
+    if not table_exists('sales'):
+        return {
+            "data": [],
+            "count": 0,
+            "total_revenue": 0.0
+        }
+    
+    try:
+        # Detect column names
+        column_info = execute_query("DESCRIBE sales")
+        available_cols = list(column_info['column_name'].values)
+        
+        # DEBUG: Log all available columns
+        logger.info(f"Available columns in sales table: {available_cols}")
+        print(f"\n🔍 DEBUG: Available columns: {available_cols}\n")
+        
+        # Check if both columns exist
+        has_ship_to_city = any(col.lower().strip() == 'ship to city' for col in available_cols)
+        has_bill_from_city = any(col.lower().strip() == 'bill from city' for col in available_cols)
+        
+        if has_ship_to_city:
+            print(f"✅ 'Ship To City' column EXISTS in database")
+        else:
+            print(f"⚠️  'Ship To City' column NOT FOUND in database")
+        
+        if has_bill_from_city:
+            print(f"⚠️  'Bill From City' column EXISTS (will be EXCLUDED - wrong column)")
+        
+        print()
+        
+        # Find city/region column (try multiple variations)
+        # PRIORITY: "Ship To City" is the correct column (customer delivery location)
+        # EXCLUDE: "Bill From City" (this is wrong - it's the seller location)
+        city_col = None
+        
+        # FIRST PRIORITY: "Ship To City" (exact case-insensitive match)
+        for col in available_cols:
+            col_lower = col.lower().strip()
+            if col_lower == 'ship to city':
+                city_col = col
+                logger.info(f"✅ Found correct city column: '{city_col}' (Ship To City - customer location)")
+                print(f"\n✅✅✅ USING CORRECT COLUMN: '{city_col}' (Ship To City - customer delivery location)\n")
+                break
+        
+        # CRITICAL: If "Ship To City" not found, check if "Bill From City" exists
+        if not city_col:
+            if has_bill_from_city:
+                logger.warning("⚠️  WARNING: 'Ship To City' column NOT FOUND, but 'Bill From City' exists!")
+                logger.warning("⚠️  'Bill From City' will be EXCLUDED - this is seller location, not customer location")
+                print(f"\n⚠️  WARNING: 'Ship To City' column NOT FOUND!")
+                print(f"⚠️  'Bill From City' exists but will be EXCLUDED (wrong column)\n")
+        
+        # If not found, try "region" column (standardized name)
+        if not city_col:
+            for col in available_cols:
+                if col.lower() == 'region':
+                    city_col = col
+                    logger.info(f"Found city column (region): '{city_col}'")
+                    print(f"✅ Found column: '{city_col}' (region)")
+                    break
+        
+        # If still not found, try other variations (but EXCLUDE "Bill From City")
+        if not city_col:
+            region_variations = ['city', 'City', 'location', 'Location', 'shipping_city', 'Shipping City', 
+                               'delivery_city', 'Delivery City', 'ship_to_city', 'ship_to_state', 
+                               'Ship To City', 'Ship To State', 'ship to state']
+            for col in region_variations:
+                if col in available_cols:
+                    # EXCLUDE "Bill From City" - this is NOT what we want
+                    if col.lower() != 'bill from city':
+                        city_col = col
+                        logger.info(f"Found city column (variation): '{city_col}'")
+                        print(f"✅ Found column: '{city_col}' (variation)")
+                        break
+        
+        # Last resort: Pattern matching (but EXCLUDE "Bill From City")
+        if not city_col:
+            for col in available_cols:
+                col_lower = col.lower()
+                # EXCLUDE "Bill From City" explicitly
+                if col_lower == 'bill from city':
+                    logger.info(f"Skipping '{col}' - this is Bill From City (wrong column)")
+                    print(f"⚠️  Skipping '{col}' - this is Bill From City (wrong column)")
+                    continue
+                
+                # Check if column name contains city/region/location keywords
+                if any(keyword in col_lower for keyword in ['city', 'region', 'location', 'state', 'ship']):
+                    # Verify it's not a date or other type
+                    col_type = column_info[column_info['column_name'] == col]['column_type'].values[0]
+                    if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                        city_col = col
+                        logger.info(f"Found city column by pattern matching: '{city_col}'")
+                        print(f"✅ Found column by pattern: '{city_col}'")
+                        break
+        
+        if not city_col:
+            logger.warning(f"'Ship To City' or 'region' column not found. Available columns: {available_cols}")
+            print(f"\n⚠️  ERROR: City column not found! Available columns: {available_cols}\n")
+            # Try to get sample data to help debug
+            try:
+                sample = execute_query("SELECT * FROM sales LIMIT 1")
+                if not sample.empty:
+                    print(f"🔍 DEBUG: Sample row columns: {list(sample.columns)}")
+                    print(f"🔍 DEBUG: Sample data:")
+                    for col in sample.columns:
+                        val = sample[col].iloc[0]
+                        print(f"  {col}: {val} (type: {type(val).__name__})")
+            except Exception as e:
+                print(f"🔍 DEBUG: Could not fetch sample: {e}")
+            return {
+                "data": [],
+                "count": 0,
+                "total_revenue": 0.0
+            }
+        
+        # Find revenue column
+        revenue_col = None
+        revenue_columns = ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']
+        for col in revenue_columns:
+            if col in available_cols:
+                revenue_col = col
+                logger.info(f"Found revenue column: '{revenue_col}'")
+                break
+        
+        if not revenue_col:
+            logger.warning(f"Revenue column not found. Available columns: {available_cols}")
+            print(f"\n⚠️  ERROR: Revenue column not found! Available columns: {available_cols}\n")
+            return {
+                "data": [],
+                "count": 0,
+                "total_revenue": 0.0
+            }
+        
+        # DEBUG: Check if we have any data
+        count_sql = f'SELECT COUNT(*) as total FROM sales WHERE "{city_col}" IS NOT NULL AND TRIM("{city_col}") != \'\''
+        count_df = execute_query(count_sql)
+        total_records = int(count_df['total'].iloc[0]) if not count_df.empty else 0
+        logger.info(f"Total records with city data: {total_records}")
+        print(f"\n🔍 DEBUG: Total records with city data: {total_records:,}\n")
+        
+        if total_records == 0:
+            logger.warning("No records found with city data")
+            print(f"\n⚠️  WARNING: No records found with city data!\n")
+            return {
+                "data": [],
+                "count": 0,
+                "total_revenue": 0.0
+            }
+        
+        # City normalization mapping
+        city_mapping = {
+            'bangalore': 'Bangalore',
+            'bengaluru': 'Bangalore',
+            'delhi': 'New Delhi',
+            'new delhi': 'New Delhi',
+            'delhi ncr': 'New Delhi',
+            'bombay': 'Mumbai',
+            'kolkata': 'Kolkata',
+            'calcutta': 'Kolkata',
+            'hyderabad': 'Hyderabad',
+            'pune': 'Pune',
+            'poona': 'Pune',
+            'chennai': 'Chennai',
+            'madras': 'Chennai',
+            'gurugram': 'Gurugram',
+            'gurgaon': 'Gurugram',
+            'noida': 'Noida',
+            'navi mumbai': 'Navi Mumbai',
+            'thane': 'Thane',
+        }
+        
+        # CRITICAL VERIFICATION: Ensure we're using "Ship To City" not "Bill From City"
+        if city_col.lower() == 'bill from city':
+            logger.error("❌ ERROR: Selected column is 'Bill From City' - this is WRONG!")
+            logger.error("❌ Should use 'Ship To City' instead (customer location)")
+            print(f"\n❌❌❌ ERROR: Selected column is 'Bill From City' - this is WRONG!")
+            print(f"❌ Should use 'Ship To City' instead (customer location)\n")
+            return {
+                "data": [],
+                "count": 0,
+                "total_revenue": 0.0
+            }
+        
+        logger.info(f"✅ Using city column: '{city_col}' for revenue by city calculation")
+        print(f"\n✅ VERIFIED: Using column '{city_col}' for city revenue\n")
+        
+        # Fetch all data (no date/transaction filters)
+        # Use ABS() for revenue to handle both positive and negative values
+        sql = f"""
+        SELECT 
+            TRIM("{city_col}") as raw_city,
+            ABS({revenue_col}) as revenue
+        FROM sales
+        WHERE "{city_col}" IS NOT NULL 
+            AND TRIM("{city_col}") != ''
+            AND {revenue_col} IS NOT NULL
+            AND {revenue_col} != 0
+        """
+        
+        logger.info(f"Fetching revenue by city - SQL: {sql}")
+        print(f"\n🔍 DEBUG: Executing SQL:\n{sql}\n")
+        print(f"🔍 DEBUG: Using column '{city_col}' (should be 'Ship To City')\n")
+        raw_df = execute_query(sql)
+        
+        logger.info(f"Query returned {len(raw_df)} rows")
+        print(f"\n🔍 DEBUG: Query returned {len(raw_df):,} rows\n")
+        
+        if raw_df.empty:
+            logger.warning("No city data found after query")
+            print(f"\n⚠️  WARNING: Query returned empty result!\n")
+            # Try a simpler query to see if data exists
+            test_sql = f'SELECT "{city_col}", {revenue_col} FROM sales LIMIT 5'
+            test_df = execute_query(test_sql)
+            print(f"🔍 DEBUG: Test query returned {len(test_df)} rows")
+            if not test_df.empty:
+                print(f"🔍 DEBUG: Sample data from test query:")
+                print(test_df.head())
+            return {
+                "data": [],
+                "count": 0,
+                "total_revenue": 0.0
+            }
+        
+        # DEBUG: Show sample raw data
+        print(f"\n🔍 DEBUG: Sample raw data (first 10 rows):")
+        print(raw_df.head(10))
+        print(f"\n🔍 DEBUG: Unique cities in raw data: {raw_df['raw_city'].nunique()}")
+        unique_raw_cities = raw_df['raw_city'].unique()
+        print(f"🔍 DEBUG: All unique cities ({len(unique_raw_cities)}): {unique_raw_cities.tolist()}\n")
+        
+        # CRITICAL: Check if we're seeing Amethi and Mumbai (these might be from Bill From City)
+        if 'Amethi' in unique_raw_cities or 'amethi' in [c.lower() for c in unique_raw_cities]:
+            print(f"⚠️  WARNING: Found 'Amethi' in results - this might indicate wrong column!")
+            print(f"⚠️  'Amethi' is typically a seller location (Bill From City), not customer location")
+        
+        # Show revenue distribution by city
+        print(f"🔍 DEBUG: Revenue by raw city (before normalization):")
+        city_revenue_raw = raw_df.groupby('raw_city')['revenue'].sum().sort_values(ascending=False)
+        print(f"  Total cities with revenue: {len(city_revenue_raw)}")
+        for city, rev in city_revenue_raw.head(20).items():
+            print(f"  {city}: ₹{rev:,.2f}")
+        print()
+        
+        # Verify the column being used
+        print(f"🔍 DEBUG: VERIFICATION - Column being used: '{city_col}'")
+        if city_col.lower() == 'bill from city':
+            print(f"❌❌❌ CRITICAL ERROR: Using 'Bill From City' - this is WRONG!")
+        elif city_col.lower() == 'ship to city':
+            print(f"✅✅✅ CORRECT: Using 'Ship To City' - this is RIGHT!")
+        print()
+        
+        # Normalize city names
+        def normalize_city(city_name):
+            """Normalize city name using mapping and title case"""
+            if pd.isna(city_name) or not city_name:
+                return None
+            
+            city_str = str(city_name).strip().lower()
+            if not city_str:
+                return None
+            
+            # Check mapping first
+            if city_str in city_mapping:
+                return city_mapping[city_str]
+            
+            # Otherwise, apply title case
+            words = city_str.split()
+            normalized_words = [word.capitalize() for word in words]
+            return ' '.join(normalized_words)
+        
+        # Apply normalization
+        raw_df['city'] = raw_df['raw_city'].apply(normalize_city)
+        raw_df = raw_df[raw_df['city'].notna() & (raw_df['city'] != '')]
+        
+        # DEBUG: Show normalization results
+        print(f"\n🔍 DEBUG: After normalization:")
+        print(f"  Rows remaining: {len(raw_df):,}")
+        print(f"  Unique normalized cities: {raw_df['city'].nunique()}")
+        unique_normalized = raw_df['city'].unique()
+        print(f"  All normalized cities ({len(unique_normalized)}): {unique_normalized.tolist()}\n")
+        
+        # Group by normalized city and sum revenue
+        city_revenue = raw_df.groupby('city')['revenue'].sum().reset_index()
+        
+        # DEBUG: Show revenue by normalized city
+        print(f"🔍 DEBUG: Revenue by normalized city (before filtering):")
+        city_revenue_sorted = city_revenue.sort_values('revenue', ascending=False)
+        for idx, row in city_revenue_sorted.head(20).iterrows():
+            print(f"  {row['city']}: ₹{row['revenue']:,.2f}")
+        print()
+        
+        # Filter out zero/negative revenue
+        city_revenue = city_revenue[city_revenue['revenue'] > 0]
+        
+        print(f"🔍 DEBUG: After filtering revenue > 0:")
+        print(f"  Cities remaining: {len(city_revenue)}")
+        print()
+        
+        # Sort by revenue descending and get top N
+        top_cities = city_revenue.sort_values('revenue', ascending=False).head(limit)
+        
+        # DEBUG: Show final results
+        print(f"🔍 DEBUG: Final top {limit} cities:")
+        final_cities = []
+        for idx, row in top_cities.iterrows():
+            city_name = row['city']
+            city_rev = row['revenue']
+            print(f"  {city_name}: ₹{city_rev:,.2f}")
+            final_cities.append(city_name)
+        
+        # CRITICAL CHECK: Verify we're not returning Amethi/Mumbai (Bill From City cities)
+        if 'Amethi' in final_cities or 'Mumbai' in final_cities:
+            print(f"\n⚠️  WARNING: Final results contain 'Amethi' and/or 'Mumbai'")
+            print(f"⚠️  These are typically seller locations (Bill From City)")
+            print(f"⚠️  If you're seeing only these 2 cities, we might be using wrong column!")
+            print(f"⚠️  Column being used: '{city_col}'")
+            if city_col.lower() != 'ship to city':
+                print(f"❌ ERROR: Column '{city_col}' is NOT 'Ship To City'!")
+        
+        print()
+        
+        # Convert to list of dicts
+        cities_list = top_cities.to_dict('records')
+        
+        # Format revenue as float
+        for city in cities_list:
+            city['revenue'] = float(city['revenue'])
+        
+        total_revenue = float(top_cities['revenue'].sum())
+        
+        logger.info(f"Returning {len(cities_list)} cities, total revenue: ₹{total_revenue:,.2f}")
+        logger.info(f"Final cities: {final_cities}")
+        
+        print(f"\n✅ FINAL RESULT: Returning {len(cities_list)} cities to frontend")
+        print(f"✅ Cities: {final_cities}\n")
+        
+        return {
+            "data": cities_list,
+            "count": len(cities_list),
+            "total_revenue": total_revenue
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting revenue by city: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "data": [],
+            "count": 0,
+            "total_revenue": 0.0
+        }
+
+
+def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
+    """
+    Get top SKUs for a specific city.
+    
+    Shows units sold and revenue for each SKU.
+    Uses all-time data (no date filters).
+    
+    Args:
+        city: City name (will be normalized)
+        limit: Number of SKUs to return (default: 10)
+    
+    Returns:
+        Dictionary with:
+        - city: Normalized city name
+        - data: List of {"sku": "...", "asin": "...", "units": 100, "revenue": 50000}
+        - count: Number of SKUs returned
+    """
+    if not table_exists('sales'):
+        return {
+            "city": city,
+            "data": [],
+            "count": 0
+        }
+    
+    try:
+        # Detect column names
+        column_info = execute_query("DESCRIBE sales")
+        available_cols = list(column_info['column_name'].values)
+        
+        # DEBUG: Log all available columns
+        logger.info(f"Available columns in sales table (get_skus_by_city): {available_cols}")
+        print(f"\n🔍 DEBUG (get_skus_by_city): Available columns: {available_cols}\n")
+        
+        # Find city/region column (try multiple variations)
+        # PRIORITY: "Ship To City" is the correct column (customer delivery location)
+        # EXCLUDE: "Bill From City" (this is wrong - it's the seller location)
+        city_col = None
+        
+        # FIRST PRIORITY: "Ship To City" (exact case-insensitive match)
+        for col in available_cols:
+            if col.lower() == 'ship to city':
+                city_col = col
+                logger.info(f"Found city column (Ship To City): '{city_col}'")
+                print(f"✅ Found correct column: '{city_col}' (Ship To City)")
+                break
+        
+        # If not found, try "region" column (standardized name)
+        if not city_col:
+            for col in available_cols:
+                if col.lower() == 'region':
+                    city_col = col
+                    logger.info(f"Found city column (region): '{city_col}'")
+                    print(f"✅ Found column: '{city_col}' (region)")
+                    break
+        
+        # If still not found, try other variations (but EXCLUDE "Bill From City")
+        if not city_col:
+            region_variations = ['city', 'City', 'location', 'Location', 'shipping_city', 'Shipping City', 
+                               'delivery_city', 'Delivery City', 'ship_to_city', 'ship_to_state', 
+                               'Ship To City', 'Ship To State', 'ship to state']
+            for col in region_variations:
+                if col in available_cols:
+                    # EXCLUDE "Bill From City" - this is NOT what we want
+                    if col.lower() != 'bill from city':
+                        city_col = col
+                        logger.info(f"Found city column (variation): '{city_col}'")
+                        print(f"✅ Found column: '{city_col}' (variation)")
+                        break
+        
+        # Last resort: Pattern matching (but EXCLUDE "Bill From City")
+        if not city_col:
+            for col in available_cols:
+                col_lower = col.lower()
+                # EXCLUDE "Bill From City" explicitly
+                if col_lower == 'bill from city':
+                    logger.info(f"Skipping '{col}' - this is Bill From City (wrong column)")
+                    print(f"⚠️  Skipping '{col}' - this is Bill From City (wrong column)")
+                    continue
+                
+                # Check if column name contains city/region/location keywords
+                if any(keyword in col_lower for keyword in ['city', 'region', 'location', 'state', 'ship']):
+                    # Verify it's not a date or other type
+                    col_type = column_info[column_info['column_name'] == col]['column_type'].values[0]
+                    if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                        city_col = col
+                        logger.info(f"Found city column by pattern matching: '{city_col}'")
+                        print(f"✅ Found column by pattern: '{city_col}'")
+                        break
+        
+        if not city_col:
+            logger.warning(f"'Ship To City' or 'region' column not found. Available columns: {available_cols}")
+            print(f"\n⚠️  ERROR (get_skus_by_city): City column not found! Available columns: {available_cols}\n")
+            # Try to get sample data to help debug
+            try:
+                sample = execute_query("SELECT * FROM sales LIMIT 1")
+                if not sample.empty:
+                    print(f"🔍 DEBUG: Sample row columns: {list(sample.columns)}")
+                    print(f"🔍 DEBUG: Sample data:")
+                    for col in sample.columns:
+                        val = sample[col].iloc[0]
+                        print(f"  {col}: {val} (type: {type(val).__name__})")
+            except Exception as e:
+                print(f"🔍 DEBUG: Could not fetch sample: {e}")
+            return {
+                "city": city,
+                "data": [],
+                "count": 0
+            }
+        
+        sku_col = None
+        for col in ['sku', 'Sku', 'SKU']:
+            if col in available_cols:
+                sku_col = col
+                break
+        
+        asin_col = None
+        for col in ['asin', 'Asin', 'ASIN']:
+            if col in available_cols:
+                asin_col = col
+                break
+        
+        revenue_col = None
+        for col in ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']:
+            if col in available_cols:
+                revenue_col = col
+                break
+        
+        quantity_col = None
+        for col in ['quantity', 'Quantity', 'units_sold']:
+            if col in available_cols:
+                quantity_col = col
+                break
+        
+        if not city_col or not sku_col or not revenue_col:
+            logger.warning(f"Required columns not found. city_col: {city_col}, sku_col: {sku_col}, revenue_col: {revenue_col}")
+            print(f"\n⚠️  ERROR (get_skus_by_city): Required columns not found!")
+            print(f"  city_col: {city_col}")
+            print(f"  sku_col: {sku_col}")
+            print(f"  revenue_col: {revenue_col}")
+            print(f"  Available columns: {available_cols}\n")
+            return {
+                "city": city,
+                "data": [],
+                "count": 0
+            }
+        
+        # City normalization mapping (same as get_revenue_by_city)
+        city_mapping = {
+            'bangalore': 'Bangalore',
+            'bengaluru': 'Bangalore',
+            'delhi': 'New Delhi',
+            'new delhi': 'New Delhi',
+            'delhi ncr': 'New Delhi',
+            'bombay': 'Mumbai',
+            'kolkata': 'Kolkata',
+            'calcutta': 'Kolkata',
+            'hyderabad': 'Hyderabad',
+            'pune': 'Pune',
+            'poona': 'Pune',
+            'chennai': 'Chennai',
+            'madras': 'Chennai',
+            'gurugram': 'Gurugram',
+            'gurgaon': 'Gurugram',
+            'noida': 'Noida',
+            'navi mumbai': 'Navi Mumbai',
+            'thane': 'Thane',
+        }
+        
+        # Normalize input city name (same normalization as get_revenue_by_city)
+        # Use the EXACT same normalization function as get_revenue_by_city
+        def normalize_city_input(city_name):
+            """Normalize city name using mapping and title case - SAME as get_revenue_by_city"""
+            if not city_name:
+                return None
+            city_str = str(city_name).strip().lower()
+            if not city_str:
+                return None
+            # Check mapping first
+            if city_str in city_mapping:
+                return city_mapping[city_str]
+            # Otherwise, apply title case
+            words = city_str.split()
+            normalized_words = [word.capitalize() for word in words]
+            return ' '.join(normalized_words)
+        
+        city_normalized = normalize_city_input(city)
+        
+        logger.info(f"Getting SKUs for city: '{city}' -> normalized: '{city_normalized}'")
+        print(f"\n🔍 DEBUG (get_skus_by_city): Input city: '{city}' -> Normalized: '{city_normalized}'")
+        print(f"🔍 DEBUG (get_skus_by_city): City mapping check - '{city.lower().strip()}' in mapping: {city.lower().strip() in city_mapping}\n")
+        
+        # Build SQL query
+        # We need to normalize the city column in SQL to match the normalized input city
+        # Since we normalize in Python, we'll fetch all cities matching the normalized name
+        # and then filter in Python to ensure exact match
+        
+        asin_select = f'COALESCE(MAX("{asin_col}"), \'\')' if asin_col else '\'\''
+        quantity_select = f'COALESCE(SUM({quantity_col}), 0)' if quantity_col else 'COUNT(*)'
+        
+        # Fetch all records for cities that might match (case-insensitive)
+        # We'll normalize and filter in Python
+        sql = f"""
+        SELECT 
+            "{sku_col}" as sku,
+            {asin_select} as asin,
+            {quantity_select} as units,
+            COALESCE(SUM({revenue_col}), 0) as revenue,
+            TRIM("{city_col}") as raw_city
+        FROM sales
+        WHERE "{city_col}" IS NOT NULL
+            AND "{sku_col}" IS NOT NULL
+            AND {revenue_col} != 0
+        GROUP BY "{sku_col}", TRIM("{city_col}")
+        HAVING revenue > 0
+        ORDER BY units DESC
+        LIMIT {limit * 5}
+        """
+        
+        logger.info(f"Fetching SKUs for city '{city_normalized}' - SQL: {sql}")
+        print(f"🔍 DEBUG (get_skus_by_city): Executing SQL query\n")
+        df = execute_query(sql)
+        
+        print(f"🔍 DEBUG (get_skus_by_city): Query returned {len(df)} rows\n")
+        
+        if df.empty:
+            logger.warning(f"No SKU data found for city: {city_normalized}")
+            return {
+                "city": city_normalized,
+                "data": [],
+                "count": 0
+            }
+        
+        # Normalize city names in the result (SAME function as get_revenue_by_city)
+        def normalize_city(city_name):
+            """Normalize city name using mapping and title case - SAME as get_revenue_by_city"""
+            if pd.isna(city_name) or not city_name:
+                return None
+            city_str = str(city_name).strip().lower()
+            if not city_str:
+                return None
+            # Check mapping first
+            if city_str in city_mapping:
+                return city_mapping[city_str]
+            # Otherwise, apply title case
+            words = city_str.split()
+            normalized_words = [word.capitalize() for word in words]
+            return ' '.join(normalized_words)
+        
+        # Apply normalization and filter for the selected city
+        df['city_normalized'] = df['raw_city'].apply(normalize_city)
+        
+        # DEBUG: Show normalization results
+        print(f"🔍 DEBUG (get_skus_by_city): After normalization:")
+        print(f"  Total rows: {len(df)}")
+        print(f"  Unique normalized cities: {df['city_normalized'].nunique()}")
+        unique_cities_found = df['city_normalized'].unique()
+        print(f"  Cities found: {unique_cities_found.tolist()}")
+        print(f"  Looking for: '{city_normalized}'\n")
+        
+        city_data = df[df['city_normalized'] == city_normalized]
+        
+        if city_data.empty:
+            logger.warning(f"No SKU data found for normalized city: {city_normalized}")
+            print(f"\n⚠️  WARNING: No data found for normalized city '{city_normalized}'")
+            print(f"⚠️  Input city was: '{city}'")
+            print(f"⚠️  Normalized to: '{city_normalized}'")
+            print(f"⚠️  Available cities in data: {unique_cities_found.tolist()}")
+            
+            # Try case-insensitive match as fallback
+            city_data_fallback = df[df['city_normalized'].str.lower() == city_normalized.lower()] if 'city_normalized' in df.columns else pd.DataFrame()
+            if not city_data_fallback.empty:
+                print(f"⚠️  Found {len(city_data_fallback)} rows with case-insensitive match")
+                city_data = city_data_fallback
+            else:
+                # Show sample raw cities to help debug
+                print(f"⚠️  Sample raw cities from query (first 20):")
+                raw_cities_sample = df['raw_city'].unique()[:20]
+                for raw_city in raw_cities_sample:
+                    normalized_sample = normalize_city(raw_city)
+                    print(f"    Raw: '{raw_city}' -> Normalized: '{normalized_sample}'")
+                print(f"⚠️  This might be a normalization mismatch issue\n")
+                return {
+                    "city": city_normalized,
+                    "data": [],
+                    "count": 0
+                }
+        
+        print(f"✅ Found {len(city_data)} rows for city '{city_normalized}'\n")
+        
+        # Group by SKU (in case same SKU appears multiple times)
+        sku_summary = city_data.groupby('sku').agg({
+            'asin': 'first',
+            'units': 'sum',
+            'revenue': 'sum'
+        }).reset_index()
+        
+        # Sort by units descending and get top N
+        top_skus = sku_summary.sort_values('units', ascending=False).head(limit)
+        
+        # Convert to list of dicts
+        skus_list = top_skus.to_dict('records')
+        
+        # Format values
+        for sku in skus_list:
+            sku['sku'] = str(sku.get('sku', ''))
+            sku['asin'] = str(sku.get('asin', ''))
+            sku['units'] = int(sku.get('units', 0))
+            sku['revenue'] = float(sku.get('revenue', 0))
+        
+        logger.info(f"Returning {len(skus_list)} SKUs for city '{city_normalized}'")
+        
+        return {
+            "city": city_normalized,
+            "data": skus_list,
+            "count": len(skus_list)
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting SKUs by city: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "city": city,
+            "data": [],
+            "count": 0
+        }
+
+
+def get_movers_decliners(
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Get movers (fast growing) and decliners (declining) SKUs
+    
+    Compares current period vs previous period (same duration, 1 week before)
+    - Decliners: growth % <= -30%
+    - Fast Movers: growth % >= +30%
+    
+    Args:
+        start_date: Start date of current period (YYYY-MM-DD)
+        end_date: End date of current period (YYYY-MM-DD)
+        limit: Number of SKUs to return per category (default: 10)
+    
+    Returns:
+        Dictionary with "movers" and "decliners" lists
+        Each item: {"sku": "...", "revenue": 100000, "wow_change": 35.5}
+    """
+    if not table_exists('sales'):
+        return {"movers": [], "decliners": []}
+    
+    try:
+        from datetime import datetime, timedelta
+        
+        # Parse dates
+        current_start = datetime.strptime(start_date, '%Y-%m-%d')
+        current_end = datetime.strptime(end_date, '%Y-%m-%d')
+        
+        # Calculate period length
+        period_length = (current_end - current_start).days + 1
+        
+        # Calculate previous period dates (same duration, 1 week before)
+        prev_start = current_start - timedelta(days=7 + period_length - 1)
+        prev_end = current_start - timedelta(days=7)
+        
+        prev_start_str = prev_start.strftime('%Y-%m-%d')
+        prev_end_str = prev_end.strftime('%Y-%m-%d')
+        
+        logger.info(f"📊 Movers & Decliners: Current period {start_date} to {end_date} ({period_length} days)")
+        logger.info(f"📊 Previous period: {prev_start_str} to {prev_end_str}")
+        
+        # Detect column names dynamically
+        column_info = execute_query("DESCRIBE sales")
+        
+        sku_columns = ['sku', 'Sku', 'SKU']
+        revenue_columns = ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        revenue_col = None
+        for col in revenue_columns:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        if not sku_col or not revenue_col or not date_col:
+            logger.warning("Required columns not found for movers/decliners")
+            logger.warning(f"sku_col: {sku_col}, revenue_col: {revenue_col}, date_col: {date_col}")
+            logger.warning(f"Available columns: {list(column_info['column_name'].values)}")
+            return {"movers": [], "decliners": []}
+        
+        logger.info(f"Using columns - SKU: {sku_col}, Revenue: {revenue_col}, Transaction: {txn_col}, Date: {date_col}")
+        
+        # Handle date column type (VARCHAR vs DATE)
+        needs_cast = False
+        if date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                needs_cast = True
+        
+        # Build date filters
+        if needs_cast:
+            current_date_filter = f'CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\''
+            prev_date_filter = f'CAST("{date_col}" AS DATE) >= \'{prev_start_str}\' AND CAST("{date_col}" AS DATE) <= \'{prev_end_str}\''
+        else:
+            current_date_filter = f'"{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+            prev_date_filter = f'"{date_col}" >= \'{prev_start_str}\' AND "{date_col}" <= \'{prev_end_str}\''
+        
+        # Query current period revenue by SKU
+        # Handle revenue_calc differently (it's already transaction-aware)
+        if txn_col:
+            if revenue_col == 'revenue_calc':
+                # revenue_calc is already positive for shipments, negative for refunds
+                current_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as current_revenue
+                FROM sales
+                WHERE {current_date_filter}
+                GROUP BY "{sku_col}"
+                HAVING current_revenue > 0
+                """
+            else:
+                current_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as current_revenue
+                FROM sales
+                WHERE {current_date_filter}
+                GROUP BY "{sku_col}"
+                HAVING current_revenue > 0
+                """
+        else:
+            if revenue_col == 'revenue_calc':
+                current_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as current_revenue
+                FROM sales
+                WHERE {revenue_col} > 0 AND {current_date_filter}
+                GROUP BY "{sku_col}"
+                HAVING current_revenue > 0
+                """
+            else:
+                current_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as current_revenue
+                FROM sales
+                WHERE {revenue_col} > 0 AND {current_date_filter}
+                GROUP BY "{sku_col}"
+                HAVING current_revenue > 0
+                """
+        
+        logger.info(f"Current period SQL: {current_sql}")
+        current_df = execute_query(current_sql)
+        logger.info(f"Current period query returned {len(current_df)} SKUs")
+        if not current_df.empty:
+            logger.info(f"Sample current period SKUs: {current_df['sku'].head(5).tolist()}")
+            logger.info(f"Sample current period revenues: {current_df['current_revenue'].head(5).tolist()}")
+            logger.info(f"Total current period revenue: {current_df['current_revenue'].sum():.2f}")
+        
+        # Query previous period revenue by SKU
+        if txn_col:
+            if revenue_col == 'revenue_calc':
+                prev_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as prev_revenue
+                FROM sales
+                WHERE {prev_date_filter}
+                GROUP BY "{sku_col}"
+                """
+            else:
+                prev_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
+                FROM sales
+                WHERE {prev_date_filter}
+                GROUP BY "{sku_col}"
+                """
+        else:
+            if revenue_col == 'revenue_calc':
+                prev_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as prev_revenue
+                FROM sales
+                WHERE {revenue_col} > 0 AND {prev_date_filter}
+                GROUP BY "{sku_col}"
+                """
+            else:
+                prev_sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
+                FROM sales
+                WHERE {revenue_col} > 0 AND {prev_date_filter}
+                GROUP BY "{sku_col}"
+                """
+        
+        logger.info(f"Previous period SQL: {prev_sql}")
+        prev_df = execute_query(prev_sql)
+        logger.info(f"Previous period query returned {len(prev_df)} SKUs")
+        if not prev_df.empty:
+            logger.info(f"Sample previous period SKUs: {prev_df['sku'].head(5).tolist()}")
+            logger.info(f"Sample previous period revenues: {prev_df['prev_revenue'].head(5).tolist()}")
+            logger.info(f"Total previous period revenue: {prev_df['prev_revenue'].sum():.2f}")
+        
+        # CRITICAL DEBUG: Date ranges and record counts
+        print("\n" + "="*80)
+        print("🔍 CRITICAL DEBUG: DATE RANGES AND RECORD COUNTS")
+        print("="*80)
+        print(f"Current Period: {start_date} to {end_date}")
+        print(f"  Start: {current_start.strftime('%Y-%m-%d')}")
+        print(f"  End: {current_end.strftime('%Y-%m-%d')}")
+        print(f"  Duration: {period_length} days")
+        print(f"\nPrevious Period: {prev_start_str} to {prev_end_str}")
+        print(f"  Start: {prev_start.strftime('%Y-%m-%d')}")
+        print(f"  End: {prev_end.strftime('%Y-%m-%d')}")
+        print(f"  Duration: {(prev_end - prev_start).days + 1} days")
+        print(f"\nDate Range Summary:")
+        print(f"  Current: {start_date} to {end_date} | Previous: {prev_start_str} to {prev_end_str}")
+        print("-" * 80)
+        
+        # Check database record counts for BOTH periods
+        print("\n📊 DATABASE RECORD COUNTS:")
+        print("-" * 80)
+        
+        # Count shipments in current period
+        if txn_col:
+            current_count_sql = f"""
+            SELECT COUNT(*) as total
+            FROM sales
+            WHERE "{txn_col}" = 'Shipment' AND {current_date_filter}
+            """
+        else:
+            current_count_sql = f"""
+            SELECT COUNT(*) as total
+            FROM sales
+            WHERE {revenue_col} > 0 AND {current_date_filter}
+            """
+        
+        current_count_df = execute_query(current_count_sql)
+        current_count = int(current_count_df['total'].iloc[0]) if not current_count_df.empty else 0
+        print(f"Current Period Shipment Records: {current_count:,}")
+        
+        # Count shipments in previous period
+        if txn_col:
+            prev_count_sql = f"""
+            SELECT COUNT(*) as total
+            FROM sales
+            WHERE "{txn_col}" = 'Shipment' AND {prev_date_filter}
+            """
+        else:
+            prev_count_sql = f"""
+            SELECT COUNT(*) as total
+            FROM sales
+            WHERE {revenue_col} > 0 AND {prev_date_filter}
+            """
+        
+        prev_count_df = execute_query(prev_count_sql)
+        prev_count = int(prev_count_df['total'].iloc[0]) if not prev_count_df.empty else 0
+        print(f"Previous Period Shipment Records: {prev_count:,}")
+        
+        if prev_count == 0:
+            print("\n⚠️  WARNING: Previous period has ZERO shipment records!")
+            print("   This explains why all products show 999% growth (new products)")
+            print("   Possible causes:")
+            print("   1. Date calculation is wrong")
+            print("   2. Date column type mismatch")
+            print("   3. No data exists in previous period date range")
+        
+        print("-" * 80)
+        
+        # Show sample records from both periods
+        print("\n📊 SAMPLE RECORDS FROM DATABASE:")
+        print("-" * 80)
+        
+        # Sample from current period
+        if txn_col:
+            current_sample_sql = f"""
+            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
+            FROM sales
+            WHERE "{txn_col}" = 'Shipment' AND {current_date_filter}
+            LIMIT 5
+            """
+        else:
+            current_sample_sql = f"""
+            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
+            FROM sales
+            WHERE {revenue_col} > 0 AND {current_date_filter}
+            LIMIT 5
+            """
+        
+        current_sample_df = execute_query(current_sample_sql)
+        print(f"\nCurrent Period Sample Records ({len(current_sample_df)} shown):")
+        if not current_sample_df.empty:
+            for idx, row in current_sample_df.iterrows():
+                print(f"  SKU: {row.get('sku', 'N/A')} | Revenue: ₹{row.get('revenue', 0):,.2f} | Date: {row.get('date', 'N/A')}")
+        else:
+            print("  ⚠️  No records found!")
+        
+        # Sample from previous period
+        if txn_col:
+            prev_sample_sql = f"""
+            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
+            FROM sales
+            WHERE "{txn_col}" = 'Shipment' AND {prev_date_filter}
+            LIMIT 5
+            """
+        else:
+            prev_sample_sql = f"""
+            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
+            FROM sales
+            WHERE {revenue_col} > 0 AND {prev_date_filter}
+            LIMIT 5
+            """
+        
+        prev_sample_df = execute_query(prev_sample_sql)
+        print(f"\nPrevious Period Sample Records ({len(prev_sample_df)} shown):")
+        if not prev_sample_df.empty:
+            for idx, row in prev_sample_df.iterrows():
+                print(f"  SKU: {row.get('sku', 'N/A')} | Revenue: ₹{row.get('revenue', 0):,.2f} | Date: {row.get('date', 'N/A')}")
+        else:
+            print("  ⚠️  No records found!")
+        
+        print("-" * 80)
+        
+        # Show aggregated results
+        print("\n📊 AGGREGATED RESULTS:")
+        print("-" * 80)
+        print(f"Current Period Aggregated:")
+        print(f"  SKUs with revenue > 0: {len(current_df)}")
+        if not current_df.empty:
+            print(f"  Total revenue: ₹{current_df['current_revenue'].sum():,.2f}")
+            print(f"  Sample SKUs: {current_df['sku'].head(5).tolist()}")
+            print(f"  Sample revenues: {current_df['current_revenue'].head(5).tolist()}")
+        else:
+            print("  ⚠️  No SKUs found!")
+        
+        print(f"\nPrevious Period Aggregated:")
+        print(f"  SKUs with revenue > 0: {len(prev_df)}")
+        if not prev_df.empty:
+            print(f"  Total revenue: ₹{prev_df['prev_revenue'].sum():,.2f}")
+            print(f"  Sample SKUs: {prev_df['sku'].head(5).tolist()}")
+            print(f"  Sample revenues: {prev_df['prev_revenue'].head(5).tolist()}")
+        else:
+            print("  ⚠️  No SKUs found!")
+            print("  ⚠️  This is why all products show 999% growth!")
+        
+        print("="*80 + "\n")
+        
+        # Merge current and previous period data
+        if current_df.empty:
+            return {"movers": [], "decliners": []}
+        
+        # Ensure SKU values are strings for proper matching
+        current_df['sku'] = current_df['sku'].astype(str).str.strip()
+        if not prev_df.empty:
+            prev_df['sku'] = prev_df['sku'].astype(str).str.strip()
+            # Merge on SKU
+            merged_df = current_df.merge(prev_df, on='sku', how='left')
+        else:
+            merged_df = current_df.copy()
+            merged_df['prev_revenue'] = 0.0
+        
+        # Fill missing previous revenue with 0
+        merged_df['prev_revenue'] = merged_df['prev_revenue'].fillna(0)
+        
+        logger.info(f"Merged dataframe has {len(merged_df)} SKUs")
+        logger.info(f"SKUs with current revenue > 0: {len(merged_df[merged_df['current_revenue'] > 0])}")
+        logger.info(f"SKUs with previous revenue > 0: {len(merged_df[merged_df['prev_revenue'] > 0])}")
+        logger.info(f"SKUs with both periods > 0: {len(merged_df[(merged_df['current_revenue'] > 0) & (merged_df['prev_revenue'] > 0)])}")
+        
+        # Calculate growth percentage
+        # Handle three cases:
+        # 1. prev_revenue > 0: normal calculation ((current - prev) / prev * 100)
+        # 2. prev_revenue = 0 and current_revenue > 0: new product, treat as 100% growth (mover)
+        # 3. prev_revenue = 0 and current_revenue = 0: skip (shouldn't happen due to HAVING clause)
+        def calculate_growth(row):
+            current = float(row['current_revenue'])
+            previous = float(row['prev_revenue'])
+            
+            if previous > 0:
+                # Normal case: calculate percentage change
+                return round(((current - previous) / previous) * 100, 1)
+            elif current > 0:
+                # New product: treat as infinite growth (1000% as placeholder for sorting)
+                # We'll filter these separately
+                return 1000.0
+            else:
+                # Shouldn't happen, but return 0
+                return 0.0
+        
+        # DEBUG: Log BEFORE growth calculation - first 5 SKUs with full details
+        print("\n" + "="*80)
+        print("🔍 DEBUG: MOVERS & DECLINERS - BEFORE GROWTH CALCULATION")
+        print("="*80)
+        for idx, row in merged_df.head(5).iterrows():
+            sku = str(row['sku'])
+            current = float(row['current_revenue'])
+            previous = float(row['prev_revenue'])
+            # Calculate growth manually for logging
+            if previous > 0:
+                growth = ((current - previous) / previous) * 100
+            elif current > 0:
+                growth = 1000.0  # New product
+            else:
+                growth = 0.0
+            print(f"SKU: {sku}")
+            print(f"  Current Period Revenue: ₹{current:,.2f}")
+            print(f"  Previous Period Revenue: ₹{previous:,.2f}")
+            print(f"  Calculated Growth %: {growth:.1f}%")
+            print("-" * 80)
+        print(f"Total SKUs in merged dataframe: {len(merged_df)}")
+        print("="*80 + "\n")
+        
+        merged_df['wow_change'] = merged_df.apply(calculate_growth, axis=1)
+        
+        # Log sample calculations
+        sample_calc = merged_df[['sku', 'current_revenue', 'prev_revenue', 'wow_change']].head(10)
+        logger.info(f"Sample growth calculations:\n{sample_calc.to_string()}")
+        
+        # DEBUG: Log AFTER growth calculation - first 5 SKUs
+        print("\n" + "="*80)
+        print("🔍 DEBUG: MOVERS & DECLINERS - AFTER GROWTH CALCULATION")
+        print("="*80)
+        for idx, row in merged_df.head(5).iterrows():
+            print(f"SKU: {row['sku']} | Current: ₹{row['current_revenue']:,.2f} | Previous: ₹{row['prev_revenue']:,.2f} | Growth: {row['wow_change']:.1f}%")
+        print("="*80 + "\n")
+        
+        # Filter decliners (growth <= -30%)
+        # Exclude new products (wow_change = 1000)
+        decliners_df = merged_df[(merged_df['wow_change'] <= -30) & (merged_df['wow_change'] < 1000)].copy()
+        decliners_df = decliners_df.sort_values('wow_change', ascending=True).head(limit)
+        logger.info(f"Found {len(decliners_df)} decliners (growth <= -30%)")
+        if not decliners_df.empty:
+            logger.info(f"Sample decliners: {decliners_df[['sku', 'current_revenue', 'prev_revenue', 'wow_change']].head(5).to_dict('records')}")
+        
+        # Filter movers (growth >= +30% OR new products)
+        # Include both high growth products and new products
+        movers_df = merged_df[merged_df['wow_change'] >= 30].copy()
+        movers_df = movers_df.sort_values('wow_change', ascending=False).head(limit)
+        logger.info(f"Found {len(movers_df)} movers (growth >= +30% or new products)")
+        if not movers_df.empty:
+            logger.info(f"Sample movers: {movers_df[['sku', 'current_revenue', 'prev_revenue', 'wow_change']].head(5).to_dict('records')}")
+        
+        # If we don't have enough results, relax the threshold
+        if len(decliners_df) < 5 and len(merged_df) > 0:
+            logger.info("Not enough decliners found, checking for any negative growth...")
+            any_decliners = merged_df[(merged_df['wow_change'] < 0) & (merged_df['wow_change'] < 1000)].copy()
+            if len(any_decliners) > 0:
+                logger.info(f"Found {len(any_decliners)} SKUs with negative growth")
+                decliners_df = any_decliners.sort_values('wow_change', ascending=True).head(limit)
+        
+        if len(movers_df) < 5 and len(merged_df) > 0:
+            logger.info("Not enough movers found, checking for any positive growth...")
+            any_movers = merged_df[(merged_df['wow_change'] > 0) & (merged_df['wow_change'] < 1000)].copy()
+            if len(any_movers) > 0:
+                logger.info(f"Found {len(any_movers)} SKUs with positive growth")
+                # Combine with new products
+                new_products = merged_df[merged_df['wow_change'] >= 1000].copy()
+                combined = pd.concat([any_movers.sort_values('wow_change', ascending=False), new_products]).head(limit)
+                movers_df = combined
+        
+        # Format results
+        decliners = []
+        for _, row in decliners_df.iterrows():
+            wow_change = float(row['wow_change'])
+            # Cap at -100% for display (can't go below -100%)
+            wow_change = max(wow_change, -100.0)
+            decliners.append({
+                'sku': str(row['sku']),
+                'revenue': float(row['current_revenue']),
+                'wow_change': wow_change,
+            })
+        
+        movers = []
+        for _, row in movers_df.iterrows():
+            wow_change = float(row['wow_change'])
+            # For new products (1000%), show as "New" or cap at reasonable value
+            # We'll handle this in frontend, but for now cap at 999%
+            if wow_change >= 1000:
+                wow_change = 999.0  # Indicates new product
+            movers.append({
+                'sku': str(row['sku']),
+                'revenue': float(row['current_revenue']),
+                'wow_change': wow_change,
+            })
+        
+        logger.info(f"📊 Final results: {len(movers)} movers and {len(decliners)} decliners")
+        if decliners:
+            logger.info(f"Decliners range: {min(d['wow_change'] for d in decliners):.1f}% to {max(d['wow_change'] for d in decliners):.1f}%")
+        if movers:
+            logger.info(f"Movers range: {min(m['wow_change'] for m in movers):.1f}% to {max(m['wow_change'] for m in movers):.1f}%")
+        
+        return {
+            "movers": movers,
+            "decliners": decliners,
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting movers and decliners: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"movers": [], "decliners": []}
+
+
+def get_skus_by_region(
+    region: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10,
+) -> pd.DataFrame:
+    """
+    Get top SKUs for a specific region/city
+    
+    Args:
+        region: Region/city name (case-insensitive)
+        start_date: Optional start date filter (YYYY-MM-DD)
+        end_date: Optional end date filter (YYYY-MM-DD)
+        limit: Number of SKUs to return (default: 10)
+    
+    Returns:
+        DataFrame with columns: sku, asin, units, revenue
+    """
+    if not table_exists('sales'):
+        return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
+    
+    try:
+        # Detect column names dynamically
+        column_info = execute_query("DESCRIBE sales")
+        
+        region_columns = ['region', 'Region', 'city', 'City', 'location', 'Location']
+        sku_columns = ['sku', 'Sku', 'SKU']
+        asin_columns = ['asin', 'Asin', 'ASIN', 'Amazon ASIN']
+        revenue_columns = ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']
+        quantity_columns = ['quantity', 'Quantity', 'units_sold']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        
+        region_col = None
+        for col in region_columns:
+            if col in column_info['column_name'].values:
+                region_col = col
+                break
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        asin_col = None
+        for col in asin_columns:
+            if col in column_info['column_name'].values:
+                asin_col = col
+                break
+        
+        revenue_col = None
+        for col in revenue_columns:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        quantity_col = None
+        for col in quantity_columns:
+            if col in column_info['column_name'].values:
+                quantity_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        if not region_col or not sku_col or not revenue_col:
+            logger.warning(f"Required columns not found for region SKUs. region_col: {region_col}, sku_col: {sku_col}, revenue_col: {revenue_col}")
+            return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
+        
+        logger.info(f"Getting SKUs for region: {region}")
+        logger.info(f"Using columns - Region: {region_col}, SKU: {sku_col}, ASIN: {asin_col}, Revenue: {revenue_col}, Quantity: {quantity_col}, Transaction: {txn_col}, Date: {date_col}")
+        
+        # Build date filter
+        date_filter = ""
+        if start_date and end_date and date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                date_filter = f'AND CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\''
+            else:
+                date_filter = f'AND "{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+        
+        # Build region filter (case-insensitive)
+        region_filter = f'LOWER(TRIM("{region_col}")) = LOWER(TRIM(\'{region}\'))'
+        
+        # Build ASIN selection
+        asin_select = f'COALESCE(MAX("{asin_col}"), \'\')' if asin_col else '\'\''
+        
+        # Build quantity selection
+        quantity_select = f'COALESCE(SUM({quantity_col}), 0)' if quantity_col else 'COUNT(*)'
+        
+        # Build SQL query - include ALL transaction types (not just Shipments)
+        # This matches the fix in get_revenue_by_region() - keep date filter, remove transaction type filter
+        if revenue_col == 'revenue_calc':
+            # revenue_calc is transaction-aware: positive = shipments, negative = refunds
+            # Sum all values to get net revenue per SKU
+            sql = f"""
+            SELECT 
+                "{sku_col}" as sku,
+                {asin_select} as asin,
+                {quantity_select} as units,
+                COALESCE(SUM({revenue_col}), 0) as revenue
+            FROM sales
+            WHERE {region_filter} {date_filter}
+            GROUP BY "{sku_col}"
+            HAVING revenue > 0
+            ORDER BY units DESC
+            LIMIT {limit}
+            """
+        else:
+            # For other revenue columns, use positive amounts only
+            sql = f"""
+            SELECT 
+                "{sku_col}" as sku,
+                {asin_select} as asin,
+                {quantity_select} as units,
+                COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+            FROM sales
+            WHERE {region_filter} AND {revenue_col} > 0 {date_filter}
+            GROUP BY "{sku_col}"
+            HAVING revenue > 0
+            ORDER BY units DESC
+            LIMIT {limit}
+            """
+        
+        logger.info(f"Executing SQL: {sql}")
+        df = execute_query(sql)
+        
+        logger.info(f"Query returned {len(df)} SKUs for region {region}")
+        
+        # DEBUG: Log ALL SKUs for selected region
+        print("\n" + "="*80)
+        print(f"🔍 DEBUG: REGION SKUs - Region: {region}")
+        print("="*80)
+        if df.empty:
+            print(f"⚠️  No SKUs found for region: {region}")
+        else:
+            print(f"Total SKUs found: {len(df)}")
+            print(f"\nAll SKUs for region '{region}':")
+            for idx, row in df.iterrows():
+                sku = row.get('sku', 'N/A')
+                asin = row.get('asin', 'N/A')
+                units = row.get('units', 0)
+                revenue = row.get('revenue', 0)
+                print(f"  {idx+1}. SKU: {sku}")
+                print(f"     ASIN: {asin}")
+                print(f"     Units Sold: {units:,}")
+                print(f"     Revenue: ₹{revenue:,.2f}")
+                print("-" * 80)
+            print(f"\nTotal Units: {df['units'].sum():,}")
+            print(f"Total Revenue: ₹{df['revenue'].sum():,.2f}")
+            logger.info(f"Sample SKUs: {df['sku'].head(5).tolist()}")
+            logger.info(f"Total units: {df['units'].sum()}, Total revenue: {df['revenue'].sum():.2f}")
+        print("="*80 + "\n")
+        
+        # Ensure numeric columns
+        if not df.empty:
+            df['units'] = pd.to_numeric(df['units'], errors='coerce').fillna(0).astype(int)
+            df['revenue'] = pd.to_numeric(df['revenue'], errors='coerce').fillna(0)
+            df['sku'] = df['sku'].astype(str).str.strip()
+            df['asin'] = df['asin'].astype(str).str.strip()
+        
+        return df
+    
+    except Exception as e:
+        logger.error(f"Error getting SKUs by region: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
