@@ -7,6 +7,22 @@ from typing import Optional
 from datetime import datetime
 from services.data_service import get_transactions, get_unique_skus, get_data_statistics, export_transactions_csv
 from services.upload_service import process_csv_upload
+from utils.validators import (
+    validate_date_range,
+    validate_date,
+    validate_sku,
+    validate_transaction_type,
+    validate_page,
+    validate_limit,
+)
+from utils.sanitizers import (
+    sanitize_string,
+    sanitize_date_string,
+    sanitize_sku,
+    sanitize_transaction_type,
+    sanitize_integer,
+)
+from utils.error_handler import format_error_response, log_error
 
 router = APIRouter()
 
@@ -48,6 +64,31 @@ async def get_transactions_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        page = sanitize_integer(page, default=1)
+        limit = sanitize_integer(limit, default=50)
+        date_from = sanitize_date_string(date_from)
+        date_to = sanitize_date_string(date_to)
+        sku = sanitize_sku(sku)
+        transaction_type = sanitize_transaction_type(transaction_type)
+        
+        # Validate inputs
+        validate_page(page)
+        validate_limit(limit)
+        
+        if date_from and date_to:
+            validate_date_range(date_from, date_to)
+        elif date_from:
+            validate_date(date_from, "date_from")
+        elif date_to:
+            validate_date(date_to, "date_to")
+        
+        if sku:
+            validate_sku(sku)
+        
+        if transaction_type:
+            validate_transaction_type(transaction_type)
+        
         result = get_transactions(
             page=page,
             limit=limit,
@@ -57,8 +98,20 @@ async def get_transactions_endpoint(
             transaction_type=transaction_type,
         )
         return result
+    except ValueError as e:
+        log_error(e, 'get_transactions', {
+            'page': page, 'limit': limit, 'date_from': date_from,
+            'date_to': date_to, 'sku': sku, 'transaction_type': transaction_type
+        })
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_transactions', {
+            'page': page, 'limit': limit, 'date_from': date_from,
+            'date_to': date_to, 'sku': sku, 'transaction_type': transaction_type
+        })
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch transactions. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/skus")

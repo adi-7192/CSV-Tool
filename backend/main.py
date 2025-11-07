@@ -10,19 +10,28 @@ from contextlib import asynccontextmanager
 from api.routes import health, upload, metrics, charts, chat, verification, data_status, data_routes
 from core.config import settings
 from core.database import init_database
+from utils.logger import setup_logger, app_logger
+
+# Initialize logging
+logger = setup_logger('main')
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
-    print("🚀 Starting Analytics API...")
+    logger.info("🚀 Starting Analytics API...")
+    logger.info(f"Database path: {settings.DATABASE_PATH}")
+    logger.info(f"Ollama URL: {settings.OLLAMA_URL}")
+    logger.info(f"Debug mode: {settings.DEBUG}")
+    
     init_database()  # Initialize database connections, create tables if needed
-    print(f"✅ Database initialized: {settings.DATABASE_PATH}")
-    print(f"✅ Ollama URL: {settings.OLLAMA_URL}")
+    logger.info("✅ Database initialized")
+    
     yield
+    
     # Shutdown
-    print("👋 Shutting down Analytics API...")
+    logger.info("👋 Shutting down Analytics API...")
 
 
 # Initialize FastAPI app

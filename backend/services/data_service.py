@@ -9,6 +9,8 @@ from core.database import execute_query, table_exists
 import logging
 import re
 
+from utils.error_handler import handle_service_error, log_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -345,15 +347,27 @@ def get_transactions(
             "total_pages": total_pages,
         }
         
-    except Exception as e:
-        logger.error(f"Error getting transactions: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_transactions', {'page': page, 'limit': limit, 'date_from': date_from, 'date_to': date_to, 'sku': sku, 'transaction_type': transaction_type})
         return {
             "data": [],
             "total": 0,
             "page": page,
             "total_pages": 0,
+            "error": True,
+            "message": f"Invalid input: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_transactions', {'page': page, 'limit': limit, 'date_from': date_from, 'date_to': date_to, 'sku': sku, 'transaction_type': transaction_type})
+        return {
+            "data": [],
+            "total": 0,
+            "page": page,
+            "total_pages": 0,
+            "error": True,
+            "message": "Failed to fetch transactions. Please try again later.",
+            "status": 500
         }
 
 
@@ -403,12 +417,21 @@ def get_unique_skus() -> Dict[str, Any]:
             "skus": skus,
         }
         
-    except Exception as e:
-        logger.error(f"Error getting unique SKUs: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_unique_skus', {})
         return {
             "skus": [],
+            "error": True,
+            "message": f"Invalid input: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_unique_skus', {})
+        return {
+            "skus": [],
+            "error": True,
+            "message": "Failed to fetch unique SKUs. Please try again later.",
+            "status": 500
         }
 
 
@@ -487,14 +510,25 @@ def get_data_statistics() -> Dict[str, Any]:
             "unique_skus": unique_skus,
         }
         
-    except Exception as e:
-        logger.error(f"Error getting data statistics: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_data_statistics', {})
         return {
             "total_records": 0,
             "date_range": {"start": None, "end": None},
             "unique_skus": 0,
+            "error": True,
+            "message": f"Invalid input: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_data_statistics', {})
+        return {
+            "total_records": 0,
+            "date_range": {"start": None, "end": None},
+            "unique_skus": 0,
+            "error": True,
+            "message": "Failed to fetch data statistics. Please try again later.",
+            "status": 500
         }
 
 

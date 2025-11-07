@@ -11,6 +11,7 @@ import logging
 
 from core.config import settings
 from core.database import get_connection, table_exists
+from utils.error_handler import handle_service_error, log_error
 
 logger = logging.getLogger(__name__)
 
@@ -776,14 +777,21 @@ def process_csv_upload(
             'validation_warnings': validation_warnings,
         }
     
-    except Exception as e:
-        logger.error(f"❌ Upload processing failed: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        
+    except ValueError as e:
+        log_error(e, 'process_csv_upload', {'filename': filename})
         return {
             'success': False,
-            'error': str(e),
-            'ingestion_id': ingestion_id,
+            'error': f'Invalid input: {str(e)}',
+            'status': 400,
             'filename': filename,
+            'ingestion_id': ingestion_id,
+        }
+    except Exception as e:
+        log_error(e, 'process_csv_upload', {'filename': filename})
+        return {
+            'success': False,
+            'error': 'Failed to process CSV upload. Please try again later.',
+            'status': 500,
+            'filename': filename,
+            'ingestion_id': ingestion_id,
         }

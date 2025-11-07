@@ -4,6 +4,7 @@ Metrics API Endpoints - Serve KPIs to frontend
 from fastapi import APIRouter, Query, HTTPException
 from typing import Optional
 from datetime import datetime, timedelta
+import logging
 
 from services.metrics_service import (
     calculate_metrics,
@@ -18,8 +19,24 @@ from services.metrics_service import (
     get_cancellations_data,
     get_free_replacements_data,
 )
+from utils.error_handler import format_error_response, log_error
+from utils.validators import (
+    validate_date_range,
+    validate_date,
+    validate_transaction_type,
+    validate_group_by,
+    validate_limit,
+)
+from utils.sanitizers import (
+    sanitize_string,
+    sanitize_date_string,
+    sanitize_transaction_type,
+    sanitize_city_name,
+)
+from utils.logger import api_logger, log_api_request, log_api_response
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get("/")
@@ -48,13 +65,44 @@ async def get_metrics(
         - revenue: Alias for gross_revenue (backward compatibility)
         - refunds: Alias for refund_amount (backward compatibility)
     """
+    import time
+    start_time = time.time()
+    
+    log_api_request(
+        api_logger,
+        'GET',
+        '/api/metrics/',
+        {
+            'start_date': start_date,
+            'end_date': end_date,
+            'transaction_type': transaction_type,
+            'source_file': source_file
+        }
+    )
+    
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        transaction_type = sanitize_transaction_type(transaction_type)
+        source_file = sanitize_string(source_file)
+        
         # Default to last 30 days if no dates provided
         if not start_date or not end_date:
             end_date = datetime.now().strftime('%Y-%m-%d')
             start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        else:
+            # Validate date range
+            validate_date_range(start_date, end_date)
+        
+        # Validate transaction type if provided
+        if transaction_type:
+            validate_transaction_type(transaction_type)
         
         metrics = calculate_metrics(start_date, end_date, transaction_type, source_file)
+        
+        duration_ms = (time.time() - start_time) * 1000
+        log_api_response(api_logger, 'GET', '/api/metrics/', 200, duration_ms)
         
         return {
             "data": metrics,
@@ -64,8 +112,18 @@ async def get_metrics(
             }
         }
     
+    except ValueError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        log_api_response(api_logger, 'GET', '/api/metrics/', 400, duration_ms)
+        log_error(e, 'get_metrics', {'start_date': start_date, 'end_date': end_date, 'transaction_type': transaction_type})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        duration_ms = (time.time() - start_time) * 1000
+        log_api_response(api_logger, 'GET', '/api/metrics/', 500, duration_ms)
+        log_error(e, 'get_metrics', {'start_date': start_date, 'end_date': end_date, 'transaction_type': transaction_type})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch metrics. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/trend")
@@ -95,6 +153,15 @@ async def get_trend(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        group_by = sanitize_string(group_by, max_length=10) or 'day'
+        
+        # Validate inputs
+        validate_date_range(start_date, end_date)
+        validate_group_by(group_by)
+        
         # If group_by is 'day', use the new comprehensive endpoint
         if group_by == 'day':
             trends = get_daily_trends(start_date, end_date)
@@ -135,8 +202,14 @@ async def get_trend(
                 "count": len(trend_data),
             }
     
+    except ValueError as e:
+        log_error(e, 'get_trend', {'start_date': start_date, 'end_date': end_date, 'group_by': group_by})
+        error_response = format_error_response(e, status_code=400, user_message=f"Invalid input: {str(e)}")
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_trend', {'start_date': start_date, 'end_date': end_date, 'group_by': group_by})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch trend data. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/top-products")
@@ -214,20 +287,38 @@ async def get_revenue_by_city_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        
+        # Default to last 30 days if no dates provided
+        if not start_date or not end_date:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        else:
+            # Validate date range
+            validate_date_range(start_date, end_date)
+        
+        # Validate limit
+        validate_limit(limit)
+        
         result = get_revenue_by_city(start_date, end_date, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_revenue_by_city', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error in revenue-by-city endpoint: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_revenue_by_city', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch revenue by city. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/revenue-by-city/skus/{city}")
 async def get_city_skus_endpoint(
     city: str,
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     limit: int = Query(10, ge=1, le=50, description="Number of SKUs to return"),
 ):
     """
@@ -244,15 +335,34 @@ async def get_city_skus_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        city = sanitize_city_name(city)
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        
+        # Validate city name
+        from utils.validators import validate_city_name
+        validate_city_name(city)
+        
+        # Note: get_skus_by_city doesn't support date filtering (uses all-time data)
+        # Date parameters are accepted but not used by the function
+        # Validate date range if provided (for future compatibility)
+        if start_date and end_date:
+            validate_date_range(start_date, end_date)
+        
+        # Validate limit
+        validate_limit(limit)
+        
         result = get_skus_by_city(city, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_city_skus', {'city': city, 'start_date': start_date, 'end_date': end_date})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Error in city-skus endpoint: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_city_skus', {'city': city, 'start_date': start_date, 'end_date': end_date})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch city SKUs. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/movers-decliners")
@@ -287,10 +397,24 @@ async def get_movers_decliners_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        
+        # Validate inputs
+        validate_date_range(start_date, end_date)
+        validate_limit(limit)
+        
         result = get_movers_decliners(start_date, end_date, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_movers_decliners', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_movers_decliners', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch movers/decliners. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/top-products-performance")
@@ -321,10 +445,28 @@ async def get_top_products_performance_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        view_type = sanitize_string(view_type, max_length=20) or 'monthly'
+        
+        # Validate inputs
+        validate_date_range(start_date, end_date)
+        validate_limit(limit)
+        
+        if view_type not in ['monthly', 'quarterly']:
+            raise ValueError("view_type must be 'monthly' or 'quarterly'")
+        
         result = get_top_products_performance(start_date, end_date, view_type, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_top_products_performance', {'start_date': start_date, 'end_date': end_date, 'view_type': view_type, 'limit': limit})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_top_products_performance', {'start_date': start_date, 'end_date': end_date, 'view_type': view_type, 'limit': limit})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch top products performance. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 # ============================================================================
@@ -357,10 +499,24 @@ async def get_refunds_data_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        
+        # Validate inputs
+        validate_date_range(start_date, end_date)
+        validate_limit(limit)
+        
         result = get_refunds_data(start_date, end_date, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_refunds_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_refunds_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch refunds data. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/quality-issues/cancellations")
@@ -388,10 +544,24 @@ async def get_cancellations_data_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        
+        # Validate inputs
+        validate_date_range(start_date, end_date)
+        validate_limit(limit)
+        
         result = get_cancellations_data(start_date, end_date, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_cancellations_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_cancellations_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch cancellations data. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 
 @router.get("/quality-issues/replacements")
@@ -418,9 +588,23 @@ async def get_free_replacements_data_endpoint(
         }
     """
     try:
+        # Sanitize inputs
+        start_date = sanitize_date_string(start_date)
+        end_date = sanitize_date_string(end_date)
+        
+        # Validate inputs
+        validate_date_range(start_date, end_date)
+        validate_limit(limit)
+        
         result = get_free_replacements_data(start_date, end_date, limit)
         return result
+    except ValueError as e:
+        log_error(e, 'get_free_replacements_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=400, user_message=str(e))
+        raise HTTPException(status_code=400, detail=error_response)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        log_error(e, 'get_free_replacements_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        error_response = format_error_response(e, status_code=500, user_message="Failed to fetch replacements data. Please try again later.")
+        raise HTTPException(status_code=500, detail=error_response)
 
 

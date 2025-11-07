@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import logging
 
 from core.database import execute_query, table_exists
+from utils.error_handler import handle_service_error, log_error
+from utils.logger import app_logger, log_function_entry, log_function_exit, log_error_with_context
 
 logger = logging.getLogger(__name__)
 
@@ -257,8 +259,11 @@ def get_filtered_data(
         df = execute_query(sql)
         return df if not df.empty else None
         
+    except ValueError as e:
+        log_error(e, 'get_filtered_data', {'start_date': start_date, 'end_date': end_date, 'transaction_type': transaction_type})
+        return None
     except Exception as e:
-        logger.error(f"Error getting filtered data: {e}")
+        log_error(e, 'get_filtered_data', {'start_date': start_date, 'end_date': end_date, 'transaction_type': transaction_type})
         return None
 
 
@@ -405,7 +410,20 @@ def calculate_metrics(
         - revenue: Alias for gross_revenue (backward compatibility)
         - refunds: Alias for refund_amount (backward compatibility)
     """
+    log_function_entry(
+        app_logger,
+        'calculate_metrics',
+        {
+            'start_date': start_date,
+            'end_date': end_date,
+            'transaction_type': transaction_type,
+            'source_file': source_file
+        }
+    )
+    
     if not table_exists('sales'):
+        app_logger.warning("Sales table does not exist")
+        log_function_exit(app_logger, 'calculate_metrics', success=True)
         return {
             'gross_revenue': 0.0,
             'revenue': 0.0,  # Backward compatibility
@@ -717,13 +735,44 @@ def calculate_metrics(
             if key in results:
                 results[key] = round(results[key], 2)
         
+        app_logger.info(f"Calculated metrics for period: {start_date} to {end_date}")
+        app_logger.debug(f"Gross revenue: {results.get('gross_revenue', 0)}")
+        app_logger.debug(f"Net revenue: {results.get('net_revenue', 0)}")
+        app_logger.debug(f"Orders: {results.get('orders', 0)}")
+        
+        log_function_exit(app_logger, 'calculate_metrics', success=True)
         return results
     
+    except ValueError as e:
+        log_error_with_context(
+            app_logger,
+            e,
+            'calculate_metrics',
+            {
+                'start_date': start_date,
+                'end_date': end_date,
+                'transaction_type': transaction_type,
+                'source_file': source_file
+            }
+        )
+        log_function_exit(app_logger, 'calculate_metrics', success=False)
+        log_error(e, 'calculate_metrics', {'start_date': start_date, 'end_date': end_date})
+        return handle_service_error(e, 'calculate_metrics', {'start_date': start_date, 'end_date': end_date})
     except Exception as e:
-        logger.error(f"Error calculating metrics: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise
+        log_error_with_context(
+            app_logger,
+            e,
+            'calculate_metrics',
+            {
+                'start_date': start_date,
+                'end_date': end_date,
+                'transaction_type': transaction_type,
+                'source_file': source_file
+            }
+        )
+        log_function_exit(app_logger, 'calculate_metrics', success=False)
+        log_error(e, 'calculate_metrics', {'start_date': start_date, 'end_date': end_date})
+        return handle_service_error(e, 'calculate_metrics', {'start_date': start_date, 'end_date': end_date})
 
 
 def get_daily_trends(
@@ -917,15 +966,27 @@ def get_daily_trends(
             'count': len(data),
         }
     
-    except Exception as e:
-        logger.error(f"Error getting daily trends: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_daily_trends', {'start_date': start_date, 'end_date': end_date})
         return {
             'data': [],
             'revenue_trend': [],
             'refund_trend': [],
             'count': 0,
+            'error': True,
+            'message': f'Invalid date range: {str(e)}',
+            'status': 400
+        }
+    except Exception as e:
+        log_error(e, 'get_daily_trends', {'start_date': start_date, 'end_date': end_date})
+        return {
+            'data': [],
+            'revenue_trend': [],
+            'refund_trend': [],
+            'count': 0,
+            'error': True,
+            'message': 'Failed to fetch daily trends. Please try again later.',
+            'status': 500
         }
 
 
@@ -945,70 +1006,78 @@ def get_revenue_trend(
     Returns:
         DataFrame with columns: date, revenue
     """
-    # Determine date truncation based on grouping
-    date_trunc_map = {
-        'day': 'day',
-        'week': 'week',
-        'month': 'month',
-    }
+    try:
+        # Determine date truncation based on grouping
+        date_trunc_map = {
+            'day': 'day',
+            'week': 'week',
+            'month': 'month',
+        }
+        
+        trunc_period = date_trunc_map.get(group_by, 'day')
+        
+        # Try to find date and revenue columns
+        column_info = execute_query("DESCRIBE sales")
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        revenue_columns = ['revenue_calc', 'revenue_in_inr', 'Revenue Amount']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        revenue_col = None
+        for col in revenue_columns:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        if not date_col or not revenue_col:
+            return pd.DataFrame()
+        
+        # Build query with transaction type filter for shipments
+        if txn_col:
+            sql = f"""
+            SELECT 
+                DATE_TRUNC('{trunc_period}', "{date_col}") as date,
+                SUM({revenue_col}) as revenue
+            FROM sales
+            WHERE "{txn_col}" = 'Shipment'
+              AND "{date_col}" >= '{start_date}'
+              AND "{date_col}" <= '{end_date}'
+            GROUP BY DATE_TRUNC('{trunc_period}', "{date_col}")
+            ORDER BY date
+            """
+        else:
+            # No transaction type - use positive amounts
+            sql = f"""
+            SELECT 
+                DATE_TRUNC('{trunc_period}', "{date_col}") as date,
+                SUM({revenue_col}) as revenue
+            FROM sales
+            WHERE {revenue_col} > 0
+              AND "{date_col}" >= '{start_date}'
+              AND "{date_col}" <= '{end_date}'
+            GROUP BY DATE_TRUNC('{trunc_period}', "{date_col}")
+            ORDER BY date
+            """
+        
+        return execute_query(sql)
     
-    trunc_period = date_trunc_map.get(group_by, 'day')
-    
-    # Try to find date and revenue columns
-    column_info = execute_query("DESCRIBE sales")
-    date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
-    revenue_columns = ['revenue_calc', 'revenue_in_inr', 'Revenue Amount']
-    txn_columns = ['Transaction Type', 'transaction_type']
-    
-    date_col = None
-    for col in date_columns:
-        if col in column_info['column_name'].values:
-            date_col = col
-            break
-    
-    revenue_col = None
-    for col in revenue_columns:
-        if col in column_info['column_name'].values:
-            revenue_col = col
-            break
-    
-    txn_col = None
-    for col in txn_columns:
-        if col in column_info['column_name'].values:
-            txn_col = col
-            break
-    
-    if not date_col or not revenue_col:
+    except ValueError as e:
+        log_error(e, 'get_revenue_trend', {'start_date': start_date, 'end_date': end_date, 'group_by': group_by})
         return pd.DataFrame()
-    
-    # Build query with transaction type filter for shipments
-    if txn_col:
-        sql = f"""
-        SELECT 
-            DATE_TRUNC('{trunc_period}', "{date_col}") as date,
-            SUM({revenue_col}) as revenue
-        FROM sales
-        WHERE "{txn_col}" = 'Shipment'
-          AND "{date_col}" >= '{start_date}'
-          AND "{date_col}" <= '{end_date}'
-        GROUP BY DATE_TRUNC('{trunc_period}', "{date_col}")
-        ORDER BY date
-        """
-    else:
-        # No transaction type - use positive amounts
-        sql = f"""
-        SELECT 
-            DATE_TRUNC('{trunc_period}', "{date_col}") as date,
-            SUM({revenue_col}) as revenue
-        FROM sales
-        WHERE {revenue_col} > 0
-          AND "{date_col}" >= '{start_date}'
-          AND "{date_col}" <= '{end_date}'
-        GROUP BY DATE_TRUNC('{trunc_period}', "{date_col}")
-        ORDER BY date
-        """
-    
-    return execute_query(sql)
+    except Exception as e:
+        log_error(e, 'get_revenue_trend', {'start_date': start_date, 'end_date': end_date, 'group_by': group_by})
+        return pd.DataFrame()
 
 
 def get_top_products(
@@ -1333,10 +1402,11 @@ def get_top_products(
         
         return result_df
     
+    except ValueError as e:
+        log_error(e, 'get_top_products', {'limit': limit, 'start_date': start_date, 'end_date': end_date, 'metric': metric})
+        return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
     except Exception as e:
-        logger.error(f"Error getting top products: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        log_error(e, 'get_top_products', {'limit': limit, 'start_date': start_date, 'end_date': end_date, 'metric': metric})
         return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
 
 
@@ -1692,14 +1762,25 @@ def get_revenue_by_city(
             "total_revenue": total_revenue
         }
     
-    except Exception as e:
-        logger.error(f"Error getting revenue by city: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_revenue_by_city', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
         return {
             "data": [],
             "count": 0,
-            "total_revenue": 0.0
+            "total_revenue": 0.0,
+            "error": True,
+            "message": f"Invalid input: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_revenue_by_city', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {
+            "data": [],
+            "count": 0,
+            "total_revenue": 0.0,
+            "error": True,
+            "message": "Failed to fetch revenue by city. Please try again later.",
+            "status": 500
         }
 
 
@@ -1967,14 +2048,25 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
             "count": len(skus_list)
         }
     
-    except Exception as e:
-        logger.error(f"Error getting SKUs by city: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_skus_by_city', {'city': city, 'limit': limit})
         return {
             "city": city,
             "data": [],
-            "count": 0
+            "count": 0,
+            "error": True,
+            "message": f"Invalid input: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_skus_by_city', {'city': city, 'limit': limit})
+        return {
+            "city": city,
+            "data": [],
+            "count": 0,
+            "error": True,
+            "message": "Failed to fetch SKUs by city. Please try again later.",
+            "status": 500
         }
 
 
@@ -2159,52 +2251,52 @@ def get_movers_decliners(
         def build_date_filter(period_start, period_end):
             start_str = period_start.strftime('%Y-%m-%d')
             end_str = period_end.strftime('%Y-%m-%d')
-            if needs_cast:
+        if needs_cast:
                 return f'CAST("{date_col}" AS DATE) >= \'{start_str}\' AND CAST("{date_col}" AS DATE) <= \'{end_str}\''
-            else:
+        else:
                 return f'"{date_col}" >= \'{start_str}\' AND "{date_col}" <= \'{end_str}\''
         
         # Helper function to build revenue query for a period
         def build_revenue_query(period_start, period_end):
             date_filter = build_date_filter(period_start, period_end)
-            if txn_col:
-                if revenue_col == 'revenue_calc':
+        if txn_col:
+            if revenue_col == 'revenue_calc':
                     return f"""
                 SELECT 
                     "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
                 FROM sales
-                WHERE {date_filter}
-                GROUP BY "{sku_col}"
-                """
-                else:
-                    return f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
-                FROM sales
-                WHERE {date_filter}
+                    WHERE {date_filter}
                 GROUP BY "{sku_col}"
                 """
             else:
-                if revenue_col == 'revenue_calc':
                     return f"""
                 SELECT 
                     "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
                 FROM sales
-                WHERE {revenue_col} > 0 AND {date_filter}
+                    WHERE {date_filter}
                 GROUP BY "{sku_col}"
                 """
-                else:
+        else:
+            if revenue_col == 'revenue_calc':
                     return f"""
                 SELECT 
                     "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
                 FROM sales
-                WHERE {revenue_col} > 0 AND {date_filter}
+                    WHERE {revenue_col} > 0 AND {date_filter}
                 GROUP BY "{sku_col}"
                 """
+            else:
+                    return f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                FROM sales
+                    WHERE {revenue_col} > 0 AND {date_filter}
+                GROUP BY "{sku_col}"
+                    """
         
         # Fetch revenue for each period
         period_revenues = {}
@@ -2324,15 +2416,27 @@ def get_movers_decliners(
             "granularity": granularity
         }
     
-    except Exception as e:
-        logger.error(f"Error getting movers and decliners: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_movers_decliners', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
         return {
             "movers": [],
             "decliners": [],
-            "label": "",
-            "granularity": ""
+            "label": "Error",
+            "granularity": "day",
+            "error": True,
+            "message": f"Invalid date range: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_movers_decliners', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {
+            "movers": [],
+            "decliners": [],
+            "label": "Error",
+            "granularity": "day",
+            "error": True,
+            "message": "Failed to fetch movers and decliners. Please try again later.",
+            "status": 500
         }
 
 
@@ -2508,6 +2612,9 @@ def get_top_products_performance(
         period_data = {}
         all_skus = set()
         
+        logger.info(f"Fetching volume data for {len(periods)} periods")
+        logger.debug(f"Using columns - SKU: {sku_col}, Date: {date_col}, Transaction: {txn_col}, Quantity: {quantity_col}")
+        
         for i, period in enumerate(periods):
             date_filter = build_date_filter(period['start'], period['end'])
             
@@ -2557,6 +2664,11 @@ def get_top_products_performance(
                 period_df['sku'] = period_df['sku'].astype(str).str.strip()
                 period_data[i] = period_df.set_index('sku')['volume'].to_dict()
                 all_skus.update(period_df['sku'].tolist())
+                logger.debug(f"Period {i+1} ({period_labels[i]}): Found {len(period_df)} SKUs with data")
+            else:
+                logger.debug(f"Period {i+1} ({period_labels[i]}): No data found")
+        
+        logger.info(f"Total unique SKUs across all periods: {len(all_skus)}")
         
         # Calculate total volume for each SKU across all periods
         sku_totals = {}
@@ -2564,6 +2676,8 @@ def get_top_products_performance(
             total = sum(period_data[i].get(sku, 0) for i in range(len(periods)))
             if total > 0:
                 sku_totals[sku] = total
+        
+        logger.info(f"SKUs with total volume > 0: {len(sku_totals)}")
         
         # Get top N products by total volume
         top_skus = sorted(sku_totals.items(), key=lambda x: x[1], reverse=True)[:limit]
@@ -2604,14 +2718,25 @@ def get_top_products_performance(
             "view_type": view_type
         }
     
-    except Exception as e:
-        logger.error(f"Error getting top products performance: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+    except ValueError as e:
+        log_error(e, 'get_top_products_performance', {'start_date': start_date, 'end_date': end_date, 'view_type': view_type})
         return {
             "products": [],
             "period_labels": [],
-            "view_type": view_type
+            "view_type": view_type,
+            "error": True,
+            "message": f"Invalid input: {str(e)}",
+            "status": 400
+        }
+    except Exception as e:
+        log_error(e, 'get_top_products_performance', {'start_date': start_date, 'end_date': end_date, 'view_type': view_type})
+        return {
+            "products": [],
+            "period_labels": [],
+            "view_type": view_type,
+            "error": True,
+            "message": "Failed to fetch top products performance. Please try again later.",
+            "status": 500
         }
 
 
@@ -2769,11 +2894,12 @@ def get_refunds_data(
         
         return {"data": data}
     
+    except ValueError as e:
+        log_error(e, 'get_refunds_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {"data": [], "error": True, "message": f"Invalid input: {str(e)}", "status": 400}
     except Exception as e:
-        logger.error(f"Error getting refunds data: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {"data": []}
+        log_error(e, 'get_refunds_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {"data": [], "error": True, "message": "Failed to fetch refunds data. Please try again later.", "status": 500}
 
 
 def get_cancellations_data(
@@ -2919,11 +3045,12 @@ def get_cancellations_data(
         
         return {"data": data}
     
+    except ValueError as e:
+        log_error(e, 'get_cancellations_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {"data": [], "error": True, "message": f"Invalid input: {str(e)}", "status": 400}
     except Exception as e:
-        logger.error(f"Error getting cancellations data: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {"data": []}
+        log_error(e, 'get_cancellations_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {"data": [], "error": True, "message": "Failed to fetch cancellations data. Please try again later.", "status": 500}
 
 
 def get_free_replacements_data(
@@ -3097,11 +3224,12 @@ def get_free_replacements_data(
         
         return {"data": data}
     
+    except ValueError as e:
+        log_error(e, 'get_free_replacements_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {"data": [], "error": True, "message": f"Invalid input: {str(e)}", "status": 400}
     except Exception as e:
-        logger.error(f"Error getting free replacements data: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {"data": []}
+        log_error(e, 'get_free_replacements_data', {'start_date': start_date, 'end_date': end_date, 'limit': limit})
+        return {"data": [], "error": True, "message": "Failed to fetch free replacements data. Please try again later.", "status": 500}
 
 
 def get_skus_by_region(
@@ -3277,8 +3405,9 @@ def get_skus_by_region(
         
         return df
     
+    except ValueError as e:
+        log_error(e, 'get_skus_by_region', {'region': region, 'limit': limit})
+        return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
     except Exception as e:
-        logger.error(f"Error getting SKUs by region: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        log_error(e, 'get_skus_by_region', {'region': region, 'limit': limit})
         return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
