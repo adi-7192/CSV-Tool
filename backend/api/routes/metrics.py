@@ -296,7 +296,7 @@ async def get_top_products_performance_endpoint(
     start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
     view_type: str = Query('monthly', description="View type: 'monthly' or 'quarterly'"),
-    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+    limit: int = Query(10, ge=1, le=100, description="Number of products to return"),
 ):
     """
     Get top products performance tracker with period-by-period breakdown.
@@ -333,7 +333,7 @@ async def get_top_products_performance_endpoint(
 async def get_refunds_data_endpoint(
     start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
-    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+    limit: int = Query(10, ge=1, le=100, description="Number of products to return"),
 ):
     """
     Get refunds data for Product Quality Issues dashboard.
@@ -365,7 +365,7 @@ async def get_refunds_data_endpoint(
 async def get_cancellations_data_endpoint(
     start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
-    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+    limit: int = Query(10, ge=1, le=100, description="Number of products to return"),
 ):
     """
     Get cancellations data for Product Quality Issues dashboard.
@@ -396,7 +396,7 @@ async def get_cancellations_data_endpoint(
 async def get_free_replacements_data_endpoint(
     start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
-    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+    limit: int = Query(10, ge=1, le=100, description="Number of products to return"),
 ):
     """
     Get free replacements data for Product Quality Issues dashboard.

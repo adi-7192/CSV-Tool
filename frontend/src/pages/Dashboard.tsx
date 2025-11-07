@@ -1,5 +1,5 @@
 import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
-import { Row, Col, Button, Alert, Skeleton, Card, Table, Modal } from 'antd';
+import { Row, Col, Button, Alert, Skeleton, Card, Table, Modal, Select } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import MetricCard from '@/components/MetricCard';
@@ -129,6 +129,20 @@ const Dashboard: React.FC = () => {
   const [cancellationsData, setCancellationsData] = useState<CancellationData[]>([]);
   const [replacementsData, setReplacementsData] = useState<ReplacementData[]>([]);
   const [qualityIssuesLoading, setQualityIssuesLoading] = useState(false);
+  
+  // Pagination state for each tab (with localStorage persistence)
+  const [refundsLimit, setRefundsLimit] = useState<number>(() => {
+    const saved = localStorage.getItem('qualityIssues_refundsLimit');
+    return saved ? parseInt(saved, 10) : 10;
+  });
+  const [cancellationsLimit, setCancellationsLimit] = useState<number>(() => {
+    const saved = localStorage.getItem('qualityIssues_cancellationsLimit');
+    return saved ? parseInt(saved, 10) : 10;
+  });
+  const [replacementsLimit, setReplacementsLimit] = useState<number>(() => {
+    const saved = localStorage.getItem('qualityIssues_replacementsLimit');
+    return saved ? parseInt(saved, 10) : 10;
+  });
 
   // Fetch top products performance when date range or view type changes
   useEffect(() => {
@@ -151,7 +165,7 @@ const Dashboard: React.FC = () => {
     fetchTopProductsPerformance();
   }, [dateRange.start, dateRange.end, performanceViewType]);
 
-  // Fetch quality issues data when tab or date range changes
+  // Fetch quality issues data when tab, date range, or limit changes
   // Automatically refreshes when user changes date range in dashboard top bar
   useEffect(() => {
     // Ensure date range is valid before fetching
@@ -163,15 +177,15 @@ const Dashboard: React.FC = () => {
     const fetchQualityIssuesData = async () => {
       setQualityIssuesLoading(true);
       try {
-        // Fetch data for the currently active tab using dashboard date range
+        // Fetch data for the currently active tab using dashboard date range and selected limit
         if (qualityIssuesTab === 'refunds') {
-          const data = await qualityIssuesService.getRefundsData(dateRange.start, dateRange.end, 10);
+          const data = await qualityIssuesService.getRefundsData(dateRange.start, dateRange.end, refundsLimit);
           setRefundsData(data?.data || []);
         } else if (qualityIssuesTab === 'cancellations') {
-          const data = await qualityIssuesService.getCancellationsData(dateRange.start, dateRange.end, 10);
+          const data = await qualityIssuesService.getCancellationsData(dateRange.start, dateRange.end, cancellationsLimit);
           setCancellationsData(data?.data || []);
         } else if (qualityIssuesTab === 'replacements') {
-          const data = await qualityIssuesService.getReplacementsData(dateRange.start, dateRange.end, 10);
+          const data = await qualityIssuesService.getReplacementsData(dateRange.start, dateRange.end, replacementsLimit);
           setReplacementsData(data?.data || []);
         }
       } catch (error) {
@@ -190,7 +204,20 @@ const Dashboard: React.FC = () => {
     };
     
     fetchQualityIssuesData();
-  }, [dateRange.start, dateRange.end, qualityIssuesTab]);
+  }, [dateRange.start, dateRange.end, qualityIssuesTab, refundsLimit, cancellationsLimit, replacementsLimit]);
+  
+  // Save limit to localStorage when it changes
+  useEffect(() => {
+    localStorage.setItem('qualityIssues_refundsLimit', refundsLimit.toString());
+  }, [refundsLimit]);
+  
+  useEffect(() => {
+    localStorage.setItem('qualityIssues_cancellationsLimit', cancellationsLimit.toString());
+  }, [cancellationsLimit]);
+  
+  useEffect(() => {
+    localStorage.setItem('qualityIssues_replacementsLimit', replacementsLimit.toString());
+  }, [replacementsLimit]);
 
   // Fetch all data when date range changes
   useEffect(() => {
@@ -751,11 +778,14 @@ const Dashboard: React.FC = () => {
                 ) : moversDecliners ? (
                   <Row gutter={[16, 16]}>
                     {/* Product Quality Issues Column */}
-                    <Col xs={24} lg={12}>
+                    <Col xs={24} lg={12} style={{ minHeight: '600px' }}>
                       <Card
                         style={{
                           border: '1px solid #FEE2E2',
                           backgroundColor: '#FEF2F2',
+                          height: '100%',
+                          display: 'flex',
+                          flexDirection: 'column',
                         }}
                       >
                         <div
@@ -807,11 +837,52 @@ const Dashboard: React.FC = () => {
                             </Button>
                           </div>
                         </div>
-                        {qualityIssuesLoading ? (
-                          <Skeleton active paragraph={{ rows: 6 }} />
-                        ) : qualityIssuesTab === 'refunds' ? (
-                          refundsData.length > 0 ? (
-                            <Table
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: '12px',
+                          }}
+                        >
+                          <span style={{ fontSize: '14px', color: '#64748B' }}>
+                            Show{' '}
+                            <Select
+                              value={qualityIssuesTab === 'refunds' ? refundsLimit : qualityIssuesTab === 'cancellations' ? cancellationsLimit : replacementsLimit}
+                              onChange={(value) => {
+                                if (qualityIssuesTab === 'refunds') {
+                                  setRefundsLimit(value);
+                                } else if (qualityIssuesTab === 'cancellations') {
+                                  setCancellationsLimit(value);
+                                } else if (qualityIssuesTab === 'replacements') {
+                                  setReplacementsLimit(value);
+                                }
+                              }}
+                              size="small"
+                              style={{ width: 80, marginLeft: '4px', marginRight: '4px' }}
+                              options={[
+                                { value: 10, label: '10' },
+                                { value: 20, label: '20' },
+                                { value: 30, label: '30' },
+                                { value: 50, label: '50' },
+                                { value: 100, label: 'All' },
+                              ]}
+                            />{' '}
+                            products
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            height: '550px',
+                            overflowY: 'auto',
+                            flex: 1,
+                          }}
+                        >
+                          {qualityIssuesLoading ? (
+                            <Skeleton active paragraph={{ rows: 6 }} />
+                          ) : qualityIssuesTab === 'refunds' ? (
+                            refundsData.length > 0 ? (
+                              <Table
                               dataSource={refundsData.map((item, idx) => ({ ...item, key: idx }))}
                               columns={[
                                 {
@@ -861,18 +932,18 @@ const Dashboard: React.FC = () => {
                                   render: (revenue: number) => formatCurrency(revenue),
                                 },
                               ]}
-                              pagination={false}
-                              size="small"
-                              rowKey="sku"
-                            />
-                          ) : (
-                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
-                              No refunds data available
-                            </div>
-                          )
-                        ) : qualityIssuesTab === 'cancellations' ? (
-                          cancellationsData.length > 0 ? (
-                            <Table
+                                pagination={false}
+                                size="small"
+                                rowKey="sku"
+                              />
+                            ) : (
+                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                                No refunds data available
+                              </div>
+                            )
+                          ) : qualityIssuesTab === 'cancellations' ? (
+                            cancellationsData.length > 0 ? (
+                              <Table
                               dataSource={cancellationsData.map((item, idx) => ({ ...item, key: idx }))}
                               columns={[
                                 {
@@ -915,18 +986,18 @@ const Dashboard: React.FC = () => {
                                   },
                                 },
                               ]}
-                              pagination={false}
-                              size="small"
-                              rowKey="sku"
-                            />
-                          ) : (
-                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
-                              No cancellations data available
-                            </div>
-                          )
-                        ) : qualityIssuesTab === 'replacements' ? (
-                          replacementsData.length > 0 ? (
-                            <Table
+                                pagination={false}
+                                size="small"
+                                rowKey="sku"
+                              />
+                            ) : (
+                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                                No cancellations data available
+                              </div>
+                            )
+                          ) : qualityIssuesTab === 'replacements' ? (
+                            replacementsData.length > 0 ? (
+                              <Table
                               dataSource={replacementsData.map((item, idx) => ({ ...item, key: idx }))}
                               columns={[
                                 {
@@ -984,25 +1055,29 @@ const Dashboard: React.FC = () => {
                                   },
                                 },
                               ]}
-                              pagination={false}
-                              size="small"
-                              rowKey="sku"
-                            />
-                          ) : (
-                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
-                              No replacements data available
-                            </div>
-                          )
-                        ) : null}
+                                pagination={false}
+                                size="small"
+                                rowKey="sku"
+                              />
+                            ) : (
+                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                                No replacements data available
+                              </div>
+                            )
+                          ) : null}
+                        </div>
                       </Card>
                     </Col>
 
                     {/* Top Products Performance Tracker Column */}
-                    <Col xs={24} lg={12}>
+                    <Col xs={24} lg={12} style={{ minHeight: '600px' }}>
                       <Card
                         style={{
                           border: '1px solid #D1FAE5',
                           backgroundColor: '#F0FDF4',
+                          height: '100%',
+                          display: 'flex',
+                          flexDirection: 'column',
                         }}
                       >
                         <div
@@ -1046,10 +1121,17 @@ const Dashboard: React.FC = () => {
                             </Button>
                           </div>
                         </div>
-                        {topProductsLoading ? (
-                          <Skeleton active paragraph={{ rows: 6 }} />
-                        ) : topProductsPerformance && topProductsPerformance.products.length > 0 ? (
-                          <Table
+                        <div
+                          style={{
+                            height: '550px',
+                            overflowY: 'auto',
+                            flex: 1,
+                          }}
+                        >
+                          {topProductsLoading ? (
+                            <Skeleton active paragraph={{ rows: 6 }} />
+                          ) : topProductsPerformance && topProductsPerformance.products.length > 0 ? (
+                            <Table
                             dataSource={topProductsPerformance.products.map((product) => ({
                               ...product,
                               key: product.sku,
@@ -1090,15 +1172,16 @@ const Dashboard: React.FC = () => {
                                 },
                               })),
                             ]}
-                            pagination={false}
-                            size="small"
-                            scroll={{ x: 'max-content' }}
-                          />
-                        ) : (
-                          <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
-                            No performance data available
-                          </div>
-                        )}
+                              pagination={false}
+                              size="small"
+                              scroll={{ x: 'max-content' }}
+                            />
+                          ) : (
+                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              No performance data available
+                            </div>
+                          )}
+                        </div>
                       </Card>
                     </Col>
                   </Row>
