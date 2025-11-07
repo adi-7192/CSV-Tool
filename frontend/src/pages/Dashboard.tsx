@@ -1,13 +1,23 @@
 import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
 import { Row, Col, Button, Alert, Skeleton, Card, Table, Modal } from 'antd';
-import { ReloadOutlined, ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import MetricCard from '@/components/MetricCard';
 import TrendChart from '@/components/TrendChart';
 import PerformanceTable, { PerformanceTableRow } from '@/components/PerformanceTable';
 import InsightBanner from '@/components/InsightBanner';
 import { useDataStore } from '@/store/dataStore';
-import { regionService, RegionSKU } from '@/services/api';
+import { 
+  regionService, 
+  RegionSKU, 
+  topProductsPerformanceService, 
+  TopProductsPerformanceResponse, 
+  TopProductPerformance,
+  qualityIssuesService,
+  RefundData,
+  CancellationData,
+  ReplacementData,
+} from '@/services/api';
 import { formatCurrency } from '@/utils/formatters';
 import './Dashboard.css';
 
@@ -109,6 +119,78 @@ const Dashboard: React.FC = () => {
   const [selectedRegionName, setSelectedRegionName] = useState<string>('');
   const [regionSKUs, setRegionSKUs] = useState<RegionSKU[]>([]);
   const [regionSKUsLoading, setRegionSKUsLoading] = useState(false);
+  const [topProductsPerformance, setTopProductsPerformance] = useState<TopProductsPerformanceResponse | null>(null);
+  const [topProductsLoading, setTopProductsLoading] = useState(false);
+  const [performanceViewType, setPerformanceViewType] = useState<'monthly' | 'quarterly'>('monthly');
+  
+  // Product Quality Issues state
+  const [qualityIssuesTab, setQualityIssuesTab] = useState<'refunds' | 'cancellations' | 'replacements'>('refunds');
+  const [refundsData, setRefundsData] = useState<RefundData[]>([]);
+  const [cancellationsData, setCancellationsData] = useState<CancellationData[]>([]);
+  const [replacementsData, setReplacementsData] = useState<ReplacementData[]>([]);
+  const [qualityIssuesLoading, setQualityIssuesLoading] = useState(false);
+
+  // Fetch top products performance when date range or view type changes
+  useEffect(() => {
+    const fetchTopProductsPerformance = async () => {
+      setTopProductsLoading(true);
+      try {
+        const data = await topProductsPerformanceService.getTopProductsPerformance(
+          dateRange.start,
+          dateRange.end,
+          performanceViewType,
+          10
+        );
+        setTopProductsPerformance(data);
+      } catch (error) {
+        console.error('Error fetching top products performance:', error);
+      } finally {
+        setTopProductsLoading(false);
+      }
+    };
+    fetchTopProductsPerformance();
+  }, [dateRange.start, dateRange.end, performanceViewType]);
+
+  // Fetch quality issues data when tab or date range changes
+  // Automatically refreshes when user changes date range in dashboard top bar
+  useEffect(() => {
+    // Ensure date range is valid before fetching
+    if (!dateRange.start || !dateRange.end) {
+      console.warn('[Dashboard] Date range not set, skipping quality issues fetch');
+      return;
+    }
+
+    const fetchQualityIssuesData = async () => {
+      setQualityIssuesLoading(true);
+      try {
+        // Fetch data for the currently active tab using dashboard date range
+        if (qualityIssuesTab === 'refunds') {
+          const data = await qualityIssuesService.getRefundsData(dateRange.start, dateRange.end, 10);
+          setRefundsData(data?.data || []);
+        } else if (qualityIssuesTab === 'cancellations') {
+          const data = await qualityIssuesService.getCancellationsData(dateRange.start, dateRange.end, 10);
+          setCancellationsData(data?.data || []);
+        } else if (qualityIssuesTab === 'replacements') {
+          const data = await qualityIssuesService.getReplacementsData(dateRange.start, dateRange.end, 10);
+          setReplacementsData(data?.data || []);
+        }
+      } catch (error) {
+        console.error('Error fetching quality issues data:', error);
+        // Reset data on error
+        if (qualityIssuesTab === 'refunds') {
+          setRefundsData([]);
+        } else if (qualityIssuesTab === 'cancellations') {
+          setCancellationsData([]);
+        } else if (qualityIssuesTab === 'replacements') {
+          setReplacementsData([]);
+        }
+      } finally {
+        setQualityIssuesLoading(false);
+      }
+    };
+    
+    fetchQualityIssuesData();
+  }, [dateRange.start, dateRange.end, qualityIssuesTab]);
 
   // Fetch all data when date range changes
   useEffect(() => {
@@ -668,7 +750,7 @@ const Dashboard: React.FC = () => {
                   </Row>
                 ) : moversDecliners ? (
                   <Row gutter={[16, 16]}>
-                    {/* Decliners Column */}
+                    {/* Product Quality Issues Column */}
                     <Col xs={24} lg={12}>
                       <Card
                         style={{
@@ -679,60 +761,243 @@ const Dashboard: React.FC = () => {
                         <div
                           style={{
                             display: 'flex',
+                            justifyContent: 'space-between',
                             alignItems: 'center',
-                            gap: '8px',
                             marginBottom: '16px',
+                            flexWrap: 'wrap',
+                            gap: '12px',
                           }}
                         >
-                          <ArrowDownOutlined style={{ color: '#DC2626', fontSize: '20px' }} />
                           <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '600', color: '#DC2626' }}>
-                            Decliners
+                            Product Quality Issues
                           </h3>
-                        </div>
-                        {moversDecliners.decliners.length > 0 ? (
-                          <Table
-                            dataSource={moversDecliners.decliners}
-                            columns={[
-                              {
-                                title: 'Product',
-                                dataIndex: 'sku',
-                                key: 'sku',
-                                render: (sku: string) => (
-                                  <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
-                                ),
-                              },
-                              {
-                                title: 'Revenue',
-                                dataIndex: 'revenue',
-                                key: 'revenue',
-                                align: 'right',
-                                render: (revenue: number) => formatCurrency(revenue),
-                              },
-                              {
-                                title: 'WoW Change',
-                                dataIndex: 'wow_change',
-                                key: 'wow_change',
-                                align: 'right',
-                                render: (change: number) => (
-                                  <span style={{ color: '#DC2626', fontWeight: '600' }}>
-                                    {change.toFixed(1)}%
-                                  </span>
-                                ),
-                              },
-                            ]}
-                            pagination={false}
-                            size="small"
-                            rowKey="sku"
-                          />
-                        ) : (
-                          <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
-                            No decliners found
+                          <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                            <Button
+                              type={qualityIssuesTab === 'refunds' ? 'primary' : 'default'}
+                              size="small"
+                              onClick={() => setQualityIssuesTab('refunds')}
+                              style={{
+                                backgroundColor: qualityIssuesTab === 'refunds' ? '#DC2626' : undefined,
+                                borderColor: qualityIssuesTab === 'refunds' ? '#DC2626' : undefined,
+                              }}
+                            >
+                              📉 Refunds
+                            </Button>
+                            <Button
+                              type={qualityIssuesTab === 'cancellations' ? 'primary' : 'default'}
+                              size="small"
+                              onClick={() => setQualityIssuesTab('cancellations')}
+                              style={{
+                                backgroundColor: qualityIssuesTab === 'cancellations' ? '#DC2626' : undefined,
+                                borderColor: qualityIssuesTab === 'cancellations' ? '#DC2626' : undefined,
+                              }}
+                            >
+                              ⛔ Cancellations
+                            </Button>
+                            <Button
+                              type={qualityIssuesTab === 'replacements' ? 'primary' : 'default'}
+                              size="small"
+                              onClick={() => setQualityIssuesTab('replacements')}
+                              style={{
+                                backgroundColor: qualityIssuesTab === 'replacements' ? '#DC2626' : undefined,
+                                borderColor: qualityIssuesTab === 'replacements' ? '#DC2626' : undefined,
+                              }}
+                            >
+                              🔄 Replacements
+                            </Button>
                           </div>
-                        )}
+                        </div>
+                        {qualityIssuesLoading ? (
+                          <Skeleton active paragraph={{ rows: 6 }} />
+                        ) : qualityIssuesTab === 'refunds' ? (
+                          refundsData.length > 0 ? (
+                            <Table
+                              dataSource={refundsData.map((item, idx) => ({ ...item, key: idx }))}
+                              columns={[
+                                {
+                                  title: 'Product',
+                                  dataIndex: 'sku',
+                                  key: 'sku',
+                                  render: (sku: string) => (
+                                    <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
+                                  ),
+                                },
+                                {
+                                  title: 'Units Sold',
+                                  dataIndex: 'units_sold',
+                                  key: 'units_sold',
+                                  align: 'right',
+                                  render: (value: number) => value.toLocaleString(),
+                                },
+                                {
+                                  title: 'Refunds',
+                                  dataIndex: 'refunds',
+                                  key: 'refunds',
+                                  align: 'right',
+                                  render: (value: number) => value.toLocaleString(),
+                                },
+                                {
+                                  title: 'Refund %',
+                                  dataIndex: 'refund_percentage',
+                                  key: 'refund_percentage',
+                                  align: 'right',
+                                  render: (percentage: number) => {
+                                    let color = '#10B981'; // Green
+                                    if (percentage > 15) color = '#DC2626'; // Red
+                                    else if (percentage >= 10) color = '#F97316'; // Orange
+                                    else if (percentage >= 5) color = '#EAB308'; // Yellow
+                                    return (
+                                      <span style={{ color, fontWeight: '600' }}>
+                                        {percentage.toFixed(1)}%
+                                      </span>
+                                    );
+                                  },
+                                },
+                                {
+                                  title: 'Lost Revenue',
+                                  dataIndex: 'lost_revenue',
+                                  key: 'lost_revenue',
+                                  align: 'right',
+                                  render: (revenue: number) => formatCurrency(revenue),
+                                },
+                              ]}
+                              pagination={false}
+                              size="small"
+                              rowKey="sku"
+                            />
+                          ) : (
+                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              No refunds data available
+                            </div>
+                          )
+                        ) : qualityIssuesTab === 'cancellations' ? (
+                          cancellationsData.length > 0 ? (
+                            <Table
+                              dataSource={cancellationsData.map((item, idx) => ({ ...item, key: idx }))}
+                              columns={[
+                                {
+                                  title: 'Product',
+                                  dataIndex: 'sku',
+                                  key: 'sku',
+                                  render: (sku: string) => (
+                                    <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
+                                  ),
+                                },
+                                {
+                                  title: 'Units Ordered',
+                                  dataIndex: 'units_ordered',
+                                  key: 'units_ordered',
+                                  align: 'right',
+                                  render: (value: number) => value.toLocaleString(),
+                                },
+                                {
+                                  title: 'Cancelled',
+                                  dataIndex: 'cancelled',
+                                  key: 'cancelled',
+                                  align: 'right',
+                                  render: (value: number) => value.toLocaleString(),
+                                },
+                                {
+                                  title: 'Cancel %',
+                                  dataIndex: 'cancel_percentage',
+                                  key: 'cancel_percentage',
+                                  align: 'right',
+                                  render: (percentage: number) => {
+                                    let color = '#10B981'; // Green
+                                    if (percentage > 20) color = '#DC2626'; // Red
+                                    else if (percentage >= 10) color = '#F97316'; // Orange
+                                    else if (percentage >= 5) color = '#EAB308'; // Yellow
+                                    return (
+                                      <span style={{ color, fontWeight: '600' }}>
+                                        {percentage.toFixed(1)}%
+                                      </span>
+                                    );
+                                  },
+                                },
+                              ]}
+                              pagination={false}
+                              size="small"
+                              rowKey="sku"
+                            />
+                          ) : (
+                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              No cancellations data available
+                            </div>
+                          )
+                        ) : qualityIssuesTab === 'replacements' ? (
+                          replacementsData.length > 0 ? (
+                            <Table
+                              dataSource={replacementsData.map((item, idx) => ({ ...item, key: idx }))}
+                              columns={[
+                                {
+                                  title: 'Product',
+                                  dataIndex: 'sku',
+                                  key: 'sku',
+                                  render: (sku: string) => (
+                                    <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
+                                  ),
+                                },
+                                {
+                                  title: 'Replacements',
+                                  dataIndex: 'replacements',
+                                  key: 'replacements',
+                                  align: 'right',
+                                  render: (value: number) => value.toLocaleString(),
+                                },
+                                {
+                                  title: 'Loss per Unit',
+                                  dataIndex: 'loss_per_unit',
+                                  key: 'loss_per_unit',
+                                  align: 'right',
+                                  render: (_: any, record: ReplacementData) => {
+                                    const lossPerUnit = record.replacements > 0 
+                                      ? record.total_loss / record.replacements 
+                                      : 0;
+                                    if (!lossPerUnit || isNaN(lossPerUnit)) return '-';
+                                    return `₹${lossPerUnit.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                                  },
+                                },
+                                {
+                                  title: 'Total Loss',
+                                  dataIndex: 'total_loss',
+                                  key: 'total_loss',
+                                  align: 'right',
+                                  render: (loss: number) => {
+                                    // Color code by total loss: high (red), medium (orange), low (green)
+                                    // Using percentiles: top 33% = red, middle 33% = orange, bottom 33% = green
+                                    const sortedLosses = [...replacementsData].map(d => d.total_loss).sort((a, b) => b - a);
+                                    const maxLoss = sortedLosses[0] || 0;
+                                    const minLoss = sortedLosses[sortedLosses.length - 1] || 0;
+                                    const range = maxLoss - minLoss;
+                                    const thresholdHigh = maxLoss - (range * 0.33);
+                                    const thresholdLow = minLoss + (range * 0.33);
+                                    
+                                    let color = '#10B981'; // Green (low)
+                                    if (loss >= thresholdHigh) color = '#DC2626'; // Red (high)
+                                    else if (loss >= thresholdLow) color = '#F97316'; // Orange (medium)
+                                    
+                                    return (
+                                      <span style={{ color, fontWeight: '600' }}>
+                                        ₹{loss.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                      </span>
+                                    );
+                                  },
+                                },
+                              ]}
+                              pagination={false}
+                              size="small"
+                              rowKey="sku"
+                            />
+                          ) : (
+                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              No replacements data available
+                            </div>
+                          )
+                        ) : null}
                       </Card>
                     </Col>
 
-                    {/* Fast Movers Column */}
+                    {/* Top Products Performance Tracker Column */}
                     <Col xs={24} lg={12}>
                       <Card
                         style={{
@@ -744,53 +1009,94 @@ const Dashboard: React.FC = () => {
                           style={{
                             display: 'flex',
                             alignItems: 'center',
-                            gap: '8px',
+                            justifyContent: 'space-between',
                             marginBottom: '16px',
                           }}
                         >
-                          <ArrowUpOutlined style={{ color: '#10B981', fontSize: '20px' }} />
-                          <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '600', color: '#10B981' }}>
-                            Fast Movers
-                          </h3>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span style={{ fontSize: '20px' }}>🏆</span>
+                            <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '600', color: '#10B981' }}>
+                              Top Products Performance
+                            </h3>
+                          </div>
+                          <div style={{ display: 'flex', gap: '4px' }}>
+                            <Button
+                              size="small"
+                              type={performanceViewType === 'monthly' ? 'primary' : 'default'}
+                              onClick={() => setPerformanceViewType('monthly')}
+                              style={{
+                                fontSize: '12px',
+                                height: '28px',
+                                padding: '0 12px',
+                              }}
+                            >
+                              Monthly
+                            </Button>
+                            <Button
+                              size="small"
+                              type={performanceViewType === 'quarterly' ? 'primary' : 'default'}
+                              onClick={() => setPerformanceViewType('quarterly')}
+                              style={{
+                                fontSize: '12px',
+                                height: '28px',
+                                padding: '0 12px',
+                              }}
+                            >
+                              Quarterly
+                            </Button>
+                          </div>
                         </div>
-                        {moversDecliners.movers.length > 0 ? (
+                        {topProductsLoading ? (
+                          <Skeleton active paragraph={{ rows: 6 }} />
+                        ) : topProductsPerformance && topProductsPerformance.products.length > 0 ? (
                           <Table
-                            dataSource={moversDecliners.movers}
+                            dataSource={topProductsPerformance.products.map((product) => ({
+                              ...product,
+                              key: product.sku,
+                            }))}
                             columns={[
                               {
                                 title: 'Product',
                                 dataIndex: 'sku',
                                 key: 'sku',
+                                width: 120,
                                 render: (sku: string) => (
                                   <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
                                 ),
                               },
-                              {
-                                title: 'Revenue',
-                                dataIndex: 'revenue',
-                                key: 'revenue',
-                                align: 'right',
-                                render: (revenue: number) => formatCurrency(revenue),
-                              },
-                              {
-                                title: 'WoW Change',
-                                dataIndex: 'wow_change',
-                                key: 'wow_change',
-                                align: 'right',
-                                render: (change: number) => (
-                                  <span style={{ color: '#10B981', fontWeight: '600' }}>
-                                    +{change.toFixed(1)}%
-                                  </span>
-                                ),
-                              },
+                              ...topProductsPerformance.period_labels.map((label, idx) => ({
+                                title: label,
+                                key: `period_${idx}`,
+                                align: 'right' as const,
+                                render: (_: any, record: TopProductPerformance) => {
+                                  const volume = record.periods[idx];
+                                  const growth = record.growth_rates[idx];
+                                  return (
+                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                      <span style={{ fontWeight: '500', color: '#030712' }}>{volume}</span>
+                                      {growth !== null && growth !== undefined && (
+                                        <span
+                                          style={{
+                                            fontSize: '11px',
+                                            color: growth >= 0 ? '#10B981' : '#DC2626',
+                                            fontWeight: '500',
+                                          }}
+                                        >
+                                          {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
+                                        </span>
+                                      )}
+                                    </div>
+                                  );
+                                },
+                              })),
                             ]}
                             pagination={false}
                             size="small"
-                            rowKey="sku"
+                            scroll={{ x: 'max-content' }}
                           />
                         ) : (
                           <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
-                            No fast movers found
+                            No performance data available
                           </div>
                         )}
                       </Card>

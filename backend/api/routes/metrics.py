@@ -13,6 +13,10 @@ from services.metrics_service import (
     get_revenue_by_city,
     get_movers_decliners,
     get_skus_by_city,
+    get_top_products_performance,
+    get_refunds_data,
+    get_cancellations_data,
+    get_free_replacements_data,
 )
 
 router = APIRouter()
@@ -256,9 +260,13 @@ async def get_movers_decliners_endpoint(
     limit: int = Query(10, ge=1, le=50, description="Number of SKUs per category"),
 ):
     """
-    Get movers (fast growing) and decliners (declining) SKUs
+    Get movers (fast growing) and decliners (declining) SKUs using adaptive moving average comparison.
     
-    Compares current period vs previous period (same duration, 1 week before)
+    Automatically determines granularity based on date range:
+    - 7-13 days: Daily comparison (last day vs daily average)
+    - 14-89 days: Weekly comparison (last week vs weekly average)
+    - 90+ days: Monthly comparison (last month vs monthly average)
+    
     - Decliners: growth % <= -30%
     - Fast Movers: growth % >= +30%
     
@@ -271,11 +279,144 @@ async def get_movers_decliners_endpoint(
             "decliners": [
                 {"sku": "SKU-002", "revenue": 50000, "wow_change": -45.2},
                 ...
-            ]
+            ],
+            "label": "Last Week vs Weekly Avg",
+            "granularity": "weekly"
         }
     """
     try:
         result = get_movers_decliners(start_date, end_date, limit)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/top-products-performance")
+async def get_top_products_performance_endpoint(
+    start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    view_type: str = Query('monthly', description="View type: 'monthly' or 'quarterly'"),
+    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+):
+    """
+    Get top products performance tracker with period-by-period breakdown.
+    
+    Shows top products by total volume with monthly or quarterly performance tracking.
+    
+    Returns:
+        {
+            "products": [
+                {
+                    "sku": "GP47_NEW",
+                    "periods": [145, 150, 139],
+                    "growth_rates": [None, 3.4, -7.3],
+                    "total_volume": 434
+                },
+                ...
+            ],
+            "period_labels": ["Jul", "Aug", "Sep"],
+            "view_type": "monthly"
+        }
+    """
+    try:
+        result = get_top_products_performance(start_date, end_date, view_type, limit)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# PRODUCT QUALITY ISSUES ENDPOINTS
+# ============================================================================
+
+@router.get("/quality-issues/refunds")
+async def get_refunds_data_endpoint(
+    start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+):
+    """
+    Get refunds data for Product Quality Issues dashboard.
+    
+    Returns top products by refund percentage with lost revenue.
+    
+    Returns:
+        {
+            "data": [
+                {
+                    "sku": "SKU-001",
+                    "units_sold": 100,
+                    "refunds": 5,
+                    "refund_percentage": 5.0,
+                    "lost_revenue": 5000.0
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        result = get_refunds_data(start_date, end_date, limit)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/quality-issues/cancellations")
+async def get_cancellations_data_endpoint(
+    start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+):
+    """
+    Get cancellations data for Product Quality Issues dashboard.
+    
+    Returns top products by cancellation percentage.
+    
+    Returns:
+        {
+            "data": [
+                {
+                    "sku": "SKU-001",
+                    "units_ordered": 100,
+                    "cancelled": 10,
+                    "cancel_percentage": 10.0
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        result = get_cancellations_data(start_date, end_date, limit)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/quality-issues/replacements")
+async def get_free_replacements_data_endpoint(
+    start_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    limit: int = Query(10, ge=1, le=50, description="Number of products to return"),
+):
+    """
+    Get free replacements data for Product Quality Issues dashboard.
+    
+    Returns top products by total replacement loss.
+    
+    Returns:
+        {
+            "data": [
+                {
+                    "sku": "SKU-001",
+                    "replacements": 5,
+                    "total_loss": 10000.0
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        result = get_free_replacements_data(start_date, end_date, limit)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

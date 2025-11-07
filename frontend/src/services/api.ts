@@ -402,6 +402,8 @@ export interface MoverDeclinerItem {
 export interface MoversDeclinersResponse {
   movers: MoverDeclinerItem[];
   decliners: MoverDeclinerItem[];
+  label?: string; // Comparison label (e.g., "Last Week vs Weekly Avg")
+  granularity?: string; // Period granularity ("daily", "weekly", or "monthly")
 }
 
 export const moversDeclinersService = {
@@ -454,6 +456,187 @@ export const moversDeclinersService = {
       return response.data;
     } catch (error) {
       console.error('[API] ❌ Error fetching movers & decliners:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+};
+
+// ============================================================================
+// TOP PRODUCTS PERFORMANCE SERVICE
+// ============================================================================
+
+export interface TopProductPerformance {
+  sku: string;
+  periods: number[];
+  growth_rates: (number | null)[];
+  total_volume: number;
+}
+
+export interface TopProductsPerformanceResponse {
+  products: TopProductPerformance[];
+  period_labels: string[];
+  view_type: string;
+}
+
+export const topProductsPerformanceService = {
+  /**
+   * Get top products performance tracker
+   * @param startDate - Start date (YYYY-MM-DD)
+   * @param endDate - End date (YYYY-MM-DD)
+   * @param viewType - 'monthly' or 'quarterly' (default: 'monthly')
+   * @param limit - Number of products to return (default: 10)
+   * @returns Top products performance data
+   */
+  getTopProductsPerformance: async (
+    startDate: string,
+    endDate: string,
+    viewType: 'monthly' | 'quarterly' = 'monthly',
+    limit = 10
+  ): Promise<TopProductsPerformanceResponse | null> => {
+    try {
+      const url = '/api/metrics/top-products-performance';
+      const params = {
+        start_date: startDate,
+        end_date: endDate,
+        view_type: viewType,
+        limit,
+      };
+      console.log(`[API] Fetching top products performance: ${url}`, params);
+      const response = await apiClient.get<TopProductsPerformanceResponse>(url, { params });
+      console.log('[API] Top products performance response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('[API] Error fetching top products performance:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+};
+
+// ============================================================================
+// PRODUCT QUALITY ISSUES SERVICE
+// ============================================================================
+
+export interface RefundData {
+  sku: string;
+  units_sold: number;
+  refunds: number;
+  refund_percentage: number;
+  lost_revenue: number;
+}
+
+export interface CancellationData {
+  sku: string;
+  units_ordered: number;
+  cancelled: number;
+  cancel_percentage: number;
+}
+
+export interface ReplacementData {
+  sku: string;
+  replacements: number;
+  total_loss: number;
+}
+
+export interface QualityIssuesResponse<T> {
+  data: T[];
+}
+
+export const qualityIssuesService = {
+  /**
+   * Get refunds data for Product Quality Issues dashboard
+   * @param startDate - Start date (YYYY-MM-DD)
+   * @param endDate - End date (YYYY-MM-DD)
+   * @param limit - Number of products to return (default: 10)
+   * @returns Refunds data
+   */
+  getRefundsData: async (
+    startDate: string,
+    endDate: string,
+    limit = 10
+  ): Promise<QualityIssuesResponse<RefundData> | null> => {
+    try {
+      const url = '/api/metrics/quality-issues/refunds';
+      const params = {
+        start_date: startDate,
+        end_date: endDate,
+        limit,
+      };
+      console.log(`[API] Fetching refunds data: ${url}`, params);
+      const response = await apiClient.get<QualityIssuesResponse<RefundData>>(url, { params });
+      console.log('[API] Refunds data response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('[API] Error fetching refunds data:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+
+  /**
+   * Get cancellations data for Product Quality Issues dashboard
+   * @param startDate - Start date (YYYY-MM-DD)
+   * @param endDate - End date (YYYY-MM-DD)
+   * @param limit - Number of products to return (default: 10)
+   * @returns Cancellations data
+   */
+  getCancellationsData: async (
+    startDate: string,
+    endDate: string,
+    limit = 10
+  ): Promise<QualityIssuesResponse<CancellationData> | null> => {
+    try {
+      const url = '/api/metrics/quality-issues/cancellations';
+      const params = {
+        start_date: startDate,
+        end_date: endDate,
+        limit,
+      };
+      console.log(`[API] Fetching cancellations data: ${url}`, params);
+      const response = await apiClient.get<QualityIssuesResponse<CancellationData>>(url, { params });
+      console.log('[API] Cancellations data response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('[API] Error fetching cancellations data:', error);
+      if (error instanceof Error) {
+        console.error('[API] Error details:', error.message);
+      }
+      return null;
+    }
+  },
+
+  /**
+   * Get free replacements data for Product Quality Issues dashboard
+   * @param startDate - Start date (YYYY-MM-DD)
+   * @param endDate - End date (YYYY-MM-DD)
+   * @param limit - Number of products to return (default: 10)
+   * @returns Free replacements data
+   */
+  getReplacementsData: async (
+    startDate: string,
+    endDate: string,
+    limit = 10
+  ): Promise<QualityIssuesResponse<ReplacementData> | null> => {
+    try {
+      const url = '/api/metrics/quality-issues/replacements';
+      const params = {
+        start_date: startDate,
+        end_date: endDate,
+        limit,
+      };
+      console.log(`[API] Fetching replacements data: ${url}`, params);
+      const response = await apiClient.get<QualityIssuesResponse<ReplacementData>>(url, { params });
+      console.log('[API] Replacements data response:', response.data);
+      return response.data;
+    } catch (error) {
+      console.error('[API] Error fetching replacements data:', error);
       if (error instanceof Error) {
         console.error('[API] Error details:', error.message);
       }

@@ -13,6 +13,75 @@ from core.database import execute_query, table_exists
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# CITY NORMALIZATION - Shared function for consistent city name matching
+# ============================================================================
+
+def normalize_city_name(city_name: str) -> Optional[str]:
+    """
+    Normalize city name using mapping and title case.
+    
+    This function ensures consistent city name matching across:
+    - get_revenue_by_city() (chart data)
+    - get_skus_by_city() (modal data)
+    
+    Handles city name variations (Bangalore/Bengaluru, Delhi/New Delhi, etc.)
+    and ensures Kolkata, Ahmedabad, and Navi Mumbai are properly normalized.
+    
+    Args:
+        city_name: Raw city name from database or user input
+    
+    Returns:
+        Normalized city name (e.g., "Kolkata", "Ahmedabad", "Navi Mumbai")
+        Returns None if input is empty or invalid
+    """
+    if not city_name:
+        return None
+    
+    # Handle pandas NaN values
+    if pd.isna(city_name):
+        return None
+    
+    city_str = str(city_name).strip().lower()
+    if not city_str:
+        return None
+    
+    # City normalization mapping
+    # Maps common variations to standardized city names
+    city_mapping = {
+        'bangalore': 'Bangalore',
+        'bengaluru': 'Bangalore',
+        'delhi': 'New Delhi',
+        'new delhi': 'New Delhi',
+        'delhi ncr': 'New Delhi',
+        'bombay': 'Mumbai',
+        'kolkata': 'Kolkata',
+        'calcutta': 'Kolkata',
+        'ahmedabad': 'Ahmedabad',
+        'ahmadabad': 'Ahmedabad',
+        'hyderabad': 'Hyderabad',
+        'pune': 'Pune',
+        'poona': 'Pune',
+        'chennai': 'Chennai',
+        'madras': 'Chennai',
+        'gurugram': 'Gurugram',
+        'gurgaon': 'Gurugram',
+        'noida': 'Noida',
+        'navi mumbai': 'Navi Mumbai',
+        'new mumbai': 'Navi Mumbai',
+        'thane': 'Thane',
+    }
+    
+    # Check mapping first
+    if city_str in city_mapping:
+        return city_mapping[city_str]
+    
+    # Otherwise, apply title case
+    words = city_str.split()
+    normalized_words = [word.capitalize() for word in words]
+    return ' '.join(normalized_words)
+
+
 def calculate_transaction_revenue(df: pd.DataFrame) -> Dict[str, Any]:
     """
     Calculate revenue based on transaction types - uses derived fields if available
@@ -1429,28 +1498,6 @@ def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
                 "data": [],
                 "count": 0,
                 "total_revenue": 0.0
-            }
-        
-        # City normalization mapping
-        city_mapping = {
-            'bangalore': 'Bangalore',
-            'bengaluru': 'Bangalore',
-            'delhi': 'New Delhi',
-            'new delhi': 'New Delhi',
-            'delhi ncr': 'New Delhi',
-            'bombay': 'Mumbai',
-            'kolkata': 'Kolkata',
-            'calcutta': 'Kolkata',
-            'hyderabad': 'Hyderabad',
-            'pune': 'Pune',
-            'poona': 'Pune',
-            'chennai': 'Chennai',
-            'madras': 'Chennai',
-            'gurugram': 'Gurugram',
-            'gurgaon': 'Gurugram',
-            'noida': 'Noida',
-            'navi mumbai': 'Navi Mumbai',
-            'thane': 'Thane',
         }
         
         # CRITICAL VERIFICATION: Ensure we're using "Ship To City" not "Bill From City"
@@ -1533,27 +1580,9 @@ def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
             print(f"✅✅✅ CORRECT: Using 'Ship To City' - this is RIGHT!")
         print()
         
-        # Normalize city names
-        def normalize_city(city_name):
-            """Normalize city name using mapping and title case"""
-            if pd.isna(city_name) or not city_name:
-                return None
-            
-            city_str = str(city_name).strip().lower()
-            if not city_str:
-                return None
-            
-            # Check mapping first
-            if city_str in city_mapping:
-                return city_mapping[city_str]
-            
-            # Otherwise, apply title case
-            words = city_str.split()
-            normalized_words = [word.capitalize() for word in words]
-            return ' '.join(normalized_words)
-        
-        # Apply normalization
-        raw_df['city'] = raw_df['raw_city'].apply(normalize_city)
+        # Normalize city names using shared function
+        # This ensures consistent matching with get_skus_by_city()
+        raw_df['city'] = raw_df['raw_city'].apply(normalize_city_name)
         raw_df = raw_df[raw_df['city'].notna() & (raw_df['city'] != '')]
         
         # DEBUG: Show normalization results
@@ -1781,50 +1810,12 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
                 "count": 0
             }
         
-        # City normalization mapping (same as get_revenue_by_city)
-        city_mapping = {
-            'bangalore': 'Bangalore',
-            'bengaluru': 'Bangalore',
-            'delhi': 'New Delhi',
-            'new delhi': 'New Delhi',
-            'delhi ncr': 'New Delhi',
-            'bombay': 'Mumbai',
-            'kolkata': 'Kolkata',
-            'calcutta': 'Kolkata',
-            'hyderabad': 'Hyderabad',
-            'pune': 'Pune',
-            'poona': 'Pune',
-            'chennai': 'Chennai',
-            'madras': 'Chennai',
-            'gurugram': 'Gurugram',
-            'gurgaon': 'Gurugram',
-            'noida': 'Noida',
-            'navi mumbai': 'Navi Mumbai',
-            'thane': 'Thane',
-        }
-        
-        # Normalize input city name (same normalization as get_revenue_by_city)
-        # Use the EXACT same normalization function as get_revenue_by_city
-        def normalize_city_input(city_name):
-            """Normalize city name using mapping and title case - SAME as get_revenue_by_city"""
-            if not city_name:
-                return None
-            city_str = str(city_name).strip().lower()
-            if not city_str:
-                return None
-            # Check mapping first
-            if city_str in city_mapping:
-                return city_mapping[city_str]
-            # Otherwise, apply title case
-            words = city_str.split()
-            normalized_words = [word.capitalize() for word in words]
-            return ' '.join(normalized_words)
-        
-        city_normalized = normalize_city_input(city)
+        # Normalize input city name using shared function
+        # This ensures consistent matching with get_revenue_by_city()
+        city_normalized = normalize_city_name(city)
         
         logger.info(f"Getting SKUs for city: '{city}' -> normalized: '{city_normalized}'")
-        print(f"\n🔍 DEBUG (get_skus_by_city): Input city: '{city}' -> Normalized: '{city_normalized}'")
-        print(f"🔍 DEBUG (get_skus_by_city): City mapping check - '{city.lower().strip()}' in mapping: {city.lower().strip() in city_mapping}\n")
+        print(f"\n🔍 DEBUG (get_skus_by_city): Input city: '{city}' -> Normalized: '{city_normalized}'\n")
         
         # Build SQL query
         # We need to normalize the city column in SQL to match the normalized input city
@@ -1867,24 +1858,9 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
                 "count": 0
             }
         
-        # Normalize city names in the result (SAME function as get_revenue_by_city)
-        def normalize_city(city_name):
-            """Normalize city name using mapping and title case - SAME as get_revenue_by_city"""
-            if pd.isna(city_name) or not city_name:
-                return None
-            city_str = str(city_name).strip().lower()
-            if not city_str:
-                return None
-            # Check mapping first
-            if city_str in city_mapping:
-                return city_mapping[city_str]
-            # Otherwise, apply title case
-            words = city_str.split()
-            normalized_words = [word.capitalize() for word in words]
-            return ' '.join(normalized_words)
-        
-        # Apply normalization and filter for the selected city
-        df['city_normalized'] = df['raw_city'].apply(normalize_city)
+        # Normalize city names in the result using shared function
+        # This ensures consistent matching with get_revenue_by_city()
+        df['city_normalized'] = df['raw_city'].apply(normalize_city_name)
         
         # DEBUG: Show normalization results
         print(f"🔍 DEBUG (get_skus_by_city): After normalization:")
@@ -1913,7 +1889,7 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
                 print(f"⚠️  Sample raw cities from query (first 20):")
                 raw_cities_sample = df['raw_city'].unique()[:20]
                 for raw_city in raw_cities_sample:
-                    normalized_sample = normalize_city(raw_city)
+                    normalized_sample = normalize_city_name(raw_city)
                     print(f"    Raw: '{raw_city}' -> Normalized: '{normalized_sample}'")
                 print(f"⚠️  This might be a normalization mismatch issue\n")
                 return {
@@ -1969,43 +1945,124 @@ def get_movers_decliners(
     limit: int = 10,
 ) -> Dict[str, Any]:
     """
-    Get movers (fast growing) and decliners (declining) SKUs
+    Get movers (fast growing) and decliners (declining) SKUs using adaptive moving average comparison.
     
-    Compares current period vs previous period (same duration, 1 week before)
-    - Decliners: growth % <= -30%
-    - Fast Movers: growth % >= +30%
+    Automatically determines granularity based on date range:
+    - 7-13 days: Daily comparison (last day vs daily average)
+    - 14-89 days: Weekly comparison (last week vs weekly average)
+    - 90+ days: Monthly comparison (last month vs monthly average)
+    
+    Logic:
+    1. Split selected date range into periods (days/weeks/months)
+    2. For each SKU: calculate baseline = average of all periods EXCEPT last
+    3. Compare last period to baseline
+    4. Growth % = ((last - baseline) / baseline) × 100
+    5. Movers: growth >= +30%, Decliners: growth <= -30%
     
     Args:
-        start_date: Start date of current period (YYYY-MM-DD)
-        end_date: End date of current period (YYYY-MM-DD)
+        start_date: Start date of period (YYYY-MM-DD)
+        end_date: End date of period (YYYY-MM-DD)
         limit: Number of SKUs to return per category (default: 10)
     
     Returns:
-        Dictionary with "movers" and "decliners" lists
-        Each item: {"sku": "...", "revenue": 100000, "wow_change": 35.5}
+        Dictionary with:
+        - movers: List of SKUs with growth >= +30%
+        - decliners: List of SKUs with growth <= -30%
+        - label: Comparison label (e.g., "Last Week vs Weekly Avg")
+        - granularity: Period granularity ("daily", "weekly", or "monthly")
+        Each item: {"sku": "...", "revenue": 100000, "growth": 35.5}
     """
     if not table_exists('sales'):
-        return {"movers": [], "decliners": []}
+        return {
+            "movers": [],
+            "decliners": [],
+            "label": "",
+            "granularity": ""
+        }
     
     try:
         from datetime import datetime, timedelta
         
         # Parse dates
-        current_start = datetime.strptime(start_date, '%Y-%m-%d')
-        current_end = datetime.strptime(end_date, '%Y-%m-%d')
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
         
-        # Calculate period length
-        period_length = (current_end - current_start).days + 1
+        # Calculate total days in range
+        total_days = (end_dt - start_dt).days + 1
         
-        # Calculate previous period dates (same duration, 1 week before)
-        prev_start = current_start - timedelta(days=7 + period_length - 1)
-        prev_end = current_start - timedelta(days=7)
+        # Validate minimum date range
+        if total_days < 7:
+            logger.warning(f"Date range too short ({total_days} days). Minimum 7 days required.")
+            return {
+                "movers": [],
+                "decliners": [],
+                "label": f"Date range too short ({total_days} days)",
+                "granularity": ""
+            }
         
-        prev_start_str = prev_start.strftime('%Y-%m-%d')
-        prev_end_str = prev_end.strftime('%Y-%m-%d')
+        # Determine granularity based on date range
+        if total_days <= 13:
+            granularity = "daily"
+            period_label = "Last Day vs Daily Avg"
+        elif total_days <= 89:
+            granularity = "weekly"
+            period_label = "Last Week vs Weekly Avg"
+        else:
+            granularity = "monthly"
+            period_label = "Last Month vs Monthly Avg"
         
-        logger.info(f"📊 Movers & Decliners: Current period {start_date} to {end_date} ({period_length} days)")
-        logger.info(f"📊 Previous period: {prev_start_str} to {prev_end_str}")
+        logger.info(f"📊 Movers & Decliners: Date range {start_date} to {end_date} ({total_days} days)")
+        logger.info(f"📊 Granularity: {granularity} | Label: {period_label}")
+        
+        # Split date range into periods based on granularity
+        periods = []
+        if granularity == "daily":
+            # Each day is a period
+            current_date = start_dt
+            while current_date <= end_dt:
+                periods.append({
+                    'start': current_date,
+                    'end': current_date
+                })
+                current_date += timedelta(days=1)
+        elif granularity == "weekly":
+            # Each week is a period (7 days)
+            current_date = start_dt
+            while current_date <= end_dt:
+                period_end = min(current_date + timedelta(days=6), end_dt)
+                periods.append({
+                    'start': current_date,
+                    'end': period_end
+                })
+                current_date = period_end + timedelta(days=1)
+        else:  # monthly
+            # Each month is a period
+            current_date = start_dt
+            while current_date <= end_dt:
+                # Calculate end of month
+                if current_date.month == 12:
+                    next_month = current_date.replace(year=current_date.year + 1, month=1, day=1)
+                else:
+                    next_month = current_date.replace(month=current_date.month + 1, day=1)
+                period_end = min(next_month - timedelta(days=1), end_dt)
+                periods.append({
+                    'start': current_date,
+                    'end': period_end
+                })
+                current_date = period_end + timedelta(days=1)
+        
+        if len(periods) < 2:
+            logger.warning(f"Not enough periods ({len(periods)}). Need at least 2 periods for comparison.")
+            return {
+                "movers": [],
+                "decliners": [],
+                "label": period_label,
+                "granularity": granularity
+            }
+        
+        logger.info(f"📊 Split into {len(periods)} periods")
+        logger.info(f"📊 Last period: {periods[-1]['start'].strftime('%Y-%m-%d')} to {periods[-1]['end'].strftime('%Y-%m-%d')}")
+        logger.info(f"📊 Baseline periods: {len(periods) - 1} periods (excluding last)")
         
         # Detect column names dynamically
         column_info = execute_query("DESCRIBE sales")
@@ -2043,7 +2100,12 @@ def get_movers_decliners(
             logger.warning("Required columns not found for movers/decliners")
             logger.warning(f"sku_col: {sku_col}, revenue_col: {revenue_col}, date_col: {date_col}")
             logger.warning(f"Available columns: {list(column_info['column_name'].values)}")
-            return {"movers": [], "decliners": []}
+            return {
+                "movers": [],
+                "decliners": [],
+                "label": period_label,
+                "granularity": granularity
+            }
         
         logger.info(f"Using columns - SKU: {sku_col}, Revenue: {revenue_col}, Transaction: {txn_col}, Date: {date_col}")
         
@@ -2054,414 +2116,953 @@ def get_movers_decliners(
             if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
                 needs_cast = True
         
-        # Build date filters
-        if needs_cast:
-            current_date_filter = f'CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\''
-            prev_date_filter = f'CAST("{date_col}" AS DATE) >= \'{prev_start_str}\' AND CAST("{date_col}" AS DATE) <= \'{prev_end_str}\''
-        else:
-            current_date_filter = f'"{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
-            prev_date_filter = f'"{date_col}" >= \'{prev_start_str}\' AND "{date_col}" <= \'{prev_end_str}\''
-        
-        # Query current period revenue by SKU
-        # Handle revenue_calc differently (it's already transaction-aware)
-        if txn_col:
-            if revenue_col == 'revenue_calc':
-                # revenue_calc is already positive for shipments, negative for refunds
-                current_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as current_revenue
-                FROM sales
-                WHERE {current_date_filter}
-                GROUP BY "{sku_col}"
-                HAVING current_revenue > 0
-                """
+        # Helper function to build date filter
+        def build_date_filter(period_start, period_end):
+            start_str = period_start.strftime('%Y-%m-%d')
+            end_str = period_end.strftime('%Y-%m-%d')
+            if needs_cast:
+                return f'CAST("{date_col}" AS DATE) >= \'{start_str}\' AND CAST("{date_col}" AS DATE) <= \'{end_str}\''
             else:
-                current_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as current_revenue
-                FROM sales
-                WHERE {current_date_filter}
-                GROUP BY "{sku_col}"
-                HAVING current_revenue > 0
-                """
-        else:
-            if revenue_col == 'revenue_calc':
-                current_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as current_revenue
-                FROM sales
-                WHERE {revenue_col} > 0 AND {current_date_filter}
-                GROUP BY "{sku_col}"
-                HAVING current_revenue > 0
-                """
+                return f'"{date_col}" >= \'{start_str}\' AND "{date_col}" <= \'{end_str}\''
+        
+        # Helper function to build revenue query for a period
+        def build_revenue_query(period_start, period_end):
+            date_filter = build_date_filter(period_start, period_end)
+            if txn_col:
+                if revenue_col == 'revenue_calc':
+                    return f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                    FROM sales
+                    WHERE {date_filter}
+                    GROUP BY "{sku_col}"
+                    """
+                else:
+                    return f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                    FROM sales
+                    WHERE {date_filter}
+                    GROUP BY "{sku_col}"
+                    """
             else:
-                current_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as current_revenue
-                FROM sales
-                WHERE {revenue_col} > 0 AND {current_date_filter}
-                GROUP BY "{sku_col}"
-                HAVING current_revenue > 0
-                """
+                if revenue_col == 'revenue_calc':
+                    return f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                    FROM sales
+                    WHERE {revenue_col} > 0 AND {date_filter}
+                    GROUP BY "{sku_col}"
+                    """
+                else:
+                    return f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                    FROM sales
+                    WHERE {revenue_col} > 0 AND {date_filter}
+                    GROUP BY "{sku_col}"
+                    """
         
-        logger.info(f"Current period SQL: {current_sql}")
-        current_df = execute_query(current_sql)
-        logger.info(f"Current period query returned {len(current_df)} SKUs")
-        if not current_df.empty:
-            logger.info(f"Sample current period SKUs: {current_df['sku'].head(5).tolist()}")
-            logger.info(f"Sample current period revenues: {current_df['current_revenue'].head(5).tolist()}")
-            logger.info(f"Total current period revenue: {current_df['current_revenue'].sum():.2f}")
-        
-        # Query previous period revenue by SKU
-        if txn_col:
-            if revenue_col == 'revenue_calc':
-                prev_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as prev_revenue
-                FROM sales
-                WHERE {prev_date_filter}
-                GROUP BY "{sku_col}"
-                """
-            else:
-                prev_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
-                FROM sales
-                WHERE {prev_date_filter}
-                GROUP BY "{sku_col}"
-                """
-        else:
-            if revenue_col == 'revenue_calc':
-                prev_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as prev_revenue
-                FROM sales
-                WHERE {revenue_col} > 0 AND {prev_date_filter}
-                GROUP BY "{sku_col}"
-                """
-            else:
-                prev_sql = f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as prev_revenue
-                FROM sales
-                WHERE {revenue_col} > 0 AND {prev_date_filter}
-                GROUP BY "{sku_col}"
-                """
-        
-        logger.info(f"Previous period SQL: {prev_sql}")
-        prev_df = execute_query(prev_sql)
-        logger.info(f"Previous period query returned {len(prev_df)} SKUs")
-        if not prev_df.empty:
-            logger.info(f"Sample previous period SKUs: {prev_df['sku'].head(5).tolist()}")
-            logger.info(f"Sample previous period revenues: {prev_df['prev_revenue'].head(5).tolist()}")
-            logger.info(f"Total previous period revenue: {prev_df['prev_revenue'].sum():.2f}")
-        
-        # CRITICAL DEBUG: Date ranges and record counts
-        print("\n" + "="*80)
-        print("🔍 CRITICAL DEBUG: DATE RANGES AND RECORD COUNTS")
-        print("="*80)
-        print(f"Current Period: {start_date} to {end_date}")
-        print(f"  Start: {current_start.strftime('%Y-%m-%d')}")
-        print(f"  End: {current_end.strftime('%Y-%m-%d')}")
-        print(f"  Duration: {period_length} days")
-        print(f"\nPrevious Period: {prev_start_str} to {prev_end_str}")
-        print(f"  Start: {prev_start.strftime('%Y-%m-%d')}")
-        print(f"  End: {prev_end.strftime('%Y-%m-%d')}")
-        print(f"  Duration: {(prev_end - prev_start).days + 1} days")
-        print(f"\nDate Range Summary:")
-        print(f"  Current: {start_date} to {end_date} | Previous: {prev_start_str} to {prev_end_str}")
-        print("-" * 80)
-        
-        # Check database record counts for BOTH periods
-        print("\n📊 DATABASE RECORD COUNTS:")
-        print("-" * 80)
-        
-        # Count shipments in current period
-        if txn_col:
-            current_count_sql = f"""
-            SELECT COUNT(*) as total
-            FROM sales
-            WHERE "{txn_col}" = 'Shipment' AND {current_date_filter}
-            """
-        else:
-            current_count_sql = f"""
-            SELECT COUNT(*) as total
-            FROM sales
-            WHERE {revenue_col} > 0 AND {current_date_filter}
-            """
-        
-        current_count_df = execute_query(current_count_sql)
-        current_count = int(current_count_df['total'].iloc[0]) if not current_count_df.empty else 0
-        print(f"Current Period Shipment Records: {current_count:,}")
-        
-        # Count shipments in previous period
-        if txn_col:
-            prev_count_sql = f"""
-            SELECT COUNT(*) as total
-            FROM sales
-            WHERE "{txn_col}" = 'Shipment' AND {prev_date_filter}
-            """
-        else:
-            prev_count_sql = f"""
-            SELECT COUNT(*) as total
-            FROM sales
-            WHERE {revenue_col} > 0 AND {prev_date_filter}
-            """
-        
-        prev_count_df = execute_query(prev_count_sql)
-        prev_count = int(prev_count_df['total'].iloc[0]) if not prev_count_df.empty else 0
-        print(f"Previous Period Shipment Records: {prev_count:,}")
-        
-        if prev_count == 0:
-            print("\n⚠️  WARNING: Previous period has ZERO shipment records!")
-            print("   This explains why all products show 999% growth (new products)")
-            print("   Possible causes:")
-            print("   1. Date calculation is wrong")
-            print("   2. Date column type mismatch")
-            print("   3. No data exists in previous period date range")
-        
-        print("-" * 80)
-        
-        # Show sample records from both periods
-        print("\n📊 SAMPLE RECORDS FROM DATABASE:")
-        print("-" * 80)
-        
-        # Sample from current period
-        if txn_col:
-            current_sample_sql = f"""
-            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
-            FROM sales
-            WHERE "{txn_col}" = 'Shipment' AND {current_date_filter}
-            LIMIT 5
-            """
-        else:
-            current_sample_sql = f"""
-            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
-            FROM sales
-            WHERE {revenue_col} > 0 AND {current_date_filter}
-            LIMIT 5
-            """
-        
-        current_sample_df = execute_query(current_sample_sql)
-        print(f"\nCurrent Period Sample Records ({len(current_sample_df)} shown):")
-        if not current_sample_df.empty:
-            for idx, row in current_sample_df.iterrows():
-                print(f"  SKU: {row.get('sku', 'N/A')} | Revenue: ₹{row.get('revenue', 0):,.2f} | Date: {row.get('date', 'N/A')}")
-        else:
-            print("  ⚠️  No records found!")
-        
-        # Sample from previous period
-        if txn_col:
-            prev_sample_sql = f"""
-            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
-            FROM sales
-            WHERE "{txn_col}" = 'Shipment' AND {prev_date_filter}
-            LIMIT 5
-            """
-        else:
-            prev_sample_sql = f"""
-            SELECT "{sku_col}" as sku, {revenue_col} as revenue, "{date_col}" as date
-            FROM sales
-            WHERE {revenue_col} > 0 AND {prev_date_filter}
-            LIMIT 5
-            """
-        
-        prev_sample_df = execute_query(prev_sample_sql)
-        print(f"\nPrevious Period Sample Records ({len(prev_sample_df)} shown):")
-        if not prev_sample_df.empty:
-            for idx, row in prev_sample_df.iterrows():
-                print(f"  SKU: {row.get('sku', 'N/A')} | Revenue: ₹{row.get('revenue', 0):,.2f} | Date: {row.get('date', 'N/A')}")
-        else:
-            print("  ⚠️  No records found!")
-        
-        print("-" * 80)
-        
-        # Show aggregated results
-        print("\n📊 AGGREGATED RESULTS:")
-        print("-" * 80)
-        print(f"Current Period Aggregated:")
-        print(f"  SKUs with revenue > 0: {len(current_df)}")
-        if not current_df.empty:
-            print(f"  Total revenue: ₹{current_df['current_revenue'].sum():,.2f}")
-            print(f"  Sample SKUs: {current_df['sku'].head(5).tolist()}")
-            print(f"  Sample revenues: {current_df['current_revenue'].head(5).tolist()}")
-        else:
-            print("  ⚠️  No SKUs found!")
-        
-        print(f"\nPrevious Period Aggregated:")
-        print(f"  SKUs with revenue > 0: {len(prev_df)}")
-        if not prev_df.empty:
-            print(f"  Total revenue: ₹{prev_df['prev_revenue'].sum():,.2f}")
-            print(f"  Sample SKUs: {prev_df['sku'].head(5).tolist()}")
-            print(f"  Sample revenues: {prev_df['prev_revenue'].head(5).tolist()}")
-        else:
-            print("  ⚠️  No SKUs found!")
-            print("  ⚠️  This is why all products show 999% growth!")
-        
-        print("="*80 + "\n")
-        
-        # Merge current and previous period data
-        if current_df.empty:
-            return {"movers": [], "decliners": []}
-        
-        # Ensure SKU values are strings for proper matching
-        current_df['sku'] = current_df['sku'].astype(str).str.strip()
-        if not prev_df.empty:
-            prev_df['sku'] = prev_df['sku'].astype(str).str.strip()
-            # Merge on SKU
-            merged_df = current_df.merge(prev_df, on='sku', how='left')
-        else:
-            merged_df = current_df.copy()
-            merged_df['prev_revenue'] = 0.0
-        
-        # Fill missing previous revenue with 0
-        merged_df['prev_revenue'] = merged_df['prev_revenue'].fillna(0)
-        
-        logger.info(f"Merged dataframe has {len(merged_df)} SKUs")
-        logger.info(f"SKUs with current revenue > 0: {len(merged_df[merged_df['current_revenue'] > 0])}")
-        logger.info(f"SKUs with previous revenue > 0: {len(merged_df[merged_df['prev_revenue'] > 0])}")
-        logger.info(f"SKUs with both periods > 0: {len(merged_df[(merged_df['current_revenue'] > 0) & (merged_df['prev_revenue'] > 0)])}")
-        
-        # Calculate growth percentage
-        # Handle three cases:
-        # 1. prev_revenue > 0: normal calculation ((current - prev) / prev * 100)
-        # 2. prev_revenue = 0 and current_revenue > 0: new product, treat as 100% growth (mover)
-        # 3. prev_revenue = 0 and current_revenue = 0: skip (shouldn't happen due to HAVING clause)
-        def calculate_growth(row):
-            current = float(row['current_revenue'])
-            previous = float(row['prev_revenue'])
+        # Fetch revenue for each period
+        period_revenues = {}
+        for i, period in enumerate(periods):
+            period_start = period['start']
+            period_end = period['end']
+            sql = build_revenue_query(period_start, period_end)
             
-            if previous > 0:
-                # Normal case: calculate percentage change
-                return round(((current - previous) / previous) * 100, 1)
-            elif current > 0:
-                # New product: treat as infinite growth (1000% as placeholder for sorting)
-                # We'll filter these separately
-                return 1000.0
-            else:
-                # Shouldn't happen, but return 0
-                return 0.0
+            logger.info(f"Fetching revenue for period {i+1}/{len(periods)}: {period_start.strftime('%Y-%m-%d')} to {period_end.strftime('%Y-%m-%d')}")
+            period_df = execute_query(sql)
+            
+            # Ensure SKU values are strings
+            if not period_df.empty:
+                period_df['sku'] = period_df['sku'].astype(str).str.strip()
+                period_df = period_df[period_df['revenue'] > 0]  # Filter zero revenue
+            
+            period_revenues[i] = period_df
+            logger.info(f"Period {i+1} returned {len(period_df)} SKUs with revenue > 0")
         
-        # DEBUG: Log BEFORE growth calculation - first 5 SKUs with full details
-        print("\n" + "="*80)
-        print("🔍 DEBUG: MOVERS & DECLINERS - BEFORE GROWTH CALCULATION")
-        print("="*80)
-        for idx, row in merged_df.head(5).iterrows():
-            sku = str(row['sku'])
-            current = float(row['current_revenue'])
-            previous = float(row['prev_revenue'])
-            # Calculate growth manually for logging
-            if previous > 0:
-                growth = ((current - previous) / previous) * 100
-            elif current > 0:
-                growth = 1000.0  # New product
+        # Separate last period from baseline periods
+        last_period_idx = len(periods) - 1
+        last_period_df = period_revenues[last_period_idx].copy() if last_period_idx in period_revenues and not period_revenues[last_period_idx].empty else pd.DataFrame()
+        
+        if last_period_df.empty:
+            logger.warning("Last period has no revenue data")
+            return {
+                "movers": [],
+                "decliners": [],
+                "label": period_label,
+                "granularity": granularity
+            }
+        
+        # Calculate baseline average for each SKU (average of all periods EXCEPT last)
+        baseline_periods = [period_revenues[i] for i in range(last_period_idx) if i in period_revenues and not period_revenues[i].empty]
+        
+        if not baseline_periods:
+            logger.warning("No baseline periods with data")
+            return {
+                "movers": [],
+                "decliners": [],
+                "label": period_label,
+                "granularity": granularity
+            }
+        
+        # Combine all baseline periods and calculate average revenue per SKU
+        baseline_df = pd.concat(baseline_periods, ignore_index=True)
+        baseline_avg = baseline_df.groupby('sku')['revenue'].mean().reset_index()
+        baseline_avg.columns = ['sku', 'baseline_revenue']
+        
+        logger.info(f"Baseline calculated from {len(baseline_periods)} periods")
+        logger.info(f"Baseline contains {len(baseline_avg)} unique SKUs")
+        
+        # Merge last period with baseline
+        last_period_df.columns = ['sku', 'last_revenue']
+        merged_df = last_period_df.merge(baseline_avg, on='sku', how='inner')
+        
+        logger.info(f"Merged dataframe has {len(merged_df)} SKUs with both last period and baseline data")
+        
+        # Calculate growth percentage: ((last - baseline) / baseline) × 100
+        def calculate_growth(row):
+            last = float(row['last_revenue'])
+            baseline = float(row['baseline_revenue'])
+            
+            if baseline > 0:
+                return round(((last - baseline) / baseline) * 100, 1)
+            elif last > 0:
+                # New product in last period (no baseline)
+                return 999.0  # Indicates new product
             else:
-                growth = 0.0
-            print(f"SKU: {sku}")
-            print(f"  Current Period Revenue: ₹{current:,.2f}")
-            print(f"  Previous Period Revenue: ₹{previous:,.2f}")
-            print(f"  Calculated Growth %: {growth:.1f}%")
-            print("-" * 80)
-        print(f"Total SKUs in merged dataframe: {len(merged_df)}")
-        print("="*80 + "\n")
+                return 0.0
         
         merged_df['wow_change'] = merged_df.apply(calculate_growth, axis=1)
         
-        # Log sample calculations
-        sample_calc = merged_df[['sku', 'current_revenue', 'prev_revenue', 'wow_change']].head(10)
-        logger.info(f"Sample growth calculations:\n{sample_calc.to_string()}")
+        logger.info(f"Growth calculated for {len(merged_df)} SKUs")
+        logger.info(f"Growth range: {merged_df['wow_change'].min():.1f}% to {merged_df['wow_change'].max():.1f}%")
         
-        # DEBUG: Log AFTER growth calculation - first 5 SKUs
-        print("\n" + "="*80)
-        print("🔍 DEBUG: MOVERS & DECLINERS - AFTER GROWTH CALCULATION")
-        print("="*80)
-        for idx, row in merged_df.head(5).iterrows():
-            print(f"SKU: {row['sku']} | Current: ₹{row['current_revenue']:,.2f} | Previous: ₹{row['prev_revenue']:,.2f} | Growth: {row['wow_change']:.1f}%")
-        print("="*80 + "\n")
-        
-        # Filter decliners (growth <= -30%)
-        # Exclude new products (wow_change = 1000)
-        decliners_df = merged_df[(merged_df['wow_change'] <= -30) & (merged_df['wow_change'] < 1000)].copy()
-        decliners_df = decliners_df.sort_values('wow_change', ascending=True).head(limit)
-        logger.info(f"Found {len(decliners_df)} decliners (growth <= -30%)")
-        if not decliners_df.empty:
-            logger.info(f"Sample decliners: {decliners_df[['sku', 'current_revenue', 'prev_revenue', 'wow_change']].head(5).to_dict('records')}")
-        
-        # Filter movers (growth >= +30% OR new products)
-        # Include both high growth products and new products
+        # Filter movers (growth >= +30%)
         movers_df = merged_df[merged_df['wow_change'] >= 30].copy()
         movers_df = movers_df.sort_values('wow_change', ascending=False).head(limit)
-        logger.info(f"Found {len(movers_df)} movers (growth >= +30% or new products)")
-        if not movers_df.empty:
-            logger.info(f"Sample movers: {movers_df[['sku', 'current_revenue', 'prev_revenue', 'wow_change']].head(5).to_dict('records')}")
         
-        # If we don't have enough results, relax the threshold
-        if len(decliners_df) < 5 and len(merged_df) > 0:
-            logger.info("Not enough decliners found, checking for any negative growth...")
-            any_decliners = merged_df[(merged_df['wow_change'] < 0) & (merged_df['wow_change'] < 1000)].copy()
-            if len(any_decliners) > 0:
-                logger.info(f"Found {len(any_decliners)} SKUs with negative growth")
-                decliners_df = any_decliners.sort_values('wow_change', ascending=True).head(limit)
+        # Filter decliners (growth <= -30%)
+        decliners_df = merged_df[merged_df['wow_change'] <= -30].copy()
+        decliners_df = decliners_df.sort_values('wow_change', ascending=True).head(limit)
         
-        if len(movers_df) < 5 and len(merged_df) > 0:
-            logger.info("Not enough movers found, checking for any positive growth...")
-            any_movers = merged_df[(merged_df['wow_change'] > 0) & (merged_df['wow_change'] < 1000)].copy()
-            if len(any_movers) > 0:
-                logger.info(f"Found {len(any_movers)} SKUs with positive growth")
-                # Combine with new products
-                new_products = merged_df[merged_df['wow_change'] >= 1000].copy()
-                combined = pd.concat([any_movers.sort_values('wow_change', ascending=False), new_products]).head(limit)
-                movers_df = combined
+        logger.info(f"Found {len(movers_df)} movers and {len(decliners_df)} decliners")
         
         # Format results
-        decliners = []
-        for _, row in decliners_df.iterrows():
-            wow_change = float(row['wow_change'])
-            # Cap at -100% for display (can't go below -100%)
-            wow_change = max(wow_change, -100.0)
-            decliners.append({
-                'sku': str(row['sku']),
-                'revenue': float(row['current_revenue']),
-                'wow_change': wow_change,
-            })
-        
         movers = []
         for _, row in movers_df.iterrows():
             wow_change = float(row['wow_change'])
-            # For new products (1000%), show as "New" or cap at reasonable value
-            # We'll handle this in frontend, but for now cap at 999%
-            if wow_change >= 1000:
-                wow_change = 999.0  # Indicates new product
+            # Cap at 999% for display
+            if wow_change >= 999:
+                wow_change = 999.0
             movers.append({
                 'sku': str(row['sku']),
-                'revenue': float(row['current_revenue']),
+                'revenue': float(row['last_revenue']),
+                'wow_change': wow_change,
+            })
+        
+        decliners = []
+        for _, row in decliners_df.iterrows():
+            wow_change = float(row['wow_change'])
+            # Cap at -100% for display
+            wow_change = max(wow_change, -100.0)
+            decliners.append({
+                'sku': str(row['sku']),
+                'revenue': float(row['last_revenue']),
                 'wow_change': wow_change,
             })
         
         logger.info(f"📊 Final results: {len(movers)} movers and {len(decliners)} decliners")
-        if decliners:
-            logger.info(f"Decliners range: {min(d['wow_change'] for d in decliners):.1f}% to {max(d['wow_change'] for d in decliners):.1f}%")
-        if movers:
-            logger.info(f"Movers range: {min(m['wow_change'] for m in movers):.1f}% to {max(m['wow_change'] for m in movers):.1f}%")
         
         return {
             "movers": movers,
             "decliners": decliners,
+            "label": period_label,
+            "granularity": granularity
         }
     
     except Exception as e:
         logger.error(f"Error getting movers and decliners: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return {"movers": [], "decliners": []}
+        return {
+            "movers": [],
+            "decliners": [],
+            "label": "",
+            "granularity": ""
+        }
+
+
+def get_top_products_performance(
+    start_date: str,
+    end_date: str,
+    view_type: str = 'monthly',
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Get top products performance tracker with period-by-period breakdown.
+    
+    Shows top products by total volume with monthly or quarterly performance tracking.
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        view_type: 'monthly' or 'quarterly' (default: 'monthly')
+        limit: Number of top products to return (default: 10)
+    
+    Returns:
+        Dictionary with:
+        - products: List of product performance data
+        - period_labels: List of period labels (e.g., ["Jul", "Aug", "Sep"])
+        - view_type: The view type used
+        Each product: {
+            "sku": "...",
+            "periods": [145, 150, 139],  # Volume for each period
+            "growth_rates": [None, 3.4, -7.3],  # Period-over-period growth %
+            "total_volume": 434
+        }
+    """
+    if not table_exists('sales'):
+        return {
+            "products": [],
+            "period_labels": [],
+            "view_type": view_type
+        }
+    
+    try:
+        from datetime import datetime, timedelta
+        
+        # Parse dates
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        
+        # Detect column names
+        column_info = execute_query("DESCRIBE sales")
+        
+        sku_columns = ['sku', 'Sku', 'SKU']
+        quantity_columns = ['quantity', 'Quantity', 'units_sold']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        quantity_col = None
+        for col in quantity_columns:
+            if col in column_info['column_name'].values:
+                quantity_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        if not sku_col or not date_col:
+            logger.warning("Required columns not found for top products performance")
+            return {
+                "products": [],
+                "period_labels": [],
+                "view_type": view_type
+            }
+        
+        # Handle date column type
+        needs_cast = False
+        if date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                needs_cast = True
+        
+        # Split date range into periods
+        periods = []
+        period_labels = []
+        
+        if view_type == 'monthly':
+            current_date = start_dt
+            while current_date <= end_dt:
+                # Calculate end of month
+                if current_date.month == 12:
+                    next_month = current_date.replace(year=current_date.year + 1, month=1, day=1)
+                else:
+                    next_month = current_date.replace(month=current_date.month + 1, day=1)
+                period_end = min(next_month - timedelta(days=1), end_dt)
+                
+                periods.append({
+                    'start': current_date,
+                    'end': period_end
+                })
+                # Format label as "Jul", "Aug", etc.
+                period_labels.append(current_date.strftime('%b'))
+                
+                current_date = period_end + timedelta(days=1)
+        else:  # quarterly
+            current_date = start_dt
+            quarter = 1
+            while current_date <= end_dt:
+                # Calculate end of quarter
+                if current_date.month <= 3:
+                    quarter_end_month = 3
+                elif current_date.month <= 6:
+                    quarter_end_month = 6
+                elif current_date.month <= 9:
+                    quarter_end_month = 9
+                else:
+                    quarter_end_month = 12
+                
+                if quarter_end_month == 12:
+                    quarter_end = datetime(current_date.year, 12, 31)
+                else:
+                    quarter_end = datetime(current_date.year, quarter_end_month + 1, 1) - timedelta(days=1)
+                
+                period_end = min(quarter_end, end_dt)
+                
+                periods.append({
+                    'start': current_date,
+                    'end': period_end
+                })
+                # Format label as "Q1", "Q2", etc.
+                if current_date.month <= 3:
+                    q_num = 1
+                elif current_date.month <= 6:
+                    q_num = 2
+                elif current_date.month <= 9:
+                    q_num = 3
+                else:
+                    q_num = 4
+                period_labels.append(f"Q{q_num}")
+                
+                current_date = period_end + timedelta(days=1)
+        
+        if not periods:
+            return {
+                "products": [],
+                "period_labels": [],
+                "view_type": view_type
+            }
+        
+        logger.info(f"Split date range into {len(periods)} {view_type} periods")
+        
+        # Helper function to build date filter
+        def build_date_filter(period_start, period_end):
+            start_str = period_start.strftime('%Y-%m-%d')
+            end_str = period_end.strftime('%Y-%m-%d')
+            if needs_cast:
+                return f'CAST("{date_col}" AS DATE) >= \'{start_str}\' AND CAST("{date_col}" AS DATE) <= \'{end_str}\''
+            else:
+                return f'"{date_col}" >= \'{start_str}\' AND "{date_col}" <= \'{end_str}\''
+        
+        # Fetch volume for each period by SKU
+        period_data = {}
+        all_skus = set()
+        
+        for i, period in enumerate(periods):
+            date_filter = build_date_filter(period['start'], period['end'])
+            
+            if txn_col and quantity_col:
+                sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({quantity_col}) ELSE 0 END), 0) as volume
+                FROM sales
+                WHERE {date_filter}
+                GROUP BY "{sku_col}"
+                HAVING volume > 0
+                """
+            elif quantity_col:
+                sql = f"""
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(ABS({quantity_col})), 0) as volume
+                FROM sales
+                WHERE {quantity_col} > 0 AND {date_filter}
+                GROUP BY "{sku_col}"
+                HAVING volume > 0
+                """
+            else:
+                # Fallback: count shipments
+                if txn_col:
+                    sql = f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COUNT(*) as volume
+                    FROM sales
+                    WHERE "{txn_col}" = 'Shipment' AND {date_filter}
+                    GROUP BY "{sku_col}"
+                    """
+                else:
+                    sql = f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COUNT(*) as volume
+                    FROM sales
+                    WHERE {date_filter}
+                    GROUP BY "{sku_col}"
+                    """
+            
+            period_df = execute_query(sql)
+            if not period_df.empty:
+                period_df['sku'] = period_df['sku'].astype(str).str.strip()
+                period_data[i] = period_df.set_index('sku')['volume'].to_dict()
+                all_skus.update(period_df['sku'].tolist())
+        
+        # Calculate total volume for each SKU across all periods
+        sku_totals = {}
+        for sku in all_skus:
+            total = sum(period_data[i].get(sku, 0) for i in range(len(periods)))
+            if total > 0:
+                sku_totals[sku] = total
+        
+        # Get top N products by total volume
+        top_skus = sorted(sku_totals.items(), key=lambda x: x[1], reverse=True)[:limit]
+        
+        # Build product performance data
+        products = []
+        for sku, total_volume in top_skus:
+            periods_volumes = []
+            growth_rates = []
+            
+            for i in range(len(periods)):
+                volume = period_data[i].get(sku, 0)
+                periods_volumes.append(int(volume))
+                
+                # Calculate growth rate (period-over-period)
+                if i > 0:
+                    prev_volume = periods_volumes[i - 1]
+                    if prev_volume > 0:
+                        growth = ((volume - prev_volume) / prev_volume) * 100
+                        growth_rates.append(round(growth, 1))
+                    else:
+                        growth_rates.append(None if volume == 0 else 999.0)  # New product
+                else:
+                    growth_rates.append(None)  # First period has no previous
+            
+            products.append({
+                'sku': sku,
+                'periods': periods_volumes,
+                'growth_rates': growth_rates,
+                'total_volume': int(total_volume)
+            })
+        
+        logger.info(f"Returning {len(products)} top products with {len(period_labels)} periods")
+        
+        return {
+            "products": products,
+            "period_labels": period_labels,
+            "view_type": view_type
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting top products performance: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {
+            "products": [],
+            "period_labels": [],
+            "view_type": view_type
+        }
+
+
+def get_refunds_data(
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Get refunds data for Product Quality Issues dashboard.
+    
+    Calculates refund percentage and lost revenue per SKU.
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        limit: Number of products to return (default: 10)
+    
+    Returns:
+        Dictionary with:
+        - data: List of products with refund metrics
+        Each product: {
+            "sku": "...",
+            "units_sold": 100,
+            "refunds": 5,
+            "refund_percentage": 5.0,
+            "lost_revenue": 5000.0
+        }
+    """
+    if not table_exists('sales'):
+        return {"data": []}
+    
+    try:
+        from datetime import datetime
+        
+        # Detect column names
+        column_info = execute_query("DESCRIBE sales")
+        
+        sku_columns = ['sku', 'Sku', 'SKU']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        revenue_columns = ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        revenue_col = None
+        for col in revenue_columns:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        if not sku_col or not txn_col or not date_col:
+            logger.warning("Required columns not found for refunds data")
+            return {"data": []}
+        
+        # Handle date column type
+        needs_cast = False
+        if date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                needs_cast = True
+        
+        date_filter = f'CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\'' if needs_cast else f'"{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+        
+        # Query: Get shipments count per SKU
+        shipments_sql = f"""
+        SELECT 
+            "{sku_col}" as sku,
+            COUNT(*) as units_sold
+            FROM sales
+        WHERE "{txn_col}" = 'Shipment' AND {date_filter}
+        GROUP BY "{sku_col}"
+        """
+        
+        shipments_df = execute_query(shipments_sql)
+        
+        # Query: Get refunds count and lost revenue per SKU
+        if revenue_col:
+            refunds_sql = f"""
+            SELECT 
+                "{sku_col}" as sku,
+                COUNT(*) as refunds,
+                COALESCE(SUM(ABS({revenue_col})), 0) as lost_revenue
+            FROM sales
+            WHERE "{txn_col}" = 'Refund' AND {date_filter}
+            GROUP BY "{sku_col}"
+            """
+        else:
+            refunds_sql = f"""
+            SELECT 
+                "{sku_col}" as sku,
+                COUNT(*) as refunds,
+                0 as lost_revenue
+            FROM sales
+            WHERE "{txn_col}" = 'Refund' AND {date_filter}
+            GROUP BY "{sku_col}"
+            """
+        
+        refunds_df = execute_query(refunds_sql)
+        
+        # Merge dataframes
+        if shipments_df.empty:
+            return {"data": []}
+        
+        shipments_df['sku'] = shipments_df['sku'].astype(str).str.strip()
+        if not refunds_df.empty:
+            refunds_df['sku'] = refunds_df['sku'].astype(str).str.strip()
+            merged_df = shipments_df.merge(refunds_df, on='sku', how='left')
+        else:
+            merged_df = shipments_df.copy()
+            merged_df['refunds'] = 0
+            merged_df['lost_revenue'] = 0.0
+        
+        merged_df['refunds'] = merged_df['refunds'].fillna(0).astype(int)
+        merged_df['lost_revenue'] = merged_df['lost_revenue'].fillna(0.0).astype(float)
+        
+        # Calculate refund percentage
+        merged_df['refund_percentage'] = merged_df.apply(
+            lambda row: (row['refunds'] / row['units_sold'] * 100) if row['units_sold'] > 0 else 0.0,
+            axis=1
+        )
+        
+        # Filter products with refunds > 0 and sort by refund count (descending)
+        result_df = merged_df[merged_df['refunds'] > 0].copy()
+        result_df = result_df.sort_values('refunds', ascending=False).head(limit)
+        
+        # Format results
+        data = []
+        for _, row in result_df.iterrows():
+            data.append({
+                'sku': str(row['sku']),
+                'units_sold': int(row['units_sold']),
+                'refunds': int(row['refunds']),
+                'refund_percentage': round(float(row['refund_percentage']), 2),
+                'lost_revenue': round(float(row['lost_revenue']), 2)
+            })
+        
+        logger.info(f"Returning {len(data)} products with refund data")
+        
+        return {"data": data}
+    
+    except Exception as e:
+        logger.error(f"Error getting refunds data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"data": []}
+
+
+def get_cancellations_data(
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Get cancellations data for Product Quality Issues dashboard.
+    
+    Calculates cancellation percentage per SKU.
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        limit: Number of products to return (default: 10)
+    
+    Returns:
+        Dictionary with:
+        - data: List of products with cancellation metrics
+        Each product: {
+            "sku": "...",
+            "units_ordered": 100,
+            "cancelled": 10,
+            "cancel_percentage": 10.0
+        }
+    """
+    if not table_exists('sales'):
+        return {"data": []}
+    
+    try:
+        # Detect column names
+        column_info = execute_query("DESCRIBE sales")
+        
+        sku_columns = ['sku', 'Sku', 'SKU']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        if not sku_col or not txn_col or not date_col:
+            logger.warning("Required columns not found for cancellations data")
+            return {"data": []}
+        
+        # Handle date column type
+        needs_cast = False
+        if date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                needs_cast = True
+        
+        date_filter = f'CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\'' if needs_cast else f'"{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+        
+        # Query: Get shipments count per SKU
+        shipments_sql = f"""
+        SELECT 
+            "{sku_col}" as sku,
+            COUNT(*) as shipments
+            FROM sales
+        WHERE "{txn_col}" = 'Shipment' AND {date_filter}
+        GROUP BY "{sku_col}"
+        """
+        
+        shipments_df = execute_query(shipments_sql)
+        
+        # Query: Get cancellations count per SKU
+        cancellations_sql = f"""
+        SELECT 
+            "{sku_col}" as sku,
+            COUNT(*) as cancelled
+            FROM sales
+        WHERE "{txn_col}" = 'Cancel' AND {date_filter}
+        GROUP BY "{sku_col}"
+        """
+        
+        cancellations_df = execute_query(cancellations_sql)
+        
+        # Merge dataframes
+        if shipments_df.empty and cancellations_df.empty:
+            return {"data": []}
+        
+        # Combine shipments and cancellations to get units_ordered
+        if not shipments_df.empty:
+            shipments_df['sku'] = shipments_df['sku'].astype(str).str.strip()
+            merged_df = shipments_df.copy()
+        else:
+            # If no shipments, create empty dataframe with SKU column
+            if not cancellations_df.empty:
+                cancellations_df['sku'] = cancellations_df['sku'].astype(str).str.strip()
+                merged_df = pd.DataFrame({'sku': cancellations_df['sku'].unique(), 'shipments': 0})
+            else:
+                return {"data": []}
+        
+        if not cancellations_df.empty:
+            cancellations_df['sku'] = cancellations_df['sku'].astype(str).str.strip()
+            merged_df = merged_df.merge(cancellations_df, on='sku', how='outer')
+        else:
+            merged_df['cancelled'] = 0
+        
+        merged_df['shipments'] = merged_df['shipments'].fillna(0).astype(int)
+        merged_df['cancelled'] = merged_df['cancelled'].fillna(0).astype(int)
+        
+        # Calculate units_ordered = shipments + cancellations
+        merged_df['units_ordered'] = merged_df['shipments'] + merged_df['cancelled']
+        
+        # Calculate cancel percentage
+        merged_df['cancel_percentage'] = merged_df.apply(
+            lambda row: (row['cancelled'] / row['units_ordered'] * 100) if row['units_ordered'] > 0 else 0.0,
+            axis=1
+        )
+        
+        # Filter products with cancellations > 0 and sort by cancelled count (descending)
+        result_df = merged_df[merged_df['cancelled'] > 0].copy()
+        result_df = result_df.sort_values('cancelled', ascending=False).head(limit)
+        
+        # Format results
+        data = []
+        for _, row in result_df.iterrows():
+            data.append({
+                'sku': str(row['sku']),
+                'units_ordered': int(row['units_ordered']),
+                'cancelled': int(row['cancelled']),
+                'cancel_percentage': round(float(row['cancel_percentage']), 2)
+            })
+        
+        logger.info(f"Returning {len(data)} products with cancellation data")
+        
+        return {"data": data}
+    
+    except Exception as e:
+        logger.error(f"Error getting cancellations data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"data": []}
+
+
+def get_free_replacements_data(
+    start_date: str,
+    end_date: str,
+    limit: int = 10,
+) -> Dict[str, Any]:
+    """
+    Get free replacements data for Product Quality Issues dashboard.
+    
+    Calculates replacement loss per SKU based on ASIN lookup.
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        limit: Number of products to return (default: 10)
+    
+    Returns:
+        Dictionary with:
+        - data: List of products with replacement metrics
+        Each product: {
+            "sku": "...",
+            "replacements": 5,
+            "total_loss": 10000.0
+        }
+    """
+    if not table_exists('sales'):
+        return {"data": []}
+    
+    try:
+        # Detect column names
+        column_info = execute_query("DESCRIBE sales")
+        
+        sku_columns = ['sku', 'Sku', 'SKU']
+        asin_columns = ['asin', 'Asin', 'ASIN', 'Amazon ASIN']
+        txn_columns = ['Transaction Type', 'transaction_type']
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        revenue_columns = ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']
+        shipping_columns = ['shipping_loss_calc', 'shipping_amount', 'Shipping Amount']
+        
+        sku_col = None
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        asin_col = None
+        for col in asin_columns:
+            if col in column_info['column_name'].values:
+                asin_col = col
+                break
+        
+        txn_col = None
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        date_col = None
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        revenue_col = None
+        for col in revenue_columns:
+            if col in column_info['column_name'].values:
+                revenue_col = col
+                break
+        
+        shipping_col = None
+        for col in shipping_columns:
+            if col in column_info['column_name'].values:
+                shipping_col = col
+                break
+        
+        if not sku_col or not txn_col or not date_col:
+            logger.warning("Required columns not found for free replacements data")
+            return {"data": []}
+        
+        if not asin_col:
+            logger.warning("ASIN column not found - cannot calculate replacement loss")
+            return {"data": []}
+        
+        # Handle date column type
+        needs_cast = False
+        if date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                needs_cast = True
+        
+        date_filter = f'CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\'' if needs_cast else f'"{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+        
+        # Query: Get free replacements with ASIN
+        replacements_sql = f"""
+        SELECT 
+            "{sku_col}" as sku,
+            "{asin_col}" as asin,
+            COUNT(*) as replacement_count
+        FROM sales
+        WHERE "{txn_col}" = 'FreeReplacement' AND {date_filter}
+            AND "{asin_col}" IS NOT NULL
+            AND TRIM("{asin_col}") != ''
+        GROUP BY "{sku_col}", "{asin_col}"
+        """
+        
+        replacements_df = execute_query(replacements_sql)
+        
+        if replacements_df.empty:
+            return {"data": []}
+        
+        # Query: Get shipment data with ASIN, invoice_amount, shipping_amount
+        # We need to lookup the original shipment for each ASIN to get pricing
+        shipment_select = f'COALESCE(AVG(ABS({revenue_col})), 0)' if revenue_col else '0'
+        shipping_select = f'COALESCE(AVG(ABS({shipping_col})), 0)' if shipping_col else '0'
+        
+        shipments_sql = f"""
+        SELECT 
+            "{asin_col}" as asin,
+            {shipment_select} as invoice_amount,
+            {shipping_select} as shipping_amount
+        FROM sales
+        WHERE "{txn_col}" = 'Shipment' AND {date_filter}
+            AND "{asin_col}" IS NOT NULL
+            AND TRIM("{asin_col}") != ''
+        GROUP BY "{asin_col}"
+        """
+        
+        shipments_df = execute_query(shipments_sql)
+        
+        # Merge replacements with shipment pricing data
+        replacements_df['asin'] = replacements_df['asin'].astype(str).str.strip()
+        if not shipments_df.empty:
+            shipments_df['asin'] = shipments_df['asin'].astype(str).str.strip()
+            merged_df = replacements_df.merge(shipments_df, on='asin', how='left')
+        else:
+            merged_df = replacements_df.copy()
+            merged_df['invoice_amount'] = 0.0
+            merged_df['shipping_amount'] = 0.0
+        
+        merged_df['invoice_amount'] = merged_df['invoice_amount'].fillna(0.0).astype(float)
+        merged_df['shipping_amount'] = merged_df['shipping_amount'].fillna(0.0).astype(float)
+        
+        # Calculate loss per unit: (2 × invoice_amount) + shipping_amount
+        merged_df['loss_per_unit'] = (2 * merged_df['invoice_amount']) + merged_df['shipping_amount']
+        
+        # Calculate total loss per replacement
+        merged_df['total_loss_per_replacement'] = merged_df['loss_per_unit'] * merged_df['replacement_count']
+        
+        # Group by SKU and sum
+        sku_losses = merged_df.groupby('sku').agg({
+            'replacement_count': 'sum',
+            'total_loss_per_replacement': 'sum'
+        }).reset_index()
+        
+        sku_losses.columns = ['sku', 'replacements', 'total_loss']
+        
+        # Sort by total_loss descending and get top N
+        result_df = sku_losses.sort_values('total_loss', ascending=False).head(limit)
+        
+        # Format results
+        data = []
+        for _, row in result_df.iterrows():
+            data.append({
+                'sku': str(row['sku']),
+                'replacements': int(row['replacements']),
+                'total_loss': round(float(row['total_loss']), 2)
+            })
+        
+        logger.info(f"Returning {len(data)} products with free replacement data")
+        
+        return {"data": data}
+    
+    except Exception as e:
+        logger.error(f"Error getting free replacements data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"data": []}
 
 
 def get_skus_by_region(

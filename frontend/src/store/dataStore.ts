@@ -66,7 +66,12 @@ interface DataStore {
   skuPerformance: any[] | null;
   insights: InsightType[] | null;
   regionRevenue: RegionRevenue[] | null;
-  moversDecliners: { movers: MoverDeclinerItem[]; decliners: MoverDeclinerItem[] } | null;
+  moversDecliners: { 
+    movers: MoverDeclinerItem[]; 
+    decliners: MoverDeclinerItem[];
+    label?: string;
+    granularity?: string;
+  } | null;
 
   // Date range
   dateRange: DateRange;
@@ -296,6 +301,8 @@ export const useDataStore = create<DataStore>((set) => ({
           moversDecliners: {
             movers: response.movers || [],
             decliners: response.decliners || [],
+            label: response.label,
+            granularity: response.granularity,
           },
           moversDeclinersLoading: false,
         });
