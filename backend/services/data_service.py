@@ -2,13 +2,112 @@
 Data Service - Handle raw transaction data queries
 """
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 from io import BytesIO
 from core.database import execute_query, table_exists
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def detect_order_id_column(column_info: pd.DataFrame) -> Optional[str]:
+    """
+    Detect the column that contains order IDs.
+    
+    Prioritizes "Order Id" column and explicitly excludes "Invoice Number".
+    
+    Args:
+        column_info: DataFrame from DESCRIBE sales query
+        
+    Returns:
+        Column name that contains order IDs, or None if not found
+    """
+    available_cols = list(column_info['column_name'].values)
+    
+    logger.info(f"Available columns for order_id detection: {available_cols}")
+    
+    # EXPLICITLY check for "Order Id" first (with lowercase 'd')
+    # This is the column that contains real order IDs like "PM02-190", "MAA4-154"
+    if 'Order Id' in available_cols:
+        logger.info("Found 'Order Id' column - using it for order_id")
+        return 'Order Id'
+    
+    # Then check for "Order ID" (with uppercase 'D')
+    if 'Order ID' in available_cols:
+        logger.info("Found 'Order ID' column - using it for order_id")
+        return 'Order ID'
+    
+    # Then check for lowercase "order_id"
+    if 'order_id' in available_cols:
+        logger.info("Found 'order_id' column - using it for order_id")
+        return 'order_id'
+    
+    # Check for other order-related columns (but NOT "Invoice Number")
+    order_id_candidates = []
+    priority_columns = ['order_number', 'Order Number']
+    for col in priority_columns:
+        if col in available_cols:
+            order_id_candidates.append(col)
+    
+    # Also check for any column with "order" in the name (case-insensitive)
+    # EXPLICITLY EXCLUDE "Invoice Number" and any column with "invoice" in the name
+    for col in available_cols:
+        col_lower = col.lower()
+        if 'order' in col_lower and col not in order_id_candidates:
+            # Skip columns that are clearly not order IDs
+            # EXPLICITLY EXCLUDE "Invoice Number" and any invoice-related columns
+            if 'date' not in col_lower and 'amount' not in col_lower and 'invoice' not in col_lower:
+                order_id_candidates.append(col)
+    
+    # If we have candidates, try to find the one with real order IDs
+    if order_id_candidates:
+        # Try each candidate by sampling data
+        candidate_cols = [f'"{c}"' for c in order_id_candidates[:5]]
+        sample_sql = f'SELECT {", ".join(candidate_cols)} FROM sales LIMIT 10'
+        try:
+            sample_df = execute_query(sample_sql)
+            if not sample_df.empty:
+                # Order IDs can be in various formats:
+                # - Amazon format: "171-1269513-1525149" (numbers-dashes-numbers)
+                # - Other formats: "PM02-190", "MAA4-154", "LK01-129" (letters-numbers-dashes-numbers)
+                # Pattern: alphanumeric-dashes-alphanumeric (flexible)
+                order_id_pattern = re.compile(r'^[A-Za-z0-9]+-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$')
+                
+                for candidate in order_id_candidates:
+                    if candidate in sample_df.columns:
+                        # Check if this column has order ID format
+                        sample_values = sample_df[candidate].dropna().astype(str).head(10)
+                        
+                        # Count valid order IDs (format: alphanumeric-dashes-alphanumeric)
+                        valid_id_count = sum(1 for val in sample_values if order_id_pattern.match(str(val).strip()))
+                        
+                        # Count synthetic IDs (start with "UNKNOWN")
+                        synthetic_id_count = sum(1 for val in sample_values if str(val).strip().startswith('UNKNOWN'))
+                        
+                        # Prefer columns with valid order IDs and avoid columns with synthetic IDs
+                        if valid_id_count >= 2 or (valid_id_count > 0 and synthetic_id_count == 0):
+                            logger.info(f"Selected order_id column '{candidate}' (contains valid order IDs: {valid_id_count}/{len(sample_values)})")
+                            return candidate
+                
+                # If no column matched order ID pattern, use first priority column
+                logger.info(f"Using first available order_id column '{order_id_candidates[0]}'")
+                return order_id_candidates[0]
+        except Exception as e:
+            logger.warning(f"Could not sample data to detect order_id column: {e}")
+            # Fallback to first candidate
+            return order_id_candidates[0] if order_id_candidates else None
+    
+    # Final fallback: check for any order-related column (but NOT "Invoice Number")
+    for col in available_cols:
+        col_lower = col.lower()
+        if 'order' in col_lower and 'invoice' not in col_lower and 'date' not in col_lower and 'amount' not in col_lower:
+            logger.info(f"Using fallback order_id column '{col}'")
+            return col
+    
+    logger.error("Could not find any order_id column (excluding Invoice Number)")
+    return None
 
 
 def get_transactions(
@@ -49,17 +148,51 @@ def get_transactions(
         date_col = None
         quantity_col = None
         
-        order_id_columns = ['order_id', 'Invoice Number', 'Order ID']
+        # Use helper function to detect order_id column
+        order_id_col = detect_order_id_column(column_info)
+        
+        # DEBUG: Log which column was selected
+        logger.info(f"🔍 DEBUG: Selected order_id column: '{order_id_col}'")
+        print(f"\n🔍 DEBUG: Selected order_id column: '{order_id_col}'\n")
+        
+        # DEBUG: Log all available columns
+        available_cols = list(column_info['column_name'].values)
+        logger.info(f"🔍 DEBUG: All available columns: {available_cols}")
+        print(f"🔍 DEBUG: All available columns: {available_cols}\n")
+        
+        # DEBUG: Check if "Order Id" and "Invoice Number" exist
+        if 'Order Id' in available_cols:
+            logger.info("✅ DEBUG: 'Order Id' column EXISTS in database")
+            print("✅ DEBUG: 'Order Id' column EXISTS in database\n")
+        else:
+            logger.warning("⚠️ DEBUG: 'Order Id' column NOT FOUND in database")
+            print("⚠️ DEBUG: 'Order Id' column NOT FOUND in database\n")
+        
+        if 'Invoice Number' in available_cols:
+            logger.warning("⚠️ DEBUG: 'Invoice Number' column EXISTS in database")
+            print("⚠️ DEBUG: 'Invoice Number' column EXISTS in database\n")
+        else:
+            logger.info("✅ DEBUG: 'Invoice Number' column NOT FOUND in database")
+            print("✅ DEBUG: 'Invoice Number' column NOT FOUND in database\n")
+        
+        # DEBUG: Sample data from both columns if they exist
+        if 'Order Id' in available_cols and 'Invoice Number' in available_cols:
+            try:
+                sample_sql = 'SELECT "Order Id", "Invoice Number" FROM sales LIMIT 5'
+                sample_df = execute_query(sample_sql)
+                if not sample_df.empty:
+                    logger.info(f"🔍 DEBUG: Sample data from 'Order Id': {sample_df['Order Id'].head(3).tolist()}")
+                    logger.info(f"🔍 DEBUG: Sample data from 'Invoice Number': {sample_df['Invoice Number'].head(3).tolist()}")
+                    print(f"🔍 DEBUG: Sample data from 'Order Id': {sample_df['Order Id'].head(3).tolist()}\n")
+                    print(f"🔍 DEBUG: Sample data from 'Invoice Number': {sample_df['Invoice Number'].head(3).tolist()}\n")
+            except Exception as e:
+                logger.warning(f"Could not sample data for comparison: {e}")
+        
         sku_columns = ['sku', 'Sku', 'SKU']
         txn_columns = ['transaction_type', 'Transaction Type']
         revenue_columns = ['revenue_amount', 'Invoice Amount', 'revenue_in_inr']
         date_columns = ['order_date', 'Invoice Date', 'invoice_date', 'Order Date']
         quantity_columns = ['quantity', 'Quantity', 'units_sold']
-        
-        for col in order_id_columns:
-            if col in column_info['column_name'].values:
-                order_id_col = col
-                break
         
         for col in sku_columns:
             if col in column_info['column_name'].values:
@@ -171,13 +304,30 @@ def get_transactions(
         LIMIT {limit} OFFSET {offset}
         """
         
+        # DEBUG: Log the SQL query
+        logger.info(f"🔍 DEBUG: Executing SQL query:\n{sql}")
+        print(f"\n🔍 DEBUG: Executing SQL query:\n{sql}\n")
+        
         df = execute_query(sql)
+        
+        # DEBUG: Log sample results
+        if not df.empty:
+            logger.info(f"🔍 DEBUG: Query returned {len(df)} rows")
+            logger.info(f"🔍 DEBUG: Sample order_id values: {df['order_id'].head(5).tolist()}")
+            print(f"🔍 DEBUG: Query returned {len(df)} rows")
+            print(f"🔍 DEBUG: Sample order_id values: {df['order_id'].head(5).tolist()}\n")
         
         # Convert DataFrame to list of dicts
         data = []
         for _, row in df.iterrows():
+            order_id_value = str(row.get('order_id', ''))
+            # DEBUG: Log first few order_id values being returned
+            if len(data) < 3:
+                logger.info(f"🔍 DEBUG: Returning order_id value: '{order_id_value}'")
+                print(f"🔍 DEBUG: Returning order_id value: '{order_id_value}'\n")
+            
             data.append({
-                "order_id": str(row.get('order_id', '')),
+                "order_id": order_id_value,
                 "sku": str(row.get('sku', '')),
                 "transaction_type": str(row.get('transaction_type', '')),
                 "amount": float(row.get('amount', 0)),
@@ -378,24 +528,20 @@ def export_transactions_csv(
         # Detect column names dynamically (same logic as get_transactions)
         column_info = execute_query("DESCRIBE sales")
         
-        order_id_col = None
+        # Use helper function to detect order_id column
+        order_id_col = detect_order_id_column(column_info)
+        
         sku_col = None
         txn_col = None
         revenue_col = None
         date_col = None
         quantity_col = None
         
-        order_id_columns = ['order_id', 'Invoice Number', 'Order ID']
         sku_columns = ['sku', 'Sku', 'SKU']
         txn_columns = ['transaction_type', 'Transaction Type']
         revenue_columns = ['revenue_amount', 'Invoice Amount', 'revenue_in_inr']
         date_columns = ['order_date', 'Invoice Date', 'invoice_date', 'Order Date']
         quantity_columns = ['quantity', 'Quantity', 'units_sold']
-        
-        for col in order_id_columns:
-            if col in column_info['column_name'].values:
-                order_id_col = col
-                break
         
         for col in sku_columns:
             if col in column_info['column_name'].values:

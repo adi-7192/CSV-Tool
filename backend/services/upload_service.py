@@ -79,9 +79,14 @@ def detect_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
     # Define synonyms for each standard column
     synonyms = {
         'order_id': [
+            # PRIORITY 1: "Order Id" (with space, capital I, lowercase d) - Excel format
+            'order id',  # This matches "Order Id" from Excel (case-insensitive)
+            'order_id',  # Alternative format
+            'order number', 'order_number',
+            # PRIORITY 2: Other order-related columns
+            'transaction id', 'transaction_id',
+            # PRIORITY 3: Invoice Number (fallback only, not preferred)
             'invoice number', 'invoice_number', 'invoice no', 'invoice#',
-            'order id', 'order_id', 'order number', 'order_number',
-            'transaction id', 'transaction_id'
         ],
         'order_date': [
             'invoice date', 'invoice_date',
@@ -219,25 +224,78 @@ def detect_column_mapping(df: pd.DataFrame) -> Dict[str, str]:
                             break
             else:
                 # Normal matching for other columns
-                for original_col, col_lower in columns_lower.items():
-                    # Skip if already matched
-                    if original_col in mapping.values():
-                        continue
+                # Special handling for order_id - prioritize "Order Id" over "Invoice Number"
+                if standard_col == 'order_id':
+                    order_id_found = False
                     
-                    # Check if any synonym matches
-                    for synonym in synonym_list:
-                        if synonym in col_lower:
-                            # Special handling for revenue_amount - exclude tax columns
-                            if standard_col == 'revenue_amount':
-                                if any(tax_word in col_lower for tax_word in ['tax', 'gst', 'cgst', 'sgst', 'igst']):
-                                    continue
-                            
+                    # FIRST PRIORITY: Look for "Order Id" (with space, capital I, lowercase d)
+                    # This matches Excel column format exactly
+                    for original_col, col_lower in columns_lower.items():
+                        if col_lower == 'order id' and original_col not in mapping.values():
                             mapping[standard_col] = original_col
-                            logger.info(f"Mapped '{standard_col}' → '{original_col}'")
+                            logger.info(f"Mapped '{standard_col}' → '{original_col}' (Order Id - Excel format)")
+                            order_id_found = True
                             break
                     
-                    if standard_col in mapping:
-                        break
+                    # SECOND PRIORITY: Look for "order_id" (lowercase with underscore)
+                    if not order_id_found:
+                        for original_col, col_lower in columns_lower.items():
+                            if col_lower == 'order_id' and original_col not in mapping.values():
+                                mapping[standard_col] = original_col
+                                logger.info(f"Mapped '{standard_col}' → '{original_col}' (order_id - standard format)")
+                                order_id_found = True
+                                break
+                    
+                    # THIRD PRIORITY: Other order-related synonyms
+                    if not order_id_found:
+                        for original_col, col_lower in columns_lower.items():
+                            # Skip if already matched
+                            if original_col in mapping.values():
+                                continue
+                            
+                            # Check synonyms in order (skip "order id" and "order_id" already checked)
+                            for synonym in synonym_list:
+                                if synonym in ['order id', 'order_id']:
+                                    continue  # Already checked above
+                                
+                                if synonym in col_lower:
+                                    # EXCLUDE "Invoice Number" if "Order Id" exists anywhere in the file
+                                    if 'invoice' in col_lower:
+                                        # Check if "Order Id" exists in any column
+                                        has_order_id = any('order id' == c.lower() or 'order_id' == c.lower() 
+                                                          for c in df.columns)
+                                        if has_order_id:
+                                            logger.info(f"Skipping '{original_col}' - 'Order Id' column exists, prefer that over Invoice Number")
+                                            continue
+                                    
+                                    mapping[standard_col] = original_col
+                                    logger.info(f"Mapped '{standard_col}' → '{original_col}' (via '{synonym}')")
+                                    order_id_found = True
+                                    break
+                            
+                            if order_id_found:
+                                break
+                else:
+                    # Normal matching for other columns
+                    for original_col, col_lower in columns_lower.items():
+                        # Skip if already matched
+                        if original_col in mapping.values():
+                            continue
+                        
+                        # Check if any synonym matches
+                        for synonym in synonym_list:
+                            if synonym in col_lower:
+                                # Special handling for revenue_amount - exclude tax columns
+                                if standard_col == 'revenue_amount':
+                                    if any(tax_word in col_lower for tax_word in ['tax', 'gst', 'cgst', 'sgst', 'igst']):
+                                        continue
+                                
+                                mapping[standard_col] = original_col
+                                logger.info(f"Mapped '{standard_col}' → '{original_col}'")
+                                break
+                        
+                        if standard_col in mapping:
+                            break
     
     logger.info(f"Column mapping complete: {len(mapping)} columns mapped")
     return mapping
@@ -344,14 +402,33 @@ def transform_to_standard_schema(
     
     # 4.1 Ensure missing order_id values are synthesized for reliable deduplication
     if 'order_id' in df_standard.columns:
+        # DEBUG: Log sample order_id values before checking for missing
+        sample_before = df_standard['order_id'].dropna().head(10).tolist()
+        logger.info(f"🔍 DEBUG: Sample order_id values before missing check: {sample_before}")
+        print(f"🔍 DEBUG: Sample order_id values before missing check: {sample_before}\n")
+        
         def _is_missing_order_id(val) -> bool:
             if val is None or pd.isna(val):
                 return True
             s = str(val).strip()
-            return s == '' or s.lower() in {'none', 'null'}
-
+            return s == '' or s.lower() in {'none', 'null', 'nan'}
+        
         missing_mask = df_standard['order_id'].apply(_is_missing_order_id)
-        if missing_mask.any():
+        missing_count = missing_mask.sum()
+        
+        if missing_count > 0:
+            logger.warning(f"⚠️ DEBUG: Found {missing_count} rows with missing order_id values")
+            print(f"⚠️ DEBUG: Found {missing_count} rows with missing order_id values\n")
+            
+            # DEBUG: Show which rows have missing order_id
+            missing_rows = df_standard[missing_mask].head(5)
+            if not missing_rows.empty:
+                logger.info(f"🔍 DEBUG: Sample rows with missing order_id:")
+                print(f"🔍 DEBUG: Sample rows with missing order_id:\n")
+                for idx, row in missing_rows.iterrows():
+                    logger.info(f"  Row {idx}: transaction_type={row.get('transaction_type', 'N/A')}, sku={row.get('sku', 'N/A')}")
+                    print(f"  Row {idx}: transaction_type={row.get('transaction_type', 'N/A')}, sku={row.get('sku', 'N/A')}\n")
+            
             base_index = int(uuid.uuid4().int % 1_000_000)
             count_generated = 0
             for pos, row_idx in enumerate(df_standard.index[missing_mask]):
@@ -360,9 +437,19 @@ def transform_to_standard_schema(
                 df_standard.at[row_idx, 'order_id'] = synthetic_id
                 count_generated += 1
             logger.info(f"🔧 Synthesized {count_generated} order_id values for missing IDs")
+            print(f"🔧 Synthesized {count_generated} order_id values for missing IDs\n")
+            
+            # DEBUG: Log sample order_id values after synthesis
+            sample_after = df_standard['order_id'].head(10).tolist()
+            logger.info(f"🔍 DEBUG: Sample order_id values after synthesis: {sample_after}")
+            print(f"🔍 DEBUG: Sample order_id values after synthesis: {sample_after}\n")
+            
             validation_report['warnings'].append(
                 f"{count_generated} rows had missing order_id; synthetic IDs generated to enable deduplication"
             )
+        else:
+            logger.info("✅ DEBUG: All rows have valid order_id values - no synthesis needed")
+            print("✅ DEBUG: All rows have valid order_id values - no synthesis needed\n")
 
     # 4. Add data lineage columns
     df_standard['source_file'] = filename
@@ -561,10 +648,50 @@ def process_csv_upload(
         # Step 1: Read CSV
         df_raw = pd.read_csv(pd.io.common.BytesIO(file_content))
         logger.info(f"📄 CSV loaded: {len(df_raw)} rows, {len(df_raw.columns)} columns")
-        logger.info(f"📋 CSV columns: {list(df_raw.columns)[:10]}...")
+        logger.info(f"📋 CSV columns: {list(df_raw.columns)}")
+        print(f"\n🔍 DEBUG UPLOAD: CSV loaded with {len(df_raw)} rows")
+        print(f"🔍 DEBUG UPLOAD: CSV columns: {list(df_raw.columns)}\n")
+        
+        # DEBUG: Check if "Order Id" exists in CSV
+        if 'Order Id' in df_raw.columns:
+            logger.info("✅ DEBUG: 'Order Id' column EXISTS in CSV file")
+            print("✅ DEBUG: 'Order Id' column EXISTS in CSV file\n")
+            # Sample data from "Order Id" column
+            sample_order_ids = df_raw['Order Id'].dropna().head(5).tolist()
+            logger.info(f"🔍 DEBUG: Sample 'Order Id' values from CSV: {sample_order_ids}")
+            print(f"🔍 DEBUG: Sample 'Order Id' values from CSV: {sample_order_ids}\n")
+        else:
+            logger.warning("⚠️ DEBUG: 'Order Id' column NOT FOUND in CSV file")
+            print("⚠️ DEBUG: 'Order Id' column NOT FOUND in CSV file\n")
+            # Check for similar column names
+            order_id_like = [col for col in df_raw.columns if 'order' in col.lower() or 'id' in col.lower()]
+            if order_id_like:
+                logger.info(f"🔍 DEBUG: Found similar columns: {order_id_like}")
+                print(f"🔍 DEBUG: Found similar columns: {order_id_like}\n")
         
         # Step 2: Detect column mapping
         column_mapping = detect_column_mapping(df_raw)
+        
+        # DEBUG: Log the column mapping
+        logger.info(f"🔍 DEBUG: Column mapping result: {column_mapping}")
+        print(f"\n🔍 DEBUG: Column mapping result: {column_mapping}\n")
+        
+        # DEBUG: Check if "Order Id" was mapped to order_id
+        if 'order_id' in column_mapping:
+            mapped_col = column_mapping['order_id']
+            logger.info(f"✅ DEBUG: 'order_id' mapped from CSV column: '{mapped_col}'")
+            print(f"✅ DEBUG: 'order_id' mapped from CSV column: '{mapped_col}'\n")
+            
+            # Check if the mapped column is "Order Id"
+            if mapped_col == 'Order Id':
+                logger.info("✅ DEBUG: Correctly mapped 'Order Id' → 'order_id'")
+                print("✅ DEBUG: Correctly mapped 'Order Id' → 'order_id'\n")
+            else:
+                logger.warning(f"⚠️ DEBUG: 'order_id' mapped from '{mapped_col}' instead of 'Order Id'")
+                print(f"⚠️ DEBUG: 'order_id' mapped from '{mapped_col}' instead of 'Order Id'\n")
+        else:
+            logger.error("❌ DEBUG: 'order_id' NOT FOUND in column mapping!")
+            print("❌ DEBUG: 'order_id' NOT FOUND in column mapping!\n")
         
         if not column_mapping:
             return {

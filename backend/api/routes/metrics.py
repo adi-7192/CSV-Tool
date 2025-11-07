@@ -195,10 +195,12 @@ async def get_top_products_endpoint(
 
 @router.get("/revenue-by-city")
 async def get_revenue_by_city_endpoint(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     limit: int = Query(10, ge=1, le=50, description="Number of cities to return"),
 ):
     """
-    Get top cities by total revenue (all-time data, no filters).
+    Get top cities by total revenue for a specific date range.
     
     Returns:
         {
@@ -212,7 +214,7 @@ async def get_revenue_by_city_endpoint(
         }
     """
     try:
-        result = get_revenue_by_city(limit)
+        result = get_revenue_by_city(start_date, end_date, limit)
         return result
     except Exception as e:
         import logging

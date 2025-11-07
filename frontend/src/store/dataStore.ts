@@ -224,12 +224,12 @@ export const useDataStore = create<DataStore>((set) => ({
     }
   },
 
-  // Fetch region revenue (now city revenue - all-time data)
+  // Fetch region revenue (now city revenue - filtered by date range)
   fetchRegionRevenue: async (start: string, end: string) => {
     set({ regionLoading: true, error: null });
     try {
-      console.log(`[DataStore] Fetching revenue by city (all-time data)`);
-      const response = await regionService.getRevenueByCity(10);
+      console.log(`[DataStore] Fetching revenue by city for date range: ${start} to ${end}`);
+      const response = await regionService.getRevenueByCity(start, end, 10);
       console.log('[DataStore] City revenue response:', response);
       if (response) {
         const data = response.data || [];

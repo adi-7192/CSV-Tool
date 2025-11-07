@@ -337,16 +337,22 @@ export interface RegionSKUsResponse {
 
 export const regionService = {
   /**
-   * Get revenue by city (all-time data, no filters)
+   * Get revenue by city for a specific date range
+   * @param startDate - Start date (YYYY-MM-DD) - optional, if not provided uses all-time data
+   * @param endDate - End date (YYYY-MM-DD) - optional, if not provided uses all-time data
    * @param limit - Number of cities to return (default: 10)
    * @returns City revenue data
    */
   getRevenueByCity: async (
+    startDate?: string,
+    endDate?: string,
     limit = 10
   ): Promise<RegionRevenueResponse | null> => {
     try {
       const url = '/api/metrics/revenue-by-city';
-      const params = { limit };
+      const params: any = { limit };
+      if (startDate) params.start_date = startDate;
+      if (endDate) params.end_date = endDate;
       console.log(`[API] Fetching revenue by city: ${url}`, params);
       const response = await apiClient.get<RegionRevenueResponse>(url, { params });
       console.log('[API] City revenue response:', response.data);

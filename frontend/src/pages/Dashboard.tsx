@@ -876,6 +876,8 @@ const Dashboard: React.FC = () => {
                             height: '550px',
                             overflowY: 'auto',
                             flex: 1,
+                            display: 'flex',
+                            flexDirection: 'column',
                           }}
                         >
                           {qualityIssuesLoading ? (
@@ -932,12 +934,14 @@ const Dashboard: React.FC = () => {
                                   render: (revenue: number) => formatCurrency(revenue),
                                 },
                               ]}
-                                pagination={false}
-                                size="small"
-                                rowKey="sku"
-                              />
+                              pagination={false}
+                              size="small"
+                              rowKey="sku"
+                              scroll={{ y: 'calc(550px - 40px)' }}
+                              style={{ flex: 1 }}
+                            />
                             ) : (
-                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                 No refunds data available
                               </div>
                             )
@@ -986,12 +990,14 @@ const Dashboard: React.FC = () => {
                                   },
                                 },
                               ]}
-                                pagination={false}
-                                size="small"
-                                rowKey="sku"
-                              />
+                              pagination={false}
+                              size="small"
+                              rowKey="sku"
+                              scroll={{ y: 'calc(550px - 40px)' }}
+                              style={{ flex: 1 }}
+                            />
                             ) : (
-                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                 No cancellations data available
                               </div>
                             )
@@ -1055,12 +1061,14 @@ const Dashboard: React.FC = () => {
                                   },
                                 },
                               ]}
-                                pagination={false}
-                                size="small"
-                                rowKey="sku"
-                              />
+                              pagination={false}
+                              size="small"
+                              rowKey="sku"
+                              scroll={{ y: 'calc(550px - 40px)' }}
+                              style={{ flex: 1 }}
+                            />
                             ) : (
-                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                              <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                 No replacements data available
                               </div>
                             )
@@ -1126,58 +1134,61 @@ const Dashboard: React.FC = () => {
                             height: '550px',
                             overflowY: 'auto',
                             flex: 1,
+                            display: 'flex',
+                            flexDirection: 'column',
                           }}
                         >
                           {topProductsLoading ? (
                             <Skeleton active paragraph={{ rows: 6 }} />
                           ) : topProductsPerformance && topProductsPerformance.products.length > 0 ? (
                             <Table
-                            dataSource={topProductsPerformance.products.map((product) => ({
-                              ...product,
-                              key: product.sku,
-                            }))}
-                            columns={[
-                              {
-                                title: 'Product',
-                                dataIndex: 'sku',
-                                key: 'sku',
-                                width: 120,
-                                render: (sku: string) => (
-                                  <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
-                                ),
-                              },
-                              ...topProductsPerformance.period_labels.map((label, idx) => ({
-                                title: label,
-                                key: `period_${idx}`,
-                                align: 'right' as const,
-                                render: (_: any, record: TopProductPerformance) => {
-                                  const volume = record.periods[idx];
-                                  const growth = record.growth_rates[idx];
-                                  return (
-                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
-                                      <span style={{ fontWeight: '500', color: '#030712' }}>{volume}</span>
-                                      {growth !== null && growth !== undefined && (
-                                        <span
-                                          style={{
-                                            fontSize: '11px',
-                                            color: growth >= 0 ? '#10B981' : '#DC2626',
-                                            fontWeight: '500',
-                                          }}
-                                        >
-                                          {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
-                                        </span>
-                                      )}
-                                    </div>
-                                  );
+                              dataSource={topProductsPerformance.products.map((product) => ({
+                                ...product,
+                                key: product.sku,
+                              }))}
+                              columns={[
+                                {
+                                  title: 'Product',
+                                  dataIndex: 'sku',
+                                  key: 'sku',
+                                  width: 120,
+                                  render: (sku: string) => (
+                                    <span style={{ fontWeight: '500', color: '#030712' }}>{sku}</span>
+                                  ),
                                 },
-                              })),
-                            ]}
+                                ...topProductsPerformance.period_labels.map((label, idx) => ({
+                                  title: label,
+                                  key: `period_${idx}`,
+                                  align: 'right' as const,
+                                  render: (_: any, record: TopProductPerformance) => {
+                                    const volume = record.periods[idx];
+                                    const growth = record.growth_rates[idx];
+                                    return (
+                                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                                        <span style={{ fontWeight: '500', color: '#030712' }}>{volume}</span>
+                                        {growth !== null && growth !== undefined && (
+                                          <span
+                                            style={{
+                                              fontSize: '11px',
+                                              color: growth >= 0 ? '#10B981' : '#DC2626',
+                                              fontWeight: '500',
+                                            }}
+                                          >
+                                            {growth >= 0 ? '+' : ''}{growth.toFixed(1)}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    );
+                                  },
+                                })),
+                              ]}
                               pagination={false}
                               size="small"
-                              scroll={{ x: 'max-content' }}
+                              scroll={{ x: 'max-content', y: 'calc(550px - 40px)' }}
+                              style={{ flex: 1 }}
                             />
                           ) : (
-                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B' }}>
+                            <div style={{ textAlign: 'center', padding: '24px', color: '#64748B', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                               No performance data available
                             </div>
                           )}

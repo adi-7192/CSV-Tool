@@ -733,6 +733,9 @@ def get_daily_trends(
     """
     Get daily trends with revenue, refunds, and orders grouped by date
     
+    Groups data by DATE (not individual transactions) to create smooth trend lines.
+    Sums revenue for each day to remove noise from spiky individual transaction data.
+    
     Args:
         start_date: Start date (YYYY-MM-DD)
         end_date: End date (YYYY-MM-DD)
@@ -740,8 +743,8 @@ def get_daily_trends(
     Returns:
         Dictionary with:
         - data: List of daily records with date, revenue, refunds, orders
-        - revenue_trend: List of {date, value} for revenue chart
-        - refund_trend: List of {date, value} for refund chart
+        - revenue_trend: List of {date, value} for revenue chart (smooth, grouped by day)
+        - refund_trend: List of {date, value} for refund chart (smooth, grouped by day)
         - count: Number of days
     """
     if not table_exists('sales'):
@@ -757,7 +760,7 @@ def get_daily_trends(
         column_info = execute_query("DESCRIBE sales")
         
         # Find date column
-        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        date_columns = ['order_date', 'Invoice Date', 'invoice_date', 'Order Date']
         date_col = None
         for col in date_columns:
             if col in column_info['column_name'].values:
@@ -778,14 +781,14 @@ def get_daily_trends(
         
         # Find revenue column
         revenue_col = None
-        for col in ['revenue_calc', 'revenue_amount', 'Invoice Amount', 'revenue_in_inr']:
+        for col in ['revenue_amount', 'revenue_calc', 'Invoice Amount', 'revenue_in_inr']:
             if col in column_info['column_name'].values:
                 revenue_col = col
                 break
         
         # Find transaction type column
         txn_col = None
-        for col in ['Transaction Type', 'transaction_type']:
+        for col in ['transaction_type', 'Transaction Type']:
             if col in column_info['column_name'].values:
                 txn_col = col
                 break
@@ -805,13 +808,15 @@ def get_daily_trends(
                 'count': 0,
             }
         
-        # Build date filter
+        # Build date filter and grouping
+        # CRITICAL: Always use DATE() function to group by date only (removes time component)
+        # This ensures smooth trend lines with one point per day
         if needs_cast:
             date_filter = f"CAST(\"{date_col}\" AS DATE) >= '{start_date}' AND CAST(\"{date_col}\" AS DATE) <= '{end_date}'"
-            date_group = f"CAST(\"{date_col}\" AS DATE)"
+            date_group = f"DATE(CAST(\"{date_col}\" AS DATE))"
         else:
             date_filter = f"\"{date_col}\" >= '{start_date}' AND \"{date_col}\" <= '{end_date}'"
-            date_group = f"\"{date_col}\""
+            date_group = f"DATE(\"{date_col}\")"
         
         # Query for daily metrics
         # Revenue from Shipments
@@ -1335,14 +1340,20 @@ def get_top_products(
         return pd.DataFrame(columns=['sku', 'asin', 'units_sold', 'revenue', 'refund_ratio', 'rating', 'trend'])
 
 
-def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
+def get_revenue_by_city(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 10
+) -> Dict[str, Any]:
     """
-    Get top cities by total revenue (all-time data, no filters).
+    Get top cities by total revenue for a specific date range.
     
     Uses "Ship To City" column with case-insensitive normalization.
     Handles city name variations (Bangalore/Bengaluru, Delhi/New Delhi, etc.).
     
     Args:
+        start_date: Start date (YYYY-MM-DD) - if None, uses all-time data
+        end_date: End date (YYYY-MM-DD) - if None, uses all-time data
         limit: Number of cities to return (default: 10)
     
     Returns:
@@ -1484,8 +1495,35 @@ def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
                 "total_revenue": 0.0
             }
         
+        # Find date column for filtering
+        date_col = None
+        date_columns = ['Invoice Date', 'invoice_date', 'order_date', 'Order Date']
+        for col in date_columns:
+            if col in available_cols:
+                date_col = col
+                logger.info(f"Found date column: '{date_col}'")
+                break
+        
+        # Build date filter if dates are provided
+        date_filter = ""
+        if start_date and end_date and date_col:
+            # Handle date column type (VARCHAR vs DATE)
+            needs_cast = False
+            if date_col:
+                col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+                if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                    needs_cast = True
+            
+            if needs_cast:
+                date_filter = f'AND CAST("{date_col}" AS DATE) >= \'{start_date}\' AND CAST("{date_col}" AS DATE) <= \'{end_date}\''
+            else:
+                date_filter = f'AND "{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
+            logger.info(f"Applying date filter: {start_date} to {end_date}")
+        elif start_date or end_date:
+            logger.warning("Both start_date and end_date must be provided for date filtering")
+        
         # DEBUG: Check if we have any data
-        count_sql = f'SELECT COUNT(*) as total FROM sales WHERE "{city_col}" IS NOT NULL AND TRIM("{city_col}") != \'\''
+        count_sql = f'SELECT COUNT(*) as total FROM sales WHERE "{city_col}" IS NOT NULL AND TRIM("{city_col}") != \'\'{date_filter}'
         count_df = execute_query(count_sql)
         total_records = int(count_df['total'].iloc[0]) if not count_df.empty else 0
         logger.info(f"Total records with city data: {total_records}")
@@ -1515,7 +1553,7 @@ def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
         logger.info(f"✅ Using city column: '{city_col}' for revenue by city calculation")
         print(f"\n✅ VERIFIED: Using column '{city_col}' for city revenue\n")
         
-        # Fetch all data (no date/transaction filters)
+        # Fetch data with date filter if provided
         # Use ABS() for revenue to handle both positive and negative values
         sql = f"""
         SELECT 
@@ -1526,6 +1564,7 @@ def get_revenue_by_city(limit: int = 10) -> Dict[str, Any]:
             AND TRIM("{city_col}") != ''
             AND {revenue_col} IS NOT NULL
             AND {revenue_col} != 0
+            {date_filter}
         """
         
         logger.info(f"Fetching revenue by city - SQL: {sql}")
@@ -2131,41 +2170,41 @@ def get_movers_decliners(
             if txn_col:
                 if revenue_col == 'revenue_calc':
                     return f"""
-                    SELECT 
-                        "{sku_col}" as sku,
-                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
-                    FROM sales
-                    WHERE {date_filter}
-                    GROUP BY "{sku_col}"
-                    """
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                FROM sales
+                WHERE {date_filter}
+                GROUP BY "{sku_col}"
+                """
                 else:
                     return f"""
-                    SELECT 
-                        "{sku_col}" as sku,
-                        COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
-                    FROM sales
-                    WHERE {date_filter}
-                    GROUP BY "{sku_col}"
-                    """
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                FROM sales
+                WHERE {date_filter}
+                GROUP BY "{sku_col}"
+                """
             else:
                 if revenue_col == 'revenue_calc':
                     return f"""
-                    SELECT 
-                        "{sku_col}" as sku,
-                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
-                    FROM sales
-                    WHERE {revenue_col} > 0 AND {date_filter}
-                    GROUP BY "{sku_col}"
-                    """
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                FROM sales
+                WHERE {revenue_col} > 0 AND {date_filter}
+                GROUP BY "{sku_col}"
+                """
                 else:
                     return f"""
-                    SELECT 
-                        "{sku_col}" as sku,
-                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
-                    FROM sales
-                    WHERE {revenue_col} > 0 AND {date_filter}
-                    GROUP BY "{sku_col}"
-                    """
+                SELECT 
+                    "{sku_col}" as sku,
+                    COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                FROM sales
+                WHERE {revenue_col} > 0 AND {date_filter}
+                GROUP BY "{sku_col}"
+                """
         
         # Fetch revenue for each period
         period_revenues = {}
@@ -2496,22 +2535,22 @@ def get_top_products_performance(
                 # Fallback: count shipments
                 if txn_col:
                     sql = f"""
-                    SELECT 
-                        "{sku_col}" as sku,
-                        COUNT(*) as volume
-                    FROM sales
-                    WHERE "{txn_col}" = 'Shipment' AND {date_filter}
-                    GROUP BY "{sku_col}"
-                    """
+                SELECT 
+                    "{sku_col}" as sku,
+                    COUNT(*) as volume
+                FROM sales
+                WHERE "{txn_col}" = 'Shipment' AND {date_filter}
+                GROUP BY "{sku_col}"
+                """
                 else:
                     sql = f"""
-                    SELECT 
-                        "{sku_col}" as sku,
-                        COUNT(*) as volume
-                    FROM sales
-                    WHERE {date_filter}
-                    GROUP BY "{sku_col}"
-                    """
+                SELECT 
+                    "{sku_col}" as sku,
+                    COUNT(*) as volume
+                FROM sales
+                WHERE {date_filter}
+                GROUP BY "{sku_col}"
+                """
             
             period_df = execute_query(sql)
             if not period_df.empty:

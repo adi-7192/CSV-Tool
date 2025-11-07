@@ -22,7 +22,7 @@ const Workspace: React.FC = () => {
   // Filter states
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [selectedSKU, setSelectedSKU] = useState<string | undefined>(undefined);
-  const [selectedTransactionType, setSelectedTransactionType] = useState<string | undefined>(undefined);
+  const [selectedTransactionType, setSelectedTransactionType] = useState<string | undefined>('all');
   const [skuOptions, setSkuOptions] = useState<string[]>([]);
   const [loadingSKUs, setLoadingSKUs] = useState(false);
   
@@ -80,7 +80,7 @@ const Workspace: React.FC = () => {
         dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
         dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
         selectedSKU,
-        selectedTransactionType
+        selectedTransactionType === 'all' ? undefined : selectedTransactionType
       );
       
       if (result) {
@@ -114,7 +114,12 @@ const Workspace: React.FC = () => {
   };
 
   const handleTransactionTypeChange = (value: string | undefined) => {
-    setSelectedTransactionType(value);
+    // If "All Transactions" is selected, set to undefined to show all types
+    if (value === 'all') {
+      setSelectedTransactionType(undefined);
+    } else {
+      setSelectedTransactionType(value);
+    }
     setCurrentPage(1);
   };
 
@@ -122,7 +127,7 @@ const Workspace: React.FC = () => {
   const handleClearFilters = () => {
     setDateRange(null);
     setSelectedSKU(undefined);
-    setSelectedTransactionType(undefined);
+    setSelectedTransactionType('all');
     setCurrentPage(1);
   };
 
@@ -133,7 +138,7 @@ const Workspace: React.FC = () => {
         dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
         dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
         selectedSKU,
-        selectedTransactionType
+        selectedTransactionType === 'all' ? undefined : selectedTransactionType
       );
       message.success('CSV export started');
     } catch (error) {
@@ -210,9 +215,13 @@ const Workspace: React.FC = () => {
       dataIndex: 'order_id',
       key: 'order_id',
       width: 150,
-      render: (text: string) => (
-        <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{text}</span>
-      ),
+      render: (text: string, record: Transaction) => {
+        // Display order_id value directly from API response, no transformation
+        const orderId = record.order_id || text || '';
+        return (
+          <span style={{ fontFamily: 'monospace', fontSize: '13px' }}>{orderId}</span>
+        );
+      },
     },
     {
       title: 'SKU',
@@ -481,6 +490,7 @@ const Workspace: React.FC = () => {
               allowClear
               style={{ width: '100%' }}
               options={[
+                { label: 'All Transactions', value: 'all' },
                 { label: 'Shipment', value: 'Shipment' },
                 { label: 'Refund', value: 'Refund' },
                 { label: 'Cancellation', value: 'Cancel' },

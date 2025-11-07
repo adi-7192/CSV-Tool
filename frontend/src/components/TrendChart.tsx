@@ -200,6 +200,8 @@ const TrendChart: React.FC<TrendChartProps> = ({
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 4, fill: color }}
+                  isAnimationActive={true}
+                  animationDuration={300}
                 />
               </LineChart>
             ) : (

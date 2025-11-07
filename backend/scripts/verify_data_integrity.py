@@ -1,238 +1,28 @@
 """
-Upload API Endpoints - Handle CSV file uploads
+Data Integrity Verification Script
+
+Verifies data integrity after CSV re-upload:
+1. Count records per source file
+2. Check for duplicates
+3. Verify Order ID mapping
+4. Check revenue calculations
+5. Compare with expected values
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from typing import Dict, Any, List
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.database import get_connection, execute_query, table_exists
 import pandas as pd
+from typing import Dict, Any
 
-from services.upload_service import process_csv_upload
-from models.responses import UploadResponse
-from services.database_reset import reset_database, check_database_schema
-
-router = APIRouter()
-
-
-@router.post("/csv", response_model=UploadResponse)
-async def upload_csv(
-    file: UploadFile = File(..., description="CSV file to upload")
-):
+def verify_data_integrity() -> Dict[str, Any]:
     """
-    Upload and process CSV file
-    
-    Returns:
-        - ingestion_id: Unique ID for this upload
-        - filename: Original filename
-        - rows_uploaded: Number of rows processed
-        - duplicates_removed: Number of duplicate rows removed
-        - validation_report: Data quality report
-        - column_mapping: Detected column mapping
-    """
-    
-    # Validate file type
-    if not file.filename or not file.filename.endswith('.csv'):
-        raise HTTPException(
-            status_code=400,
-            detail="Only CSV files are supported"
-        )
-    
-    # Validate file size (100MB max)
-    file_content = await file.read()
-    
-    if len(file_content) > 100 * 1024 * 1024:  # 100MB
-        raise HTTPException(
-            status_code=400,
-            detail="File too large. Maximum size is 100MB"
-        )
-    
-    # Process upload
-    result = process_csv_upload(file_content, file.filename)
-    
-    if not result.get('success'):
-        raise HTTPException(
-            status_code=500,
-            detail=result.get('error', 'Upload processing failed')
-        )
-    
-    # Shape response to include concise quality warnings
-    return {
-        'success': True,
-        'rows_processed': result.get('rows_processed', result.get('rows_raw', 0)),
-        'rows_inserted': result.get('rows_inserted', result.get('rows_uploaded', 0)),
-        'validation_warnings': result.get('validation_warnings', []),
-        'ingestion_id': result.get('ingestion_id'),
-        'filename': result.get('filename'),
-    }
-
-
-@router.get("/history")
-async def get_upload_history():
-    """
-    Get upload history from ingestion_log table
-    
-    Returns list of uploads with metadata:
-    - ingestion_id
-    - filename
-    - uploaded_at
-    - rows_inserted
-    - date_range_start
-    - date_range_end
-    - validation_status
-    """
-    from core.database import execute_query, table_exists
-    
-    if not table_exists('ingestion_log'):
-        return {"uploads": []}
-    
-    try:
-        sql = """
-        SELECT
-            ingestion_id,
-            filename,
-            uploaded_at,
-            rows_inserted,
-            date_range_start,
-            date_range_end,
-            validation_status
-        FROM ingestion_log
-        ORDER BY uploaded_at DESC
-        LIMIT 50
-        """
-        
-        result_df = execute_query(sql)
-        
-        if result_df.empty:
-            return {"uploads": []}
-        
-        # Convert to list of dicts
-        uploads = result_df.to_dict('records')
-        
-        # Format dates as strings
-        for upload in uploads:
-            if 'uploaded_at' in upload and pd.notna(upload['uploaded_at']):
-                upload['uploaded_at'] = str(upload['uploaded_at'])
-            if 'date_range_start' in upload and pd.notna(upload['date_range_start']):
-                upload['date_range_start'] = str(upload['date_range_start'])
-            if 'date_range_end' in upload and pd.notna(upload['date_range_end']):
-                upload['date_range_end'] = str(upload['date_range_end'])
-        
-        return {"uploads": uploads}
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/multiple")
-async def upload_multiple(files: List[UploadFile] = File(...)):
-    """
-    Upload multiple CSV files
-    
-    Returns:
-        - results: List of upload results for each file
-        - total_files: Total number of files processed
-        - successful: Number of successful uploads
-        - failed: Number of failed uploads
-    """
-    results = []
-    successful = 0
-    failed = 0
-    
-    for file in files:
-        try:
-            # Validate file type
-            if not file.filename or not file.filename.endswith('.csv'):
-                results.append({
-                    'filename': file.filename,
-                    'success': False,
-                    'error': 'Only CSV files are supported'
-                })
-                failed += 1
-                continue
-            
-            # Read file content
-            file_content = await file.read()
-            
-            # Validate file size
-            if len(file_content) > 100 * 1024 * 1024:  # 100MB
-                results.append({
-                    'filename': file.filename,
-                    'success': False,
-                    'error': 'File too large. Maximum size is 100MB'
-                })
-                failed += 1
-                continue
-            
-            # Process upload
-            result = process_csv_upload(file_content, file.filename)
-            
-            if result.get('success'):
-                successful += 1
-            else:
-                failed += 1
-            
-            results.append(result)
-        
-        except Exception as e:
-            results.append({
-                'filename': file.filename,
-                'success': False,
-                'error': str(e)
-            })
-            failed += 1
-    
-    return {
-        "results": results,
-        "total_files": len(files),
-        "successful": successful,
-        "failed": failed
-    }
-
-
-@router.post("/reset-database")
-async def reset_upload_database():
-    """
-    Reset database by dropping sales table
-    
-    WARNING: This will delete ALL data!
-    
-    Use this before re-uploading CSVs to ensure standardized column names.
-    
-    Recommended workflow:
-    1. Reset database (this endpoint)
-    2. Re-upload all CSV files
-    3. Verify schema with /api/upload/check-schema
-    """
-    result = reset_database('sales')
-    
-    if not result.get('success'):
-        raise HTTPException(
-            status_code=500,
-            detail=result.get('error', 'Failed to reset database')
-        )
-    
-    return {
-        'success': True,
-        'message': result.get('message', 'Database reset complete'),
-        'warning': 'All data has been deleted. Re-upload CSV files to populate with standardized column names.'
-    }
-
-
-@router.get("/verify-data-integrity")
-async def verify_data_integrity():
-    """
-    Verify data integrity after CSV re-upload
-    
-    Checks:
-    1. Count records per source file
-    2. Check for duplicates (by order_id and business key)
-    3. Verify Order ID mapping (empty/synthetic IDs)
-    4. Check revenue calculations
-    5. Compare with expected values
+    Comprehensive data integrity verification
     
     Returns:
         dict: Verification results with issues and recommendations
     """
-    from core.database import get_connection, execute_query, table_exists
-    
     results = {
         'table_exists': False,
         'total_records': 0,
@@ -252,12 +42,24 @@ async def verify_data_integrity():
     results['table_exists'] = True
     
     try:
+        conn = get_connection()
+        
         # 1. Count total records
         total_query = "SELECT COUNT(*) as total FROM sales"
         total_df = execute_query(total_query)
         results['total_records'] = int(total_df['total'].iloc[0]) if not total_df.empty else 0
         
+        print(f"\n{'='*80}")
+        print("DATA INTEGRITY VERIFICATION")
+        print(f"{'='*80}\n")
+        print(f"✅ Table 'sales' exists")
+        print(f"📊 Total records: {results['total_records']:,}\n")
+        
         # 2. Count records per source file
+        print(f"{'='*80}")
+        print("1. RECORDS PER SOURCE FILE")
+        print(f"{'='*80}\n")
+        
         file_count_query = """
         SELECT 
             source_file,
@@ -276,23 +78,37 @@ async def verify_data_integrity():
                 file_name = row['source_file']
                 count = int(row['record_count'])
                 unique_ids = int(row['unique_order_ids'])
+                first_upload = row['first_upload']
+                last_upload = row['last_upload']
                 
                 results['records_by_file'][file_name] = {
                     'total_records': count,
                     'unique_order_ids': unique_ids,
-                    'duplicates': count - unique_ids,
-                    'first_upload': str(row['first_upload']),
-                    'last_upload': str(row['last_upload'])
+                    'first_upload': str(first_upload),
+                    'last_upload': str(last_upload)
                 }
+                
+                print(f"📄 {file_name}:")
+                print(f"   Total records: {count:,}")
+                print(f"   Unique order IDs: {unique_ids:,}")
+                print(f"   First upload: {first_upload}")
+                print(f"   Last upload: {last_upload}")
                 
                 if count != unique_ids:
                     results['warnings'].append(
                         f"⚠️  {file_name}: {count - unique_ids:,} duplicate order IDs found"
                     )
+                    print(f"   ⚠️  WARNING: {count - unique_ids:,} duplicate order IDs!")
+                print()
         else:
             results['warnings'].append("⚠️  No source_file information found")
+            print("⚠️  No source_file information found\n")
         
         # 3. Check for duplicates (by order_id + transaction_type)
+        print(f"{'='*80}")
+        print("2. DUPLICATE CHECK (order_id + transaction_type)")
+        print(f"{'='*80}\n")
+        
         duplicate_check_query = """
         SELECT 
             COUNT(*) as total_records,
@@ -315,11 +131,17 @@ async def verify_data_integrity():
                 'duplicate_business_keys': total - unique_business_keys
             }
             
+            print(f"Total records: {total:,}")
+            print(f"Unique order IDs: {unique_order_ids:,}")
+            print(f"Unique business keys (order_id + transaction_type): {unique_business_keys:,}")
+            print()
+            
             if total > unique_order_ids:
                 dup_count = total - unique_order_ids
                 results['issues'].append(
                     f"❌ DUPLICATES FOUND: {dup_count:,} records have duplicate order_ids"
                 )
+                print(f"❌ ISSUE: {dup_count:,} records have duplicate order_ids\n")
                 
                 # Show sample duplicates
                 sample_dup_query = """
@@ -336,15 +158,28 @@ async def verify_data_integrity():
                 """
                 sample_dup_df = execute_query(sample_dup_query)
                 if not sample_dup_df.empty:
-                    results['duplicate_check']['sample_duplicates'] = sample_dup_df.to_dict('records')
+                    print("Sample duplicate records:")
+                    for _, row in sample_dup_df.iterrows():
+                        print(f"   Order ID: {row['order_id']}, Type: {row['transaction_type']}, "
+                              f"Count: {row['duplicate_count']}, Files: {row['source_files']}")
+                    print()
+            else:
+                print("✅ No duplicate order IDs found\n")
             
             if total > unique_business_keys:
                 dup_bk_count = total - unique_business_keys
                 results['issues'].append(
                     f"❌ DUPLICATE BUSINESS KEYS: {dup_bk_count:,} records have duplicate (order_id + transaction_type)"
                 )
+                print(f"❌ ISSUE: {dup_bk_count:,} records have duplicate business keys\n")
+            else:
+                print("✅ No duplicate business keys found\n")
         
         # 4. Verify Order ID mapping
+        print(f"{'='*80}")
+        print("3. ORDER ID MAPPING VERIFICATION")
+        print(f"{'='*80}\n")
+        
         order_id_check_query = """
         SELECT 
             COUNT(*) as total,
@@ -368,23 +203,42 @@ async def verify_data_integrity():
                 'real_order_ids': real
             }
             
+            print(f"Total records: {total:,}")
+            print(f"Real order IDs: {real:,}")
+            print(f"Synthetic order IDs (UNKNOWN_*): {synthetic:,}")
+            print(f"Empty order IDs: {empty:,}")
+            print()
+            
             if empty > 0:
                 results['issues'].append(
                     f"❌ {empty:,} records have empty order_ids"
                 )
+                print(f"❌ ISSUE: {empty:,} records have empty order_ids\n")
+            else:
+                print("✅ No empty order IDs found\n")
             
             if synthetic > 0:
                 results['warnings'].append(
                     f"⚠️  {synthetic:,} records have synthetic order IDs (UNKNOWN_*)"
                 )
+                print(f"⚠️  WARNING: {synthetic:,} records have synthetic order IDs\n")
+                print("   This may indicate missing order IDs in source CSV files\n")
+            else:
+                print("✅ No synthetic order IDs found\n")
         
         # 5. Check revenue calculations
+        print(f"{'='*80}")
+        print("4. REVENUE CALCULATIONS")
+        print(f"{'='*80}\n")
+        
         revenue_query = """
         SELECT 
             transaction_type,
             COUNT(*) as transaction_count,
             SUM(ABS(revenue_amount)) as total_revenue,
-            AVG(ABS(revenue_amount)) as avg_revenue
+            AVG(ABS(revenue_amount)) as avg_revenue,
+            MIN(ABS(revenue_amount)) as min_revenue,
+            MAX(ABS(revenue_amount)) as max_revenue
         FROM sales
         WHERE revenue_amount IS NOT NULL
         GROUP BY transaction_type
@@ -405,17 +259,42 @@ async def verify_data_integrity():
                     'total_revenue': total,
                     'avg_revenue': avg
                 }
+                
+                print(f"{txn_type}:")
+                print(f"   Count: {count:,}")
+                print(f"   Total Revenue: ₹{total:,.2f}")
+                print(f"   Avg Revenue: ₹{avg:,.2f}")
+                print()
             
             results['revenue_check'] = revenue_by_type
             
             # Calculate gross revenue (Shipment only)
             if 'Shipment' in revenue_by_type:
                 gross_revenue = revenue_by_type['Shipment']['total_revenue']
+                print(f"📊 Gross Revenue (Shipment only): ₹{gross_revenue:,.2f}\n")
                 results['revenue_check']['gross_revenue'] = gross_revenue
             else:
                 results['warnings'].append("⚠️  No 'Shipment' transactions found")
+                print("⚠️  WARNING: No 'Shipment' transactions found\n")
         
-        # 6. Generate recommendations
+        # 6. Summary and recommendations
+        print(f"{'='*80}")
+        print("5. SUMMARY & RECOMMENDATIONS")
+        print(f"{'='*80}\n")
+        
+        if results['issues']:
+            print("❌ ISSUES FOUND:\n")
+            for issue in results['issues']:
+                print(f"   {issue}")
+            print()
+        
+        if results['warnings']:
+            print("⚠️  WARNINGS:\n")
+            for warning in results['warnings']:
+                print(f"   {warning}")
+            print()
+        
+        # Generate recommendations
         if results['issues']:
             if any('DUPLICATE' in issue for issue in results['issues']):
                 results['recommendations'].append(
@@ -438,25 +317,29 @@ async def verify_data_integrity():
         else:
             results['recommendations'].append("✅ Data integrity verified - no issues found")
         
+        if results['recommendations']:
+            print("💡 RECOMMENDATIONS:\n")
+            for rec in results['recommendations']:
+                print(f"   {rec}")
+            print()
+        
+        print(f"{'='*80}\n")
+        
     except Exception as e:
         results['issues'].append(f"❌ Error during verification: {str(e)}")
+        print(f"❌ Error: {str(e)}\n")
         import traceback
-        results['error'] = traceback.format_exc()
+        traceback.print_exc()
     
     return results
 
 
-@router.get("/check-schema")
-async def check_schema():
-    """
-    Check current database schema and report column naming issues
+if __name__ == "__main__":
+    results = verify_data_integrity()
     
-    Returns analysis showing:
-    - Whether old column names exist ("Invoice Amount", etc.)
-    - Whether standardized names exist ("revenue_amount", etc.)
-    - Whether lineage columns exist (source_file, ingestion_id, loaded_at)
-    - Recommendation for action
-    """
-    analysis = check_database_schema('sales')
-    
-    return analysis
+    # Return exit code based on issues
+    if results['issues']:
+        sys.exit(1)
+    else:
+        sys.exit(0)
+
