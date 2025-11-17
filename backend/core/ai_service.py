@@ -1,5 +1,10 @@
 """
-AI Service - Ollama LLM integration for natural language queries
+AI Service - LLM integration for natural language queries
+
+Supports multiple LLM providers:
+- OpenAI (GPT-4 Turbo) - if user has API key
+- Anthropic (Claude 3 Sonnet) - if user has API key
+- Ollama (local) - fallback
 
 Extracted from legacy/ai_assistant.py
 """
@@ -7,11 +12,14 @@ import requests
 import json
 import logging
 import re
+import time
 from typing import Dict, Optional, Tuple, Any
 from datetime import datetime
 from calendar import monthrange
 from core.config import settings
 from core.database import execute_query, get_connection
+from utils.external_llm import generate_sql_with_external_llm, calculate_ollama_confidence
+from utils.encryption import APIKeyEncryption
 
 logger = logging.getLogger(__name__)
 
@@ -184,23 +192,30 @@ def get_database_schema() -> Dict[str, Any]:
 
 
 
-def generate_sql_from_question(
+async def generate_sql_from_question(
     question: str,
     schema: Optional[Dict[str, Any]] = None,
     source_file: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str]]:
+    user_id: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str], str, float, float]:
     """
-    Generate SQL query from natural language question using Ollama LLM
+    Generate SQL query from natural language question
+    
+    Tries external LLMs first (OpenAI, Anthropic), then falls back to Ollama.
     
     Args:
         question: Natural language question
         schema: Optional database schema information (if None, will fetch)
         source_file: Optional source file filter to prevent multi-source data mixing
+        user_id: Optional user ID to check for API keys
     
     Returns:
-        Tuple of (sql_query, error_message)
-        If successful: (sql_string, None)
-        If failed: (None, error_message)
+        Tuple of (sql_query, error_message, provider, response_time, confidence)
+        - sql_query: Generated SQL or None
+        - error_message: Error message or None
+        - provider: 'openai', 'anthropic', 'ollama', or 'none'
+        - response_time: Time taken in seconds
+        - confidence: Confidence score (0.0-1.0)
     """
     # Get schema if not provided
     if schema is None:
@@ -284,6 +299,206 @@ REQUIREMENTS:
   * If year not specified, use current year (2025) as default
 
 SQL QUERY (only the query, nothing else):"""
+    
+    # Try external LLMs first if user_id is provided
+    if user_id:
+        try:
+            sql, error, provider, response_time, confidence = await generate_sql_with_external_llm(
+                prompt, user_id
+            )
+            
+            if sql and not error:
+                # Post-process external LLM SQL (same as Ollama)
+                sql = post_process_sql(sql, question, schema, source_file)
+                if sql:
+                    # Check confidence threshold for external LLMs
+                    external_llm_threshold = 0.85
+                    if confidence >= external_llm_threshold:
+                        logger.info(f"✅ External LLM ({provider}) SQL generation successful (response_time: {response_time:.2f}s, confidence: {confidence:.2f})")
+                        return sql, None, provider, response_time, confidence
+                    else:
+                        logger.warning(f"External LLM ({provider}) confidence {confidence:.2f} below threshold {external_llm_threshold}, falling back to Ollama")
+                else:
+                    logger.warning(f"External LLM SQL post-processing failed, falling back to Ollama")
+            else:
+                # Log the specific error from external LLM
+                if error:
+                    logger.warning(f"External LLM failed: {error}, falling back to Ollama")
+                else:
+                    logger.warning(f"External LLM returned no SQL, falling back to Ollama")
+        except Exception as e:
+            logger.error(f"External LLM call exception: {str(e)}, falling back to Ollama")
+    
+    # Fallback to Ollama
+    logger.info(f"Ollama query started: {question}")
+    sql, error, provider, response_time, confidence = generate_sql_with_ollama(prompt, question, schema, source_file, is_net_revenue_query)
+    
+    # Check confidence threshold for Ollama
+    if sql and not error:
+        ollama_threshold = 0.75
+        if confidence >= ollama_threshold:
+            logger.info(f"Ollama confidence {confidence:.2f} meets threshold {ollama_threshold}, returning result")
+            return sql, None, provider, response_time, confidence
+        else:
+            logger.warning(f"Ollama confidence {confidence:.2f} below threshold {ollama_threshold}, but returning result anyway (Ollama naturally has lower confidence)")
+            # Still return the result since Ollama naturally has lower confidence but answers can be useful
+            return sql, None, provider, response_time, confidence
+    
+    # Return error case
+    return sql, error, provider, response_time, confidence
+
+
+def post_process_sql(
+    sql: str,
+    question: str,
+    schema: Dict[str, Any],
+    source_file: Optional[str] = None
+) -> Optional[str]:
+    """
+    Post-process SQL query (fixes common mistakes)
+    
+    This is shared between Ollama and external LLMs.
+    """
+    if not sql:
+        return None
+    
+    original_sql = sql
+    
+    # Basic SQL safety check
+    dangerous_keywords = ['DROP', 'DELETE', 'TRUNCATE', 'ALTER', 'UPDATE', 'INSERT', 'CREATE', 'REPLACE']
+    sql_upper = sql.upper().strip()
+    
+    for keyword in dangerous_keywords:
+        pattern = r'\b' + re.escape(keyword) + r'\b'
+        if re.search(pattern, sql_upper):
+            logger.warning(f"SQL contains dangerous keyword: {keyword}")
+            return None
+    
+    if not sql_upper.startswith('SELECT'):
+        logger.warning("SQL does not start with SELECT")
+        return None
+    
+    # Remove currency conversion multipliers
+    sql = re.sub(r'\*\s*\d+\.?\d*\s*(?:--.*)?$', '', sql, flags=re.MULTILINE)
+    sql = sql.strip()
+    
+    # Fix date function calls
+    extract_pattern = r'EXTRACT\s*\(\s*(MONTH|YEAR|DAY|QUARTER|WEEK)\s+FROM\s+"([^"]+)"\s*\)'
+    def fix_extract(match):
+        extract_type = match.group(1)
+        col_name = match.group(2)
+        match_str = match.group(0)
+        if f'CAST("{col_name}"' not in match_str:
+            return f'EXTRACT({extract_type} FROM CAST("{col_name}" AS DATE))'
+        return match.group(0)
+    
+    if re.search(extract_pattern, sql, re.IGNORECASE):
+        sql = re.sub(extract_pattern, fix_extract, sql, flags=re.IGNORECASE)
+    
+    datepart_pattern = r'DATE_PART\s*\(\s*([^,]+?)\s*,\s*"([^"]+)"\s*\)'
+    def fix_datepart(match):
+        part_type = match.group(1).strip()
+        col_name = match.group(2)
+        match_str = match.group(0)
+        if f'CAST("{col_name}"' not in match_str:
+            return f'DATE_PART({part_type}, CAST("{col_name}" AS DATE))'
+        return match.group(0)
+    
+    if re.search(datepart_pattern, sql, re.IGNORECASE):
+        sql = re.sub(datepart_pattern, fix_datepart, sql, flags=re.IGNORECASE)
+    
+    # Fix month-only queries
+    month_only_pattern = r"EXTRACT\s*\(\s*MONTH\s+FROM\s+CAST\([^)]+AS\s+DATE\)\s*\)\s*=\s*(\d+)"
+    if re.search(month_only_pattern, sql, re.IGNORECASE):
+        if 'EXTRACT(YEAR' not in sql.upper():
+            match = re.search(month_only_pattern, sql, re.IGNORECASE)
+            if match:
+                month_num = int(match.group(1))
+                date_col_match = re.search(r'EXTRACT\s*\(\s*MONTH\s+FROM\s+CAST\("([^"]+)"\s+AS\s+DATE\)', sql, re.IGNORECASE)
+                if date_col_match:
+                    date_col = date_col_match.group(1)
+                    current_year = datetime.now().year
+                    last_day = monthrange(current_year, month_num)[1]
+                    date_range_filter = f'CAST("{date_col}" AS DATE) >= \'{current_year}-{month_num:02d}-01\' AND CAST("{date_col}" AS DATE) <= \'{current_year}-{month_num:02d}-{last_day}\''
+                    extract_expr = f'EXTRACT(MONTH FROM CAST("{date_col}" AS DATE)) = {month_num}'
+                    sql = sql.replace(extract_expr, date_range_filter)
+    
+    # Add source_file filter if needed
+    if source_file:
+        try:
+            conn = get_connection()
+            column_check = conn.execute("SELECT name FROM pragma_table_info('sales') WHERE name = 'source_file'").fetchdf()
+            if not column_check.empty:
+                source_count_sql = 'SELECT COUNT(DISTINCT source_file) as count FROM sales WHERE source_file IS NOT NULL'
+                source_count_df = execute_query(source_count_sql)
+                if not source_count_df.empty and source_count_df.iloc[0]['count'] > 1:
+                    sql_upper_check = sql.upper()
+                    if 'SOURCE_FILE' not in sql_upper_check:
+                        # Find WHERE, GROUP BY, ORDER BY, and LIMIT positions
+                        where_pos = sql_upper_check.find(' WHERE ')
+                        group_by_pos = sql_upper_check.find(' GROUP BY ')
+                        order_by_pos = sql_upper_check.find(' ORDER BY ')
+                        limit_pos = sql_upper_check.find(' LIMIT ')
+                        
+                        if where_pos >= 0:
+                            # WHERE clause exists - find the first clause after WHERE
+                            insertion_point = -1
+                            insertion_type = None
+                            
+                            # Check GROUP BY first (it comes before ORDER BY and LIMIT)
+                            if group_by_pos > 0 and group_by_pos > where_pos:
+                                insertion_point = group_by_pos
+                                insertion_type = "GROUP BY"
+                            # Then ORDER BY
+                            elif order_by_pos > 0 and order_by_pos > where_pos:
+                                insertion_point = order_by_pos
+                                insertion_type = "ORDER BY"
+                            # Finally LIMIT
+                            elif limit_pos > 0 and limit_pos > where_pos:
+                                insertion_point = limit_pos
+                                insertion_type = "LIMIT"
+                            
+                            if insertion_point > 0:
+                                # Insert AND before the first clause after WHERE
+                                sql = sql[:insertion_point] + f" AND source_file = '{source_file}' " + sql[insertion_point:]
+                            else:
+                                # No clauses after WHERE - add AND at end
+                                sql = sql.rstrip() + f" AND source_file = '{source_file}'"
+                        elif group_by_pos > 0:
+                            # No WHERE but GROUP BY exists - add WHERE before GROUP BY
+                            sql = sql[:group_by_pos] + f" WHERE source_file = '{source_file}' " + sql[group_by_pos:]
+                        elif order_by_pos > 0:
+                            # No WHERE or GROUP BY but ORDER BY exists - add WHERE before ORDER BY
+                            sql = sql[:order_by_pos] + f" WHERE source_file = '{source_file}' " + sql[order_by_pos:]
+                        elif limit_pos > 0:
+                            sql = sql[:limit_pos] + f" WHERE source_file = '{source_file}' " + sql[limit_pos:]
+                        else:
+                            sql = sql.rstrip() + f" WHERE source_file = '{source_file}'"
+        except Exception as e:
+            logger.warning(f"Could not add source_file filter: {e}")
+    
+    # Final safety check
+    sql_upper = sql.upper().strip()
+    if not sql_upper.startswith('SELECT'):
+        return None
+    
+    return sql.strip()
+
+
+def generate_sql_with_ollama(
+    prompt: str,
+    question: str,
+    schema: Dict[str, Any],
+    source_file: Optional[str] = None,
+    is_net_revenue_query: bool = False
+) -> Tuple[Optional[str], Optional[str], str, float, float]:
+    """
+    Generate SQL using Ollama (fallback)
+    
+    Returns:
+        Tuple of (sql_query, error_message, provider, response_time, confidence)
+    """
+    start_time = time.time()
     
     try:
         # Call Ollama API
@@ -448,7 +663,7 @@ SQL QUERY (only the query, nothing else):"""
             try:
                 # Quick check: does source_file column exist?
                 conn = get_connection()
-                column_check = conn.execute("SELECT column_name FROM pragma_table_info('sales') WHERE column_name = 'source_file'").fetchdf()
+                column_check = conn.execute("SELECT name FROM pragma_table_info('sales') WHERE name = 'source_file'").fetchdf()
                 
                 if not column_check.empty:
                     # Check how many source files exist
@@ -506,13 +721,27 @@ SQL QUERY (only the query, nothing else):"""
                             
                             # Add source_file filter to SQL
                             if target_source_file:
-                                # Find WHERE clause position (handle case variations)
+                                # Find WHERE, GROUP BY, ORDER BY, and LIMIT clause positions
                                 sql_upper = sql.upper()
                                 where_pos = -1
                                 for pattern in [' WHERE ', 'WHERE ']:
                                     pos = sql_upper.find(pattern)
                                     if pos != -1:
                                         where_pos = pos + len(pattern) - 1
+                                        break
+                                
+                                group_by_pos = -1
+                                for pattern in [' GROUP BY ', 'GROUP BY ']:
+                                    pos = sql_upper.find(pattern)
+                                    if pos != -1:
+                                        group_by_pos = pos
+                                        break
+                                
+                                order_by_pos = -1
+                                for pattern in [' ORDER BY ', 'ORDER BY ']:
+                                    pos = sql_upper.find(pattern)
+                                    if pos != -1:
+                                        order_by_pos = pos
                                         break
                                 
                                 limit_pos = -1
@@ -522,21 +751,47 @@ SQL QUERY (only the query, nothing else):"""
                                         limit_pos = pos
                                         break
                                 
+                                # Determine insertion point: before GROUP BY, ORDER BY, or LIMIT (whichever comes first after WHERE)
                                 if where_pos >= 0:
-                                    # WHERE clause exists - add AND before LIMIT or at end
-                                    if limit_pos > 0:
-                                        # Insert AND before LIMIT
-                                        sql = sql[:limit_pos] + f" AND source_file = '{target_source_file}' " + sql[limit_pos:]
+                                    # WHERE clause exists - find the first clause after WHERE
+                                    insertion_point = -1
+                                    insertion_type = None
+                                    
+                                    # Check GROUP BY first (it comes before ORDER BY and LIMIT)
+                                    if group_by_pos > 0 and group_by_pos > where_pos:
+                                        insertion_point = group_by_pos
+                                        insertion_type = "GROUP BY"
+                                    # Then ORDER BY
+                                    elif order_by_pos > 0 and order_by_pos > where_pos:
+                                        insertion_point = order_by_pos
+                                        insertion_type = "ORDER BY"
+                                    # Finally LIMIT
+                                    elif limit_pos > 0 and limit_pos > where_pos:
+                                        insertion_point = limit_pos
+                                        insertion_type = "LIMIT"
+                                    
+                                    if insertion_point > 0:
+                                        # Insert AND before the first clause after WHERE
+                                        sql = sql[:insertion_point] + f" AND source_file = '{target_source_file}' " + sql[insertion_point:]
+                                        logger.info(f"✅ Post-processed: Added source_file filter before {insertion_type} (using: {target_source_file})")
                                     else:
-                                        # Add AND at end (before any existing AND/OR)
+                                        # No clauses after WHERE - add AND at end
                                         sql = sql.rstrip() + f" AND source_file = '{target_source_file}'"
-                                    logger.info(f"✅ Post-processed: Added source_file filter (using: {target_source_file})")
+                                        logger.info(f"✅ Post-processed: Added source_file filter at end of WHERE clause (using: {target_source_file})")
+                                elif group_by_pos > 0:
+                                    # No WHERE but GROUP BY exists - add WHERE before GROUP BY
+                                    sql = sql[:group_by_pos] + f" WHERE source_file = '{target_source_file}' " + sql[group_by_pos:]
+                                    logger.info(f"✅ Post-processed: Added source_file WHERE clause before GROUP BY (using: {target_source_file})")
+                                elif order_by_pos > 0:
+                                    # No WHERE or GROUP BY but ORDER BY exists - add WHERE before ORDER BY
+                                    sql = sql[:order_by_pos] + f" WHERE source_file = '{target_source_file}' " + sql[order_by_pos:]
+                                    logger.info(f"✅ Post-processed: Added source_file WHERE clause before ORDER BY (using: {target_source_file})")
                                 elif limit_pos > 0:
-                                    # No WHERE clause - add one before LIMIT
+                                    # No WHERE, GROUP BY, or ORDER BY - add WHERE before LIMIT
                                     sql = sql[:limit_pos] + f" WHERE source_file = '{target_source_file}' " + sql[limit_pos:]
-                                    logger.info(f"✅ Post-processed: Added source_file WHERE clause (using: {target_source_file})")
+                                    logger.info(f"✅ Post-processed: Added source_file WHERE clause before LIMIT (using: {target_source_file})")
                                 else:
-                                    # No WHERE or LIMIT - add WHERE at end
+                                    # No WHERE, GROUP BY, ORDER BY, or LIMIT - add WHERE at end
                                     sql = sql.rstrip() + f" WHERE source_file = '{target_source_file}'"
                                     logger.info(f"✅ Post-processed: Added source_file WHERE clause at end (using: {target_source_file})")
                             else:
@@ -562,6 +817,7 @@ SQL QUERY (only the query, nothing else):"""
             
             # Post-process: Detect and warn about incomplete net revenue queries
             # This helps debug if the AI still generates incomplete SQL despite the prompt
+            # Note: is_net_revenue_query is passed as parameter
             if is_net_revenue_query:
                 # Check if SQL includes all required components
                 has_shipment = bool(re.search(r"transaction_type\s*=\s*['\"]Shipment['\"]", sql, re.IGNORECASE))
@@ -595,17 +851,52 @@ SQL QUERY (only the query, nothing else):"""
             # Log the final SQL for debugging
             logger.info(f"Final generated SQL: {sql}")
             
-            return sql, None
+            # Final validation check (post_process_sql is redundant here since we already did all processing inline)
+            # Just ensure SQL is valid before returning
+            if not sql or not sql.strip():
+                response_time = time.time() - start_time
+                logger.error(f"Ollama execution result: failure - SQL is empty after processing")
+                logger.error(f"Question was: {question}")
+                return None, "SQL generation failed - empty result", 'ollama', response_time, 0.0
+            
+            sql_upper = sql.upper().strip()
+            if not sql_upper.startswith('SELECT'):
+                response_time = time.time() - start_time
+                logger.error(f"Ollama execution result: failure - SQL does not start with SELECT")
+                logger.error(f"Question was: {question}")
+                logger.error(f"Generated SQL (first 200 chars): {sql[:200]}")
+                return None, "SQL generation failed - invalid query format", 'ollama', response_time, 0.0
+            
+            response_time = time.time() - start_time
+            confidence = calculate_ollama_confidence(sql, response_time)
+            
+            # Log Ollama SQL generation and confidence
+            logger.info(f"Ollama SQL generated: {sql}")
+            logger.info(f"Ollama confidence: {confidence:.2f}")
+            
+            # Check confidence threshold (0.75 for Ollama)
+            confidence_threshold = 0.75
+            logger.info(f"Confidence threshold: {confidence_threshold}")
+            if confidence >= confidence_threshold:
+                logger.info(f"Result: accepted (confidence {confidence:.2f} >= threshold {confidence_threshold})")
+                logger.info(f"Ollama execution result: success")
+            else:
+                logger.warning(f"Result: below threshold (confidence {confidence:.2f} < threshold {confidence_threshold})")
+                logger.warning(f"Ollama execution result: low confidence (but may still be useful)")
+            
+            return sql, None, 'ollama', response_time, confidence
         
         else:
+            response_time = time.time() - start_time
             error = f"Ollama API error: {response.status_code}"
-            logger.error(error)
-            return None, error
+            logger.error(f"Ollama execution result: failure - {error}")
+            return None, error, 'ollama', response_time, 0.0
     
     except Exception as e:
+        response_time = time.time() - start_time
         error = f"LLM generation failed: {str(e)}"
-        logger.error(error)
-        return None, error
+        logger.error(f"Ollama execution result: failure - {error}")
+        return None, error, 'ollama', response_time, 0.0
 
 
 def validate_sql_safety(sql: str) -> Tuple[bool, Optional[str]]:
@@ -618,11 +909,15 @@ def validate_sql_safety(sql: str) -> Tuple[bool, Optional[str]]:
     Returns:
         Tuple of (is_safe, error_message)
     """
+    logger.info(f"Validating SQL: {sql}")
     sql_upper = sql.upper().strip()
     
     # Must start with SELECT
     if not sql_upper.startswith('SELECT'):
-        return False, "Query must start with SELECT"
+        error_msg = "Query must start with SELECT"
+        logger.warning(f"Validation result: failed - {error_msg}")
+        logger.warning(f"Validation errors: {error_msg}")
+        return False, error_msg
     
     # Block dangerous keywords (using word boundaries to avoid false positives)
     # Example: 'FreeReplacement' should NOT match 'REPLACE'
@@ -631,8 +926,12 @@ def validate_sql_safety(sql: str) -> Tuple[bool, Optional[str]]:
         # Match keyword as whole word (not substring)
         pattern = r'\b' + re.escape(keyword) + r'\b'
         if re.search(pattern, sql_upper):
-            return False, f"Query contains dangerous keyword: {keyword}"
+            error_msg = f"Query contains dangerous keyword: {keyword}"
+            logger.warning(f"Validation result: failed - {error_msg}")
+            logger.warning(f"Validation errors: {error_msg}")
+            return False, error_msg
     
+    logger.info(f"Validation result: passed")
     return True, None
 
 
