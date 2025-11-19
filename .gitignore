@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+ENV/
+backend/venv/
+backend/env/
+backend/ENV/
+
+# Log files
+*.log
+ai_query_log.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database files (optional - uncomment if you don't want to track DB)
+# *.db
+# *.duckdb
+
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Backend specific
+backend/.pytest_cache/
+backend/.coverage
+backend/htmlcov/
+backend/logs/
+backend/__pycache__/
+
+# Databases (persisted via volumes in Docker)
+*.duckdb
+*.db
+data/analytics.duckdb

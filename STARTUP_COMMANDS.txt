@@ -1,0 +1,112 @@
+==========================================
+QUICK START COMMANDS - AFTER RESTARTING APP
+==========================================
+
+STEP-BY-STEP INSTRUCTIONS:
+--------------------------
+
+1. Navigate to Project Directory
+   cd "/Users/adi7192/Documents/Nisarg Project"
+
+2. Activate Virtual Environment
+   source venv/bin/activate
+
+3. Navigate to Backend Directory
+   cd backend
+
+4. (Optional) Verify/Install Dependencies
+   pip install -r requirements.txt
+
+5. Check Ollama Service (if using AI features)
+   curl http://localhost:11434/api/tags
+   
+   If Ollama isn't running:
+   Option A (Docker):
+     docker-compose up -d ollama
+   
+   Option B (Local install):
+     # Start Ollama service based on your installation method
+
+6. Start FastAPI Backend Server
+   uvicorn main:app --reload
+
+   OR from project root:
+   uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+
+7. Verify Server is Running (in another terminal)
+   curl http://localhost:8000/api/health
+
+
+==========================================
+ONE-LINE COMMAND (ALL-IN-ONE)
+==========================================
+
+cd "/Users/adi7192/Documents/Nisarg Project" && source venv/bin/activate && cd backend && uvicorn main:app --reload
+
+
+==========================================
+ACCESS POINTS AFTER STARTING
+==========================================
+
+API Base URL:        http://localhost:8000
+API Docs (Swagger):  http://localhost:8000/api/docs
+API Docs (ReDoc):    http://localhost:8000/api/redoc
+Health Check:        http://localhost:8000/api/health
+
+
+==========================================
+DOCKER SETUP (ALTERNATIVE)
+==========================================
+
+If you prefer using Docker:
+
+cd "/Users/adi7192/Documents/Nisarg Project"
+docker-compose up --build
+
+This will start:
+- Backend service (port 8000)
+- Ollama service (port 11434)
+- Legacy Streamlit app (port 8501) - optional
+
+To stop:
+docker-compose down
+
+
+==========================================
+IMPORTANT NOTES
+==========================================
+
+- The database (data/analytics.duckdb) is automatically initialized on startup
+- No manual database setup is required unless starting fresh
+- The --reload flag enables auto-reload on code changes (development mode)
+- Make sure Ollama is running if you plan to use AI chat features
+
+
+==========================================
+TESTING ENDPOINTS (After Server Starts)
+==========================================
+
+1. Health Check
+   curl http://localhost:8000/api/health
+
+2. Get Metrics (Last 30 days)
+   curl "http://localhost:8000/api/metrics"
+
+3. Get Metrics (Custom Date Range)
+   curl "http://localhost:8000/api/metrics?start_date=2025-08-01&end_date=2025-08-31"
+
+4. Get Revenue Trend
+   curl "http://localhost:8000/api/metrics/trend?start_date=2025-08-01&end_date=2025-08-31&group_by=day"
+
+5. Get Top Products
+   curl "http://localhost:8000/api/metrics/top-products?limit=10"
+
+6. Get Regional Distribution
+   curl "http://localhost:8000/api/charts/regional-distribution?start_date=2025-08-01&end_date=2025-08-31"
+
+7. Get Transaction Status
+   curl "http://localhost:8000/api/charts/transaction-status"
+
+
+==========================================
+
