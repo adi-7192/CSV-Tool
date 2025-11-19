@@ -655,4 +655,56 @@ export const qualityIssuesService = {
 // EXPORTS
 // ============================================================================
 
+// ============================================================================
+// CHAT SERVICE
+// ============================================================================
+
+export interface ChatResponse {
+  answer: string;
+  sql: string | null;
+  data: any;
+  execution_time: number | null;
+  error: string | null;
+  provider?: string | null;
+  confidence?: number | null;
+  suggestion?: string | null;
+}
+
+export interface ChatRequest {
+  question: string;
+  context?: {
+    start_date?: string;
+    end_date?: string;
+  };
+}
+
+export const chatService = {
+  /**
+   * Ask a natural language question about the data
+   * @param question - Natural language question
+   * @param context - Optional context (date filters, etc.)
+   * @returns Chat response with answer, SQL, and data
+   */
+  askQuestion: async (
+    question: string,
+    context?: { start_date?: string; end_date?: string }
+  ): Promise<ChatResponse | null> => {
+    try {
+      const requestBody: ChatRequest = { question };
+      if (context) {
+        requestBody.context = context;
+      }
+      
+      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody);
+      return response.data;
+    } catch (error) {
+      console.error('Error asking question:', error);
+      if (error instanceof AxiosError) {
+        console.error('Response:', error.response?.data);
+      }
+      return null;
+    }
+  },
+};
+
 export default apiClient;

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Table, Skeleton } from 'antd';
 import type { ColumnsType, TableProps } from 'antd/es/table';
-import { ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons';
+// import { ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons'; // Unused - kept for future renderTrend function
 import { formatCurrency, formatPercentage } from '@/utils/formatters';
 
 export interface PerformanceTableRow {
@@ -66,7 +66,9 @@ const PerformanceTable: React.FC<PerformanceTableProps> = ({
     );
   };
 
-  // Render trend with arrow and color
+  // Render trend with arrow and color (currently unused but kept for future use)
+  // Uncomment when needed
+  /*
   const renderTrend = (trend: number) => {
     const isPositive = trend >= 0;
     const color = isPositive ? '#10B981' : '#F43F5E';
@@ -88,6 +90,7 @@ const PerformanceTable: React.FC<PerformanceTableProps> = ({
       </span>
     );
   };
+  */
 
   // Handle table change (sorting, pagination)
   const handleTableChange: TableProps<PerformanceTableRow>['onChange'] = (

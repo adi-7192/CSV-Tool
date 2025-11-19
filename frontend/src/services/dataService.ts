@@ -50,6 +50,46 @@ export interface UploadResponse {
   ingestion_id?: string;
 }
 
+export interface UploadFile {
+  ingestion_id: string;
+  filename: string;
+  uploaded_at: string;
+  rows_inserted: number;
+  date_range_start: string | null;
+  date_range_end: string | null;
+  validation_status: string | null;
+  file_id?: string; // Alias for ingestion_id for compatibility
+  file_size?: number; // File size in bytes
+  upload_timestamp?: string; // Alias for uploaded_at
+  row_count?: number; // Alias for rows_inserted
+}
+
+export interface UploadDetailsResponse {
+  ingestion_id: string;
+  filename: string;
+  uploaded_at: string;
+  rows_inserted: number;
+  date_range_start: string | null;
+  date_range_end: string | null;
+  validation_status: string | null;
+  total_records?: number;
+  unique_skus?: number;
+  file_size?: number;
+  upload_timestamp?: string;
+  row_count?: number;
+  date_range?: {
+    start: string | null;
+    end: string | null;
+  };
+  column_names?: string[];
+}
+
+export interface DataDateRangeResponse {
+  has_data: boolean;
+  start_date: string | null;
+  end_date: string | null;
+}
+
 /**
  * Get paginated transaction data with optional filters
  * @param page - Page number (1-indexed)
@@ -194,6 +234,144 @@ export const uploadCSV = async (file: File): Promise<UploadResponse | null> => {
     return response.data;
   } catch (error) {
     console.error('Error uploading CSV:', error);
+    if (error instanceof AxiosError) {
+      console.error('Response:', error.response?.data);
+    }
+    return null;
+  }
+};
+
+/**
+ * Get data date range from statistics
+ * @returns Date range response with has_data flag and start/end dates
+ */
+export const getDataDateRange = async (): Promise<DataDateRangeResponse | null> => {
+  try {
+    const stats = await getDataStatistics();
+    if (!stats) {
+      return {
+        has_data: false,
+        start_date: null,
+        end_date: null,
+      };
+    }
+    return {
+      has_data: stats.total_records > 0,
+      start_date: stats.date_range.start,
+      end_date: stats.date_range.end,
+    };
+  } catch (error) {
+    console.error('Error fetching date range:', error);
+    return null;
+  }
+};
+
+/**
+ * Get list of uploaded files
+ * @returns List of uploaded files with metadata
+ */
+export const getUploads = async (): Promise<UploadFile[] | null> => {
+  try {
+    const response = await apiClient.get<{ uploads: UploadFile[] }>('/api/upload/history');
+    // Map ingestion_id to file_id for compatibility
+    return response.data.uploads.map(upload => ({
+      ...upload,
+      file_id: upload.ingestion_id,
+    }));
+  } catch (error) {
+    console.error('Error fetching uploads:', error);
+    if (error instanceof AxiosError) {
+      console.error('Response:', error.response?.data);
+    }
+    return null;
+  }
+};
+
+export interface DeleteUploadResponse {
+  success: boolean;
+  message: string;
+  deleted_rows?: number;
+}
+
+/**
+ * Delete a specific upload by ID
+ * @param fileId - File/ingestion ID to delete
+ * @returns Delete response with success status and message
+ */
+export const deleteUpload = async (_fileId: string): Promise<DeleteUploadResponse> => {
+  try {
+    // Note: This endpoint may not exist in the backend yet
+    // For now, return error response to indicate operation not supported
+    console.warn('deleteUpload: Endpoint not implemented in backend');
+    return {
+      success: false,
+      message: 'Delete operation not yet implemented in backend',
+    };
+  } catch (error) {
+    console.error('Error deleting upload:', error);
+    return {
+      success: false,
+      message: 'Failed to delete upload',
+    };
+  }
+};
+
+/**
+ * Delete all uploads
+ * @returns Delete response with success status and message
+ */
+export const deleteAllUploads = async (): Promise<DeleteUploadResponse> => {
+  try {
+    // Note: This endpoint may not exist in the backend yet
+    // For now, return error response to indicate operation not supported
+    console.warn('deleteAllUploads: Endpoint not implemented in backend');
+    return {
+      success: false,
+      message: 'Delete all operation not yet implemented in backend',
+    };
+  } catch (error) {
+    console.error('Error deleting all uploads:', error);
+    return {
+      success: false,
+      message: 'Failed to delete all uploads',
+    };
+  }
+};
+
+/**
+ * Get details for a specific upload
+ * @param fileId - File/ingestion ID
+ * @returns Upload details response
+ */
+export const getUploadDetails = async (fileId: string): Promise<UploadDetailsResponse | null> => {
+  try {
+    // Get all uploads and find the one matching fileId
+    const uploads = await getUploads();
+    if (!uploads) {
+      return null;
+    }
+    
+    const upload = uploads.find(u => u.ingestion_id === fileId || u.file_id === fileId);
+    if (!upload) {
+      return null;
+    }
+    
+    // Get additional statistics if available
+    const stats = await getDataStatistics();
+    
+    return {
+      ingestion_id: upload.ingestion_id,
+      filename: upload.filename,
+      uploaded_at: upload.uploaded_at,
+      rows_inserted: upload.rows_inserted,
+      date_range_start: upload.date_range_start,
+      date_range_end: upload.date_range_end,
+      validation_status: upload.validation_status,
+      total_records: stats?.total_records,
+      unique_skus: stats?.unique_skus,
+    };
+  } catch (error) {
+    console.error('Error fetching upload details:', error);
     if (error instanceof AxiosError) {
       console.error('Response:', error.response?.data);
     }

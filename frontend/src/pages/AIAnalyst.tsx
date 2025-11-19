@@ -43,7 +43,6 @@ import {
   SPACING,
   COLORS,
   BORDER_RADIUS,
-  SHADOWS,
 } from '@/styles/designTokens';
 import { AxiosError } from 'axios';
 import dayjs from 'dayjs';
@@ -121,8 +120,10 @@ const AIAnalyst: React.FC = () => {
   const [lowConfidenceCount, setLowConfidenceCount] = useState(0);
   const [showBanner, setShowBanner] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
-  const [hasOpenAIKey, setHasOpenAIKey] = useState<boolean | null>(null);
-  const [hasAnthropicKey, setHasAnthropicKey] = useState<boolean | null>(null);
+  // Note: hasOpenAIKey and hasAnthropicKey are set but not currently used in UI
+  // They're kept for potential future use
+  const [, setHasOpenAIKey] = useState<boolean | null>(null);
+  const [, setHasAnthropicKey] = useState<boolean | null>(null);
   const [apiKeyStatus, setApiKeyStatus] = useState<{
     has_key: boolean;
     masked_key: string | null;
@@ -133,8 +134,8 @@ const AIAnalyst: React.FC = () => {
     is_valid: false,
   });
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const elapsedTimeRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<number | null>(null);
+  const elapsedTimeRef = useRef<number | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
   
   // Timeout duration: 25 seconds
@@ -273,7 +274,7 @@ const AIAnalyst: React.FC = () => {
       isError: true,
       exampleQuestions,
     };
-    addMessage(conversationId, errorMessage);
+    addMessage(errorMessage, conversationId);
   }, [addMessage]);
 
   // Handle chat question submission
@@ -296,7 +297,7 @@ const AIAnalyst: React.FC = () => {
       content: userQuestion,
       timestamp: new Date(),
     };
-    addMessage(conversationId, userMessage);
+    addMessage(userMessage, conversationId);
 
     // Check if data exists before sending
     try {
@@ -455,9 +456,9 @@ const AIAnalyst: React.FC = () => {
         executionTime: executionTime,
         confidence: confidence,
         provider: provider,
-        showApiKeySuggestion: shouldShowSuggestion,
+        showApiKeySuggestion: shouldShowSuggestion || undefined,
       };
-      addMessage(conversationId, assistantMessage);
+      addMessage(assistantMessage, conversationId);
       setLoading(false);
 
     } catch (error: any) {
@@ -492,9 +493,9 @@ const AIAnalyst: React.FC = () => {
           }
         } else if (error.code === 'ERR_NETWORK' || error.message?.includes('Network Error')) {
           errorMessage = "Connection issue. Please check your internet and try again.";
-        } else if (error.response?.status >= 500) {
+        } else if (error.response && error.response.status >= 500) {
           errorMessage = "Server error occurred. Please try again later or contact support if the problem persists.";
-        } else if (error.response?.status >= 400 && error.response?.status < 500) {
+        } else if (error.response && error.response.status >= 400 && error.response.status < 500) {
           const serverMessage = error.response?.data?.detail || error.response?.data?.message;
           errorMessage = serverMessage || "I couldn't process that question. Please try rephrasing it.";
         }
@@ -1276,15 +1277,17 @@ const AIAnalyst: React.FC = () => {
                 flexShrink: 0,
               }}
               onMouseEnter={(e) => {
-                if (!e.currentTarget.disabled) {
-                  e.currentTarget.style.backgroundColor = '#1d4ed8'; // blue-700 on hover
-                  e.currentTarget.style.borderColor = '#1d4ed8';
+                const target = e.currentTarget as HTMLButtonElement;
+                if (!target.disabled) {
+                  target.style.backgroundColor = '#1d4ed8'; // blue-700 on hover
+                  target.style.borderColor = '#1d4ed8';
                 }
               }}
               onMouseLeave={(e) => {
-                if (!e.currentTarget.disabled) {
-                  e.currentTarget.style.backgroundColor = '#2563eb'; // blue-600 default
-                  e.currentTarget.style.borderColor = '#2563eb';
+                const target = e.currentTarget as HTMLButtonElement;
+                if (!target.disabled) {
+                  target.style.backgroundColor = '#2563eb'; // blue-600 default
+                  target.style.borderColor = '#2563eb';
                 }
               }}
             >

@@ -16,7 +16,8 @@ const Workspace: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(0);
+  // Note: totalPages is calculated but not currently used in UI
+  const [, setTotalPages] = useState(0);
   const pageSize = 50;
 
   // Filter states
