@@ -43,6 +43,10 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Frontend specific
+frontend/dist/
+frontend/build_output*.txt
+
 # Backend specific
 backend/.pytest_cache/
 backend/.coverage

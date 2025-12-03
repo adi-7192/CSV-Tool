@@ -1,12 +1,14 @@
 import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
 import { Row, Col, Button, Alert, Skeleton, Card, Table, Modal, Select } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
+import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import MetricCard from '@/components/MetricCard';
 import TrendChart from '@/components/TrendChart';
 import PerformanceTable, { PerformanceTableRow } from '@/components/PerformanceTable';
 import InsightBanner from '@/components/InsightBanner';
 import { useDataStore } from '@/store/dataStore';
+import { useAuthStore } from '@/store/authStore';
 import { 
   regionService, 
   RegionSKU, 
@@ -86,10 +88,68 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 }
 
 // ============================================================================
+// EMPTY STATE COMPONENT
+// ============================================================================
+
+const EmptyState: React.FC<{ 
+  onUploadClick: () => void; 
+  onOnboardingClick?: () => void;
+  isOwner?: boolean;
+}> = ({ 
+  onUploadClick, 
+  onOnboardingClick,
+  isOwner = false
+}) => {
+  return (
+    <div style={{ 
+      display: 'flex', 
+      flexDirection: 'column', 
+      alignItems: 'center', 
+      justifyContent: 'center', 
+      minHeight: '60vh',
+      padding: '48px',
+      textAlign: 'center'
+    }}>
+      <div style={{ fontSize: '64px', marginBottom: '24px' }}>📊</div>
+      <h2 style={{ fontSize: '24px', fontWeight: '600', marginBottom: '12px', color: '#030712' }}>
+        No data yet
+      </h2>
+      <p style={{ fontSize: '16px', color: '#64748B', marginBottom: '32px', maxWidth: '500px' }}>
+        {isOwner 
+          ? 'Upload your first CSV file or use sample data to see your dashboard analytics.'
+          : 'Upload a CSV file in Data Management to see your dashboard analytics.'
+        }
+      </p>
+      <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+        <Button 
+          type="primary" 
+          size="large"
+          onClick={onUploadClick}
+          style={{ height: '44px', fontSize: '16px', fontWeight: '600' }}
+        >
+          {isOwner ? 'Upload Data' : 'Go to Data Management'}
+        </Button>
+        {isOwner && onOnboardingClick && (
+          <Button 
+            size="large"
+            onClick={onOnboardingClick}
+            style={{ height: '44px', fontSize: '16px' }}
+          >
+            Go to Onboarding
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
 // DASHBOARD COMPONENT
 // ============================================================================
 
 const Dashboard: React.FC = () => {
+  const navigate = useNavigate();
+  const { user } = useAuthStore();
   const {
     metrics,
     chartData,
@@ -112,6 +172,11 @@ const Dashboard: React.FC = () => {
     fetchRegionRevenue,
     fetchMoversDecliners,
   } = useDataStore();
+  
+  const [hasData, setHasData] = useState<boolean | null>(null);
+  
+  // Check if user is owner (has tenant_id === "owner" or email === "adityadav7192@gmail.com")
+  const isOwner = user?.tenant_id === 'owner' || user?.email === 'adityadav7192@gmail.com';
 
   const [selectedRegion, setSelectedRegion] = useState<string | null>(null);
   const [isInsightsModalOpen, setIsInsightsModalOpen] = useState(false);
@@ -219,15 +284,33 @@ const Dashboard: React.FC = () => {
     localStorage.setItem('qualityIssues_replacementsLimit', replacementsLimit.toString());
   }, [replacementsLimit]);
 
+  // Check data availability
+  useEffect(() => {
+    const checkDataAvailability = async () => {
+      try {
+        const hasDataResult = await fetchMetrics(dateRange.start, dateRange.end);
+        // Only set hasData to false if we actually got a successful response with no data
+        // If there's an error, hasData stays null and we show error state instead
+        setHasData(hasDataResult);
+      } catch (err) {
+        // On error, keep hasData as null (initial state) - error will be shown via store
+        console.error('Error checking data availability:', err);
+        // Don't set hasData to false on error - let the error state handle it
+      }
+    };
+    checkDataAvailability();
+  }, [dateRange.start, dateRange.end]);
+
   // Fetch all data when date range changes
   useEffect(() => {
-    fetchMetrics(dateRange.start, dateRange.end);
-    fetchChartData(dateRange.start, dateRange.end);
-    fetchSKUPerformance(dateRange.start, dateRange.end);
-    fetchInsights(dateRange.start, dateRange.end);
-    fetchRegionRevenue(dateRange.start, dateRange.end);
-    fetchMoversDecliners(dateRange.start, dateRange.end);
-  }, [dateRange.start, dateRange.end]);
+    if (hasData !== false) {
+      fetchChartData(dateRange.start, dateRange.end);
+      fetchSKUPerformance(dateRange.start, dateRange.end);
+      fetchInsights(dateRange.start, dateRange.end);
+      fetchRegionRevenue(dateRange.start, dateRange.end);
+      fetchMoversDecliners(dateRange.start, dateRange.end);
+    }
+  }, [dateRange.start, dateRange.end, hasData]);
 
   // Handle retry on error
   const handleRetry = () => {
@@ -352,8 +435,21 @@ const Dashboard: React.FC = () => {
             />
           )}
 
-          {/* Main Content Area */}
-          <div className="dashboard-main-layout">
+          {/* Empty State - Show when no data (but not on error) */}
+          {/* For non-owner users, show empty state even if hasData is null (initial state) */}
+          {((hasData === false && !metricsLoading && !error) || (!isOwner && hasData === null && !metricsLoading && !error)) && (
+            <EmptyState
+              onUploadClick={() => navigate('/app/data-management')}
+              onOnboardingClick={isOwner ? () => navigate('/app/onboarding') : undefined}
+              isOwner={isOwner}
+            />
+          )}
+
+          {/* Main Content - Show when has data or still loading (hasData is null/true) */}
+          {/* For owner, show content even if hasData is null (might be loading) */}
+          {/* For non-owner, only show if hasData is explicitly true */}
+          {((isOwner && (hasData === null || hasData === true)) || (!isOwner && hasData === true)) && (
+            <div className="dashboard-main-layout">
             {/* KPI Row with Minimized Insights Panel - Side by Side */}
             <Row gutter={16} style={{ marginBottom: '24px' }}>
               {/* Left Column - KPI Cards */}
@@ -1239,6 +1335,7 @@ const Dashboard: React.FC = () => {
               </Col>
             </Row>
           </div>
+          )}
 
           {/* All Insights Modal */}
           <Modal

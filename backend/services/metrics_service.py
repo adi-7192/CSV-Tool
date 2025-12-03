@@ -4,7 +4,7 @@ Metrics Service - Business KPI calculations
 Extracted and refactored from legacy/app.py
 """
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import logging
 
@@ -858,14 +858,15 @@ def get_daily_trends(
             }
         
         # Build date filter and grouping
-        # CRITICAL: Always use DATE() function to group by date only (removes time component)
+        # CRITICAL: Use CAST to DATE for grouping (removes time component)
         # This ensures smooth trend lines with one point per day
+        # Note: DuckDB doesn't have DATE() function, use CAST(... AS DATE) instead
         if needs_cast:
             date_filter = f"CAST(\"{date_col}\" AS DATE) >= '{start_date}' AND CAST(\"{date_col}\" AS DATE) <= '{end_date}'"
-            date_group = f"DATE(CAST(\"{date_col}\" AS DATE))"
+            date_group = f"CAST(\"{date_col}\" AS DATE)"
         else:
             date_filter = f"\"{date_col}\" >= '{start_date}' AND \"{date_col}\" <= '{end_date}'"
-            date_group = f"DATE(\"{date_col}\")"
+            date_group = f"CAST(\"{date_col}\" AS DATE)"
         
         # Query for daily metrics
         # Revenue from Shipments
@@ -1444,23 +1445,11 @@ def get_revenue_by_city(
         column_info = execute_query("DESCRIBE sales")
         available_cols = list(column_info['column_name'].values)
         
-        # DEBUG: Log all available columns
-        logger.info(f"Available columns in sales table: {available_cols}")
-        print(f"\n🔍 DEBUG: Available columns: {available_cols}\n")
+        logger.debug(f"Available columns in sales table: {available_cols}")
         
         # Check if both columns exist
         has_ship_to_city = any(col.lower().strip() == 'ship to city' for col in available_cols)
         has_bill_from_city = any(col.lower().strip() == 'bill from city' for col in available_cols)
-        
-        if has_ship_to_city:
-            print(f"✅ 'Ship To City' column EXISTS in database")
-        else:
-            print(f"⚠️  'Ship To City' column NOT FOUND in database")
-        
-        if has_bill_from_city:
-            print(f"⚠️  'Bill From City' column EXISTS (will be EXCLUDED - wrong column)")
-        
-        print()
         
         # Find city/region column (try multiple variations)
         # PRIORITY: "Ship To City" is the correct column (customer delivery location)
@@ -1472,17 +1461,8 @@ def get_revenue_by_city(
             col_lower = col.lower().strip()
             if col_lower == 'ship to city':
                 city_col = col
-                logger.info(f"✅ Found correct city column: '{city_col}' (Ship To City - customer location)")
-                print(f"\n✅✅✅ USING CORRECT COLUMN: '{city_col}' (Ship To City - customer delivery location)\n")
+                logger.info(f"Found correct city column: '{city_col}'")
                 break
-        
-        # CRITICAL: If "Ship To City" not found, check if "Bill From City" exists
-        if not city_col:
-            if has_bill_from_city:
-                logger.warning("⚠️  WARNING: 'Ship To City' column NOT FOUND, but 'Bill From City' exists!")
-                logger.warning("⚠️  'Bill From City' will be EXCLUDED - this is seller location, not customer location")
-                print(f"\n⚠️  WARNING: 'Ship To City' column NOT FOUND!")
-                print(f"⚠️  'Bill From City' exists but will be EXCLUDED (wrong column)\n")
         
         # If not found, try "region" column (standardized name)
         if not city_col:
@@ -1490,7 +1470,6 @@ def get_revenue_by_city(
                 if col.lower() == 'region':
                     city_col = col
                     logger.info(f"Found city column (region): '{city_col}'")
-                    print(f"✅ Found column: '{city_col}' (region)")
                     break
         
         # If still not found, try other variations (but EXCLUDE "Bill From City")
@@ -1500,47 +1479,26 @@ def get_revenue_by_city(
                                'Ship To City', 'Ship To State', 'ship to state']
             for col in region_variations:
                 if col in available_cols:
-                    # EXCLUDE "Bill From City" - this is NOT what we want
                     if col.lower() != 'bill from city':
                         city_col = col
                         logger.info(f"Found city column (variation): '{city_col}'")
-                        print(f"✅ Found column: '{city_col}' (variation)")
                         break
         
         # Last resort: Pattern matching (but EXCLUDE "Bill From City")
         if not city_col:
             for col in available_cols:
                 col_lower = col.lower()
-                # EXCLUDE "Bill From City" explicitly
                 if col_lower == 'bill from city':
-                    logger.info(f"Skipping '{col}' - this is Bill From City (wrong column)")
-                    print(f"⚠️  Skipping '{col}' - this is Bill From City (wrong column)")
                     continue
-                
-                # Check if column name contains city/region/location keywords
                 if any(keyword in col_lower for keyword in ['city', 'region', 'location', 'state', 'ship']):
-                    # Verify it's not a date or other type
                     col_type = column_info[column_info['column_name'] == col]['column_type'].values[0]
                     if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
                         city_col = col
                         logger.info(f"Found city column by pattern matching: '{city_col}'")
-                        print(f"✅ Found column by pattern: '{city_col}'")
                         break
         
         if not city_col:
-            logger.warning(f"'Ship To City' or 'region' column not found. Available columns: {available_cols}")
-            print(f"\n⚠️  ERROR: City column not found! Available columns: {available_cols}\n")
-            # Try to get sample data to help debug
-            try:
-                sample = execute_query("SELECT * FROM sales LIMIT 1")
-                if not sample.empty:
-                    print(f"🔍 DEBUG: Sample row columns: {list(sample.columns)}")
-                    print(f"🔍 DEBUG: Sample data:")
-                    for col in sample.columns:
-                        val = sample[col].iloc[0]
-                        print(f"  {col}: {val} (type: {type(val).__name__})")
-            except Exception as e:
-                print(f"🔍 DEBUG: Could not fetch sample: {e}")
+            logger.warning(f"City column not found. Available columns: {available_cols}")
             return {
                 "data": [],
                 "count": 0,
@@ -1558,7 +1516,6 @@ def get_revenue_by_city(
         
         if not revenue_col:
             logger.warning(f"Revenue column not found. Available columns: {available_cols}")
-            print(f"\n⚠️  ERROR: Revenue column not found! Available columns: {available_cols}\n")
             return {
                 "data": [],
                 "count": 0,
@@ -1597,11 +1554,9 @@ def get_revenue_by_city(
         count_df = execute_query(count_sql)
         total_records = int(count_df['total'].iloc[0]) if not count_df.empty else 0
         logger.info(f"Total records with city data: {total_records}")
-        print(f"\n🔍 DEBUG: Total records with city data: {total_records:,}\n")
         
         if total_records == 0:
             logger.warning("No records found with city data")
-            print(f"\n⚠️  WARNING: No records found with city data!\n")
             return {
                 "data": [],
                 "count": 0,
@@ -1610,18 +1565,14 @@ def get_revenue_by_city(
         
         # CRITICAL VERIFICATION: Ensure we're using "Ship To City" not "Bill From City"
         if city_col.lower() == 'bill from city':
-            logger.error("❌ ERROR: Selected column is 'Bill From City' - this is WRONG!")
-            logger.error("❌ Should use 'Ship To City' instead (customer location)")
-            print(f"\n❌❌❌ ERROR: Selected column is 'Bill From City' - this is WRONG!")
-            print(f"❌ Should use 'Ship To City' instead (customer location)\n")
+            logger.error("Selected column is 'Bill From City' - should use 'Ship To City' instead")
             return {
                 "data": [],
                 "count": 0,
                 "total_revenue": 0.0
             }
         
-        logger.info(f"✅ Using city column: '{city_col}' for revenue by city calculation")
-        print(f"\n✅ VERIFIED: Using column '{city_col}' for city revenue\n")
+        logger.info(f"Using city column: '{city_col}' for revenue by city calculation")
         
         # Fetch data with date filter if provided
         # Use ABS() for revenue to handle both positive and negative values
@@ -1637,109 +1588,31 @@ def get_revenue_by_city(
             {date_filter}
         """
         
-        logger.info(f"Fetching revenue by city - SQL: {sql}")
-        print(f"\n🔍 DEBUG: Executing SQL:\n{sql}\n")
-        print(f"🔍 DEBUG: Using column '{city_col}' (should be 'Ship To City')\n")
         raw_df = execute_query(sql)
         
         logger.info(f"Query returned {len(raw_df)} rows")
-        print(f"\n🔍 DEBUG: Query returned {len(raw_df):,} rows\n")
         
         if raw_df.empty:
             logger.warning("No city data found after query")
-            print(f"\n⚠️  WARNING: Query returned empty result!\n")
-            # Try a simpler query to see if data exists
-            test_sql = f'SELECT "{city_col}", {revenue_col} FROM sales LIMIT 5'
-            test_df = execute_query(test_sql)
-            print(f"🔍 DEBUG: Test query returned {len(test_df)} rows")
-            if not test_df.empty:
-                print(f"🔍 DEBUG: Sample data from test query:")
-                print(test_df.head())
             return {
                 "data": [],
                 "count": 0,
                 "total_revenue": 0.0
             }
         
-        # DEBUG: Show sample raw data
-        print(f"\n🔍 DEBUG: Sample raw data (first 10 rows):")
-        print(raw_df.head(10))
-        print(f"\n🔍 DEBUG: Unique cities in raw data: {raw_df['raw_city'].nunique()}")
-        unique_raw_cities = raw_df['raw_city'].unique()
-        print(f"🔍 DEBUG: All unique cities ({len(unique_raw_cities)}): {unique_raw_cities.tolist()}\n")
-        
-        # CRITICAL: Check if we're seeing Amethi and Mumbai (these might be from Bill From City)
-        if 'Amethi' in unique_raw_cities or 'amethi' in [c.lower() for c in unique_raw_cities]:
-            print(f"⚠️  WARNING: Found 'Amethi' in results - this might indicate wrong column!")
-            print(f"⚠️  'Amethi' is typically a seller location (Bill From City), not customer location")
-        
-        # Show revenue distribution by city
-        print(f"🔍 DEBUG: Revenue by raw city (before normalization):")
-        city_revenue_raw = raw_df.groupby('raw_city')['revenue'].sum().sort_values(ascending=False)
-        print(f"  Total cities with revenue: {len(city_revenue_raw)}")
-        for city, rev in city_revenue_raw.head(20).items():
-            print(f"  {city}: ₹{rev:,.2f}")
-        print()
-        
-        # Verify the column being used
-        print(f"🔍 DEBUG: VERIFICATION - Column being used: '{city_col}'")
-        if city_col.lower() == 'bill from city':
-            print(f"❌❌❌ CRITICAL ERROR: Using 'Bill From City' - this is WRONG!")
-        elif city_col.lower() == 'ship to city':
-            print(f"✅✅✅ CORRECT: Using 'Ship To City' - this is RIGHT!")
-        print()
-        
         # Normalize city names using shared function
         # This ensures consistent matching with get_skus_by_city()
         raw_df['city'] = raw_df['raw_city'].apply(normalize_city_name)
         raw_df = raw_df[raw_df['city'].notna() & (raw_df['city'] != '')]
         
-        # DEBUG: Show normalization results
-        print(f"\n🔍 DEBUG: After normalization:")
-        print(f"  Rows remaining: {len(raw_df):,}")
-        print(f"  Unique normalized cities: {raw_df['city'].nunique()}")
-        unique_normalized = raw_df['city'].unique()
-        print(f"  All normalized cities ({len(unique_normalized)}): {unique_normalized.tolist()}\n")
-        
         # Group by normalized city and sum revenue
         city_revenue = raw_df.groupby('city')['revenue'].sum().reset_index()
-        
-        # DEBUG: Show revenue by normalized city
-        print(f"🔍 DEBUG: Revenue by normalized city (before filtering):")
-        city_revenue_sorted = city_revenue.sort_values('revenue', ascending=False)
-        for idx, row in city_revenue_sorted.head(20).iterrows():
-            print(f"  {row['city']}: ₹{row['revenue']:,.2f}")
-        print()
         
         # Filter out zero/negative revenue
         city_revenue = city_revenue[city_revenue['revenue'] > 0]
         
-        print(f"🔍 DEBUG: After filtering revenue > 0:")
-        print(f"  Cities remaining: {len(city_revenue)}")
-        print()
-        
         # Sort by revenue descending and get top N
         top_cities = city_revenue.sort_values('revenue', ascending=False).head(limit)
-        
-        # DEBUG: Show final results
-        print(f"🔍 DEBUG: Final top {limit} cities:")
-        final_cities = []
-        for idx, row in top_cities.iterrows():
-            city_name = row['city']
-            city_rev = row['revenue']
-            print(f"  {city_name}: ₹{city_rev:,.2f}")
-            final_cities.append(city_name)
-        
-        # CRITICAL CHECK: Verify we're not returning Amethi/Mumbai (Bill From City cities)
-        if 'Amethi' in final_cities or 'Mumbai' in final_cities:
-            print(f"\n⚠️  WARNING: Final results contain 'Amethi' and/or 'Mumbai'")
-            print(f"⚠️  These are typically seller locations (Bill From City)")
-            print(f"⚠️  If you're seeing only these 2 cities, we might be using wrong column!")
-            print(f"⚠️  Column being used: '{city_col}'")
-            if city_col.lower() != 'ship to city':
-                print(f"❌ ERROR: Column '{city_col}' is NOT 'Ship To City'!")
-        
-        print()
         
         # Convert to list of dicts
         cities_list = top_cities.to_dict('records')
@@ -1751,10 +1624,6 @@ def get_revenue_by_city(
         total_revenue = float(top_cities['revenue'].sum())
         
         logger.info(f"Returning {len(cities_list)} cities, total revenue: ₹{total_revenue:,.2f}")
-        logger.info(f"Final cities: {final_cities}")
-        
-        print(f"\n✅ FINAL RESULT: Returning {len(cities_list)} cities to frontend")
-        print(f"✅ Cities: {final_cities}\n")
         
         return {
             "data": cities_list,
@@ -1813,80 +1682,52 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
         column_info = execute_query("DESCRIBE sales")
         available_cols = list(column_info['column_name'].values)
         
-        # DEBUG: Log all available columns
-        logger.info(f"Available columns in sales table (get_skus_by_city): {available_cols}")
-        print(f"\n🔍 DEBUG (get_skus_by_city): Available columns: {available_cols}\n")
+        logger.debug(f"Available columns in sales table (get_skus_by_city): {available_cols}")
         
-        # Find city/region column (try multiple variations)
-        # PRIORITY: "Ship To City" is the correct column (customer delivery location)
-        # EXCLUDE: "Bill From City" (this is wrong - it's the seller location)
+        # Find city/region column
         city_col = None
         
-        # FIRST PRIORITY: "Ship To City" (exact case-insensitive match)
+        # FIRST PRIORITY: "Ship To City"
         for col in available_cols:
             if col.lower() == 'ship to city':
                 city_col = col
                 logger.info(f"Found city column (Ship To City): '{city_col}'")
-                print(f"✅ Found correct column: '{city_col}' (Ship To City)")
                 break
         
-        # If not found, try "region" column (standardized name)
+        # Try "region" column
         if not city_col:
             for col in available_cols:
                 if col.lower() == 'region':
                     city_col = col
                     logger.info(f"Found city column (region): '{city_col}'")
-                    print(f"✅ Found column: '{city_col}' (region)")
                     break
         
-        # If still not found, try other variations (but EXCLUDE "Bill From City")
+        # Try other variations (but EXCLUDE "Bill From City")
         if not city_col:
             region_variations = ['city', 'City', 'location', 'Location', 'shipping_city', 'Shipping City', 
                                'delivery_city', 'Delivery City', 'ship_to_city', 'ship_to_state', 
                                'Ship To City', 'Ship To State', 'ship to state']
             for col in region_variations:
-                if col in available_cols:
-                    # EXCLUDE "Bill From City" - this is NOT what we want
-                    if col.lower() != 'bill from city':
-                        city_col = col
-                        logger.info(f"Found city column (variation): '{city_col}'")
-                        print(f"✅ Found column: '{city_col}' (variation)")
-                        break
+                if col in available_cols and col.lower() != 'bill from city':
+                    city_col = col
+                    logger.info(f"Found city column (variation): '{city_col}'")
+                    break
         
-        # Last resort: Pattern matching (but EXCLUDE "Bill From City")
+        # Last resort: Pattern matching
         if not city_col:
             for col in available_cols:
                 col_lower = col.lower()
-                # EXCLUDE "Bill From City" explicitly
                 if col_lower == 'bill from city':
-                    logger.info(f"Skipping '{col}' - this is Bill From City (wrong column)")
-                    print(f"⚠️  Skipping '{col}' - this is Bill From City (wrong column)")
                     continue
-                
-                # Check if column name contains city/region/location keywords
                 if any(keyword in col_lower for keyword in ['city', 'region', 'location', 'state', 'ship']):
-                    # Verify it's not a date or other type
                     col_type = column_info[column_info['column_name'] == col]['column_type'].values[0]
                     if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
                         city_col = col
                         logger.info(f"Found city column by pattern matching: '{city_col}'")
-                        print(f"✅ Found column by pattern: '{city_col}'")
                         break
         
         if not city_col:
-            logger.warning(f"'Ship To City' or 'region' column not found. Available columns: {available_cols}")
-            print(f"\n⚠️  ERROR (get_skus_by_city): City column not found! Available columns: {available_cols}\n")
-            # Try to get sample data to help debug
-            try:
-                sample = execute_query("SELECT * FROM sales LIMIT 1")
-                if not sample.empty:
-                    print(f"🔍 DEBUG: Sample row columns: {list(sample.columns)}")
-                    print(f"🔍 DEBUG: Sample data:")
-                    for col in sample.columns:
-                        val = sample[col].iloc[0]
-                        print(f"  {col}: {val} (type: {type(val).__name__})")
-            except Exception as e:
-                print(f"🔍 DEBUG: Could not fetch sample: {e}")
+            logger.warning(f"City column not found. Available columns: {available_cols}")
             return {
                 "city": city,
                 "data": [],
@@ -1919,23 +1760,16 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
         
         if not city_col or not sku_col or not revenue_col:
             logger.warning(f"Required columns not found. city_col: {city_col}, sku_col: {sku_col}, revenue_col: {revenue_col}")
-            print(f"\n⚠️  ERROR (get_skus_by_city): Required columns not found!")
-            print(f"  city_col: {city_col}")
-            print(f"  sku_col: {sku_col}")
-            print(f"  revenue_col: {revenue_col}")
-            print(f"  Available columns: {available_cols}\n")
             return {
                 "city": city,
                 "data": [],
                 "count": 0
             }
         
-        # Normalize input city name using shared function
-        # This ensures consistent matching with get_revenue_by_city()
+        # Normalize input city name
         city_normalized = normalize_city_name(city)
         
         logger.info(f"Getting SKUs for city: '{city}' -> normalized: '{city_normalized}'")
-        print(f"\n🔍 DEBUG (get_skus_by_city): Input city: '{city}' -> Normalized: '{city_normalized}'\n")
         
         # Build SQL query
         # We need to normalize the city column in SQL to match the normalized input city
@@ -1964,11 +1798,8 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
         LIMIT {limit * 5}
         """
         
-        logger.info(f"Fetching SKUs for city '{city_normalized}' - SQL: {sql}")
-        print(f"🔍 DEBUG (get_skus_by_city): Executing SQL query\n")
         df = execute_query(sql)
-        
-        print(f"🔍 DEBUG (get_skus_by_city): Query returned {len(df)} rows\n")
+        logger.info(f"Query returned {len(df)} rows for city '{city_normalized}'")
         
         if df.empty:
             logger.warning(f"No SKU data found for city: {city_normalized}")
@@ -1978,47 +1809,25 @@ def get_skus_by_city(city: str, limit: int = 10) -> Dict[str, Any]:
                 "count": 0
             }
         
-        # Normalize city names in the result using shared function
-        # This ensures consistent matching with get_revenue_by_city()
+        # Normalize city names in the result
         df['city_normalized'] = df['raw_city'].apply(normalize_city_name)
-        
-        # DEBUG: Show normalization results
-        print(f"🔍 DEBUG (get_skus_by_city): After normalization:")
-        print(f"  Total rows: {len(df)}")
-        print(f"  Unique normalized cities: {df['city_normalized'].nunique()}")
-        unique_cities_found = df['city_normalized'].unique()
-        print(f"  Cities found: {unique_cities_found.tolist()}")
-        print(f"  Looking for: '{city_normalized}'\n")
         
         city_data = df[df['city_normalized'] == city_normalized]
         
         if city_data.empty:
             logger.warning(f"No SKU data found for normalized city: {city_normalized}")
-            print(f"\n⚠️  WARNING: No data found for normalized city '{city_normalized}'")
-            print(f"⚠️  Input city was: '{city}'")
-            print(f"⚠️  Normalized to: '{city_normalized}'")
-            print(f"⚠️  Available cities in data: {unique_cities_found.tolist()}")
-            
             # Try case-insensitive match as fallback
             city_data_fallback = df[df['city_normalized'].str.lower() == city_normalized.lower()] if 'city_normalized' in df.columns else pd.DataFrame()
             if not city_data_fallback.empty:
-                print(f"⚠️  Found {len(city_data_fallback)} rows with case-insensitive match")
                 city_data = city_data_fallback
             else:
-                # Show sample raw cities to help debug
-                print(f"⚠️  Sample raw cities from query (first 20):")
-                raw_cities_sample = df['raw_city'].unique()[:20]
-                for raw_city in raw_cities_sample:
-                    normalized_sample = normalize_city_name(raw_city)
-                    print(f"    Raw: '{raw_city}' -> Normalized: '{normalized_sample}'")
-                print(f"⚠️  This might be a normalization mismatch issue\n")
                 return {
                     "city": city_normalized,
                     "data": [],
                     "count": 0
                 }
         
-        print(f"✅ Found {len(city_data)} rows for city '{city_normalized}'\n")
+        logger.info(f"Found {len(city_data)} rows for city '{city_normalized}'")
         
         # Group by SKU (in case same SKU appears multiple times)
         sku_summary = city_data.groupby('sku').agg({
@@ -2251,51 +2060,51 @@ def get_movers_decliners(
         def build_date_filter(period_start, period_end):
             start_str = period_start.strftime('%Y-%m-%d')
             end_str = period_end.strftime('%Y-%m-%d')
-        if needs_cast:
+            if needs_cast:
                 return f'CAST("{date_col}" AS DATE) >= \'{start_str}\' AND CAST("{date_col}" AS DATE) <= \'{end_str}\''
-        else:
+            else:
                 return f'"{date_col}" >= \'{start_str}\' AND "{date_col}" <= \'{end_str}\''
         
         # Helper function to build revenue query for a period
         def build_revenue_query(period_start, period_end):
             date_filter = build_date_filter(period_start, period_end)
-        if txn_col:
-            if revenue_col == 'revenue_calc':
+            if txn_col:
+                if revenue_col == 'revenue_calc':
                     return f"""
-                SELECT 
-                    "{sku_col}" as sku,
+                    SELECT 
+                        "{sku_col}" as sku,
                         COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
-                FROM sales
+                    FROM sales
                     WHERE {date_filter}
-                GROUP BY "{sku_col}"
-                """
-            else:
+                    GROUP BY "{sku_col}"
+                    """
+                else:
                     return f"""
-                SELECT 
-                    "{sku_col}" as sku,
+                    SELECT 
+                        "{sku_col}" as sku,
                         COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
-                FROM sales
+                    FROM sales
                     WHERE {date_filter}
-                GROUP BY "{sku_col}"
-                """
-        else:
-            if revenue_col == 'revenue_calc':
-                    return f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
-                FROM sales
-                    WHERE {revenue_col} > 0 AND {date_filter}
-                GROUP BY "{sku_col}"
-                """
+                    GROUP BY "{sku_col}"
+                    """
             else:
+                if revenue_col == 'revenue_calc':
                     return f"""
-                SELECT 
-                    "{sku_col}" as sku,
-                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
-                FROM sales
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
+                    FROM sales
                     WHERE {revenue_col} > 0 AND {date_filter}
-                GROUP BY "{sku_col}"
+                    GROUP BY "{sku_col}"
+                    """
+                else:
+                    return f"""
+                    SELECT 
+                        "{sku_col}" as sku,
+                        COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
+                    FROM sales
+                    WHERE {revenue_col} > 0 AND {date_filter}
+                    GROUP BY "{sku_col}"
                     """
         
         # Fetch revenue for each period
@@ -3371,31 +3180,6 @@ def get_skus_by_region(
         
         logger.info(f"Query returned {len(df)} SKUs for region {region}")
         
-        # DEBUG: Log ALL SKUs for selected region
-        print("\n" + "="*80)
-        print(f"🔍 DEBUG: REGION SKUs - Region: {region}")
-        print("="*80)
-        if df.empty:
-            print(f"⚠️  No SKUs found for region: {region}")
-        else:
-            print(f"Total SKUs found: {len(df)}")
-            print(f"\nAll SKUs for region '{region}':")
-            for idx, row in df.iterrows():
-                sku = row.get('sku', 'N/A')
-                asin = row.get('asin', 'N/A')
-                units = row.get('units', 0)
-                revenue = row.get('revenue', 0)
-                print(f"  {idx+1}. SKU: {sku}")
-                print(f"     ASIN: {asin}")
-                print(f"     Units Sold: {units:,}")
-                print(f"     Revenue: ₹{revenue:,.2f}")
-                print("-" * 80)
-            print(f"\nTotal Units: {df['units'].sum():,}")
-            print(f"Total Revenue: ₹{df['revenue'].sum():,.2f}")
-            logger.info(f"Sample SKUs: {df['sku'].head(5).tolist()}")
-            logger.info(f"Total units: {df['units'].sum()}, Total revenue: {df['revenue'].sum():.2f}")
-        print("="*80 + "\n")
-        
         # Ensure numeric columns
         if not df.empty:
             df['units'] = pd.to_numeric(df['units'], errors='coerce').fillna(0).astype(int)
@@ -3411,3 +3195,110 @@ def get_skus_by_region(
     except Exception as e:
         log_error(e, 'get_skus_by_region', {'region': region, 'limit': limit})
         return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
+
+
+def compare_periods(
+    period1_start: str,
+    period1_end: str,
+    period2_start: str,
+    period2_end: str,
+    metrics: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Compare two time periods across multiple metrics.
+    
+    Useful for month-over-month or period-over-period comparisons.
+    
+    Args:
+        period1_start: Start date of first period (YYYY-MM-DD)
+        period1_end: End date of first period (YYYY-MM-DD)
+        period2_start: Start date of second period (YYYY-MM-DD)
+        period2_end: End date of second period (YYYY-MM-DD)
+        metrics: List of metrics to compare (default: ['revenue', 'orders', 'refund_rate'])
+    
+    Returns:
+        Dictionary with comparison results including:
+        - period1: Metrics for first period
+        - period2: Metrics for second period
+        - changes: Percentage changes for each metric
+        - summary: Human-readable summary
+    """
+    if metrics is None:
+        metrics = ['revenue', 'orders', 'refund_rate']
+    
+    if not table_exists('sales'):
+        return {
+            'period1': {},
+            'period2': {},
+            'changes': {},
+            'summary': 'No data available'
+        }
+    
+    try:
+        # Get metrics for both periods
+        period1_metrics = calculate_metrics(start_date=period1_start, end_date=period1_end)
+        period2_metrics = calculate_metrics(start_date=period2_start, end_date=period2_end)
+        
+        # Extract values
+        period1_data = {
+            'revenue': period1_metrics.get('gross_revenue', 0),
+            'net_revenue': period1_metrics.get('net_revenue', 0),
+            'orders': period1_metrics.get('orders', 0),
+            'refund_rate': period1_metrics.get('refund_rate', 0),
+            'avg_order_value': period1_metrics.get('avg_order_value', 0),
+        }
+        
+        period2_data = {
+            'revenue': period2_metrics.get('gross_revenue', 0),
+            'net_revenue': period2_metrics.get('net_revenue', 0),
+            'orders': period2_metrics.get('orders', 0),
+            'refund_rate': period2_metrics.get('refund_rate', 0),
+            'avg_order_value': period2_metrics.get('avg_order_value', 0),
+        }
+        
+        # Calculate percentage changes
+        changes = {}
+        for metric in metrics:
+            val1 = period1_data.get(metric, 0)
+            val2 = period2_data.get(metric, 0)
+            
+            if val1 == 0:
+                if val2 > 0:
+                    changes[metric] = 100.0  # Infinite growth
+                else:
+                    changes[metric] = 0.0
+            else:
+                changes[metric] = ((val2 - val1) / val1) * 100
+        
+        # Build summary
+        summary_parts = []
+        for metric in metrics:
+            change = changes.get(metric, 0)
+            direction = "↑" if change > 0 else "↓" if change < 0 else "→"
+            summary_parts.append(f"{metric}: {direction}{abs(change):.1f}%")
+        
+        summary = f"Period 2 vs Period 1: {', '.join(summary_parts)}"
+        
+        return {
+            'period1': {
+                'start_date': period1_start,
+                'end_date': period1_end,
+                'metrics': period1_data
+            },
+            'period2': {
+                'start_date': period2_start,
+                'end_date': period2_end,
+                'metrics': period2_data
+            },
+            'changes': changes,
+            'summary': summary
+        }
+        
+    except Exception as e:
+        logger.error(f"Error comparing periods: {e}", exc_info=True)
+        return {
+            'period1': {},
+            'period2': {},
+            'changes': {},
+            'summary': f'Error: {str(e)}'
+        }

@@ -20,6 +20,7 @@ from core.config import settings
 from core.database import execute_query, get_connection
 from utils.external_llm import generate_sql_with_external_llm, calculate_ollama_confidence
 from utils.encryption import APIKeyEncryption
+from services.rag_service import retrieve_context, enhance_prompt_with_rag
 
 logger = logging.getLogger(__name__)
 
@@ -150,9 +151,8 @@ def get_database_schema() -> Dict[str, Any]:
             'DO NOT reference columns that do not exist in the schema (e.g., needs_estimation)',
             'Use standard DuckDB SQL syntax (DATE_TRUNC, CURRENT_DATE, INTERVAL)',
             'CRITICAL: Date columns may be VARCHAR/TEXT - ALWAYS cast to DATE before using date functions',
-            'For month extraction: Use DATE_PART(\'month\', CAST("Invoice Date" AS DATE)) or EXTRACT(MONTH FROM CAST("Invoice Date" AS DATE))',
-            'For date filtering: Use CAST("Invoice Date" AS DATE) >= \'2025-07-01\'',
-            'NEVER use EXTRACT or DATE_PART on VARCHAR columns without CAST - always CAST("Column" AS DATE) first'
+            'For date filtering: Use CAST(date_column AS DATE) >= \'2025-07-01\'',
+            'NEVER use EXTRACT or DATE_PART on VARCHAR columns without CAST'
         ]
         
         # Add specific column warnings based on what exists
@@ -160,6 +160,8 @@ def get_database_schema() -> Dict[str, Any]:
             important_notes.insert(0, f'Use column "{revenue_cols[0]}" for revenue (already in INR, no conversion needed)')
         if txn_cols:
             important_notes.insert(1, f'Use column "{txn_cols[0]}" for transaction type filtering')
+        if date_cols:
+            important_notes.insert(2, f'Use column "{date_cols[0]}" for date filtering')
         
         return {
             'table': 'sales',
@@ -197,17 +199,22 @@ async def generate_sql_from_question(
     schema: Optional[Dict[str, Any]] = None,
     source_file: Optional[str] = None,
     user_id: Optional[str] = None,
+    date_context: Optional[Dict[str, str]] = None,
+    rag_context: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[str], str, float, float]:
     """
     Generate SQL query from natural language question
     
     Tries external LLMs first (OpenAI, Anthropic), then falls back to Ollama.
+    Uses RAG context from ChromaDB for better SQL generation.
     
     Args:
         question: Natural language question
         schema: Optional database schema information (if None, will fetch)
         source_file: Optional source file filter to prevent multi-source data mixing
         user_id: Optional user ID to check for API keys
+        date_context: Optional date range filter
+        rag_context: Optional RAG context from ChromaDB (if None, will fetch)
     
     Returns:
         Tuple of (sql_query, error_message, provider, response_time, confidence)
@@ -228,14 +235,29 @@ async def generate_sql_from_question(
         if 'source_file' in str(schema.get('columns', [])):
             schema_notes.insert(0, f'IMPORTANT: Filter by source_file = \'{source_file}\' to avoid data from multiple CSV files')
     
+    # RAG: Use provided context or retrieve from ChromaDB
+    if rag_context is None:
+        try:
+            logger.info(f"RAG: Retrieving context for question: {question[:100]}...")
+            rag_context = retrieve_context(question, schema)
+            logger.info(f"RAG: Context retrieved successfully")
+        except Exception as e:
+            logger.warning(f"RAG: Error retrieving context: {e}, continuing without RAG context")
+            rag_context = {'schema': schema}  # Fallback to just schema
+    else:
+        logger.info("RAG: Using provided context from caller")
+    
     # Build detailed prompt with schema context
     columns_desc = '\n'.join([f'  {col}' for col in schema.get('columns_with_descriptions', [])])
     important_notes = '\n'.join([f'  - {note}' for note in schema.get('important_notes', [])])
     
-    # Detect net revenue keywords
+    # Detect net revenue keywords (also check RAG analysis)
     net_revenue_keywords = ['net revenue', 'net earnings', 'profit', 'after costs', 'after deductions', 
                            'net profit', 'after refunds', 'after cancels', 'after cancellations']
-    is_net_revenue_query = any(keyword in question.lower() for keyword in net_revenue_keywords)
+    is_net_revenue_query = (
+        any(keyword in question.lower() for keyword in net_revenue_keywords) or
+        rag_context.get('analysis', {}).get('is_net_revenue_query', False)
+    )
     
     # Build comprehensive prompt
     net_revenue_instruction = ""
@@ -267,7 +289,40 @@ WHERE [date filters]
 
 """
     
-    prompt = f"""You are a SQL expert. Generate a DuckDB SQL query to answer this business question.
+    # Get actual column names from RAG context or detect from schema
+    column_mappings = rag_context.get('column_mappings', {})
+    date_col = column_mappings.get('date_column')
+    
+    # Fallback: detect from schema if not in RAG context
+    if not date_col:
+        date_col = "order_date"  # Default
+        if schema.get('columns'):
+            for col in schema['columns']:
+                col_name = col['name'].lower() if isinstance(col, dict) else str(col).lower()
+                if 'date' in col_name:
+                    date_col = col['name'] if isinstance(col, dict) else str(col)
+                    break
+    
+    # Quote column name if it contains spaces
+    date_col_ref = f'"{date_col}"' if ' ' in date_col else date_col
+    
+    # Add date filtering instruction if context provided
+    date_filter_instruction = ""
+    if date_context:
+        start_date = date_context.get('start_date')
+        end_date = date_context.get('end_date')
+        if start_date and end_date:
+            date_filter_instruction = f"""
+MANDATORY DATE FILTER:
+The user has selected a date range: {start_date} to {end_date}
+You MUST add this filter to your query:
+  WHERE CAST({date_col_ref} AS DATE) >= '{start_date}' AND CAST({date_col_ref} AS DATE) <= '{end_date}'
+If the query already has a WHERE clause, add this as AND condition.
+DO NOT ignore this date range - it is critical for accurate results.
+
+"""
+    
+    base_prompt = f"""You are a SQL expert. Generate a DuckDB SQL query to answer this business question.
 
 DATABASE SCHEMA:
 Table: {schema.get('table', 'sales')}
@@ -276,29 +331,34 @@ Columns:
 
 CRITICAL RULES - READ CAREFULLY:
 {important_notes}
-{net_revenue_instruction}
-QUESTION: {question}
+{net_revenue_instruction}{date_filter_instruction}QUESTION: {question}
 
 REQUIREMENTS:
 - Return ONLY the SQL query, no explanations, no markdown, no code blocks
 - Use DuckDB SQL syntax (not MySQL, PostgreSQL, or SQL Server)
-- Use double quotes for column names that contain spaces: "Invoice Date" not Invoice Date
+- Use double quotes for column names that contain spaces
 - Use single quotes for string literals: 'Shipment' not "Shipment"
 - For revenue: SUM the revenue column WHERE transaction_type = 'Shipment'
 - Revenue is already in INR - DO NOT multiply by any number
 - DO NOT use columns that are not in the schema above
 - Add LIMIT 100 if query returns many rows
 - CRITICAL DATE HANDLING:
-  * Date columns are VARCHAR/TEXT - MUST cast to DATE before using date functions
-  * For month extraction: EXTRACT(MONTH FROM CAST("Invoice Date" AS DATE)) or DATE_PART('month', CAST("Invoice Date" AS DATE))
-  * For date filtering: WHERE CAST("Invoice Date" AS DATE) >= '2025-07-01'
+  * The date column is: {date_col_ref}
+  * Date columns may be VARCHAR/TEXT - MUST cast to DATE before using date functions
+  * For month extraction: EXTRACT(MONTH FROM CAST({date_col_ref} AS DATE))
+  * For date filtering: WHERE CAST({date_col_ref} AS DATE) >= '2025-07-01'
   * NEVER use EXTRACT or DATE_PART directly on VARCHAR columns - always CAST first
-  * CRITICAL: When user asks "in July" or "in month X", ALWAYS filter by YEAR AND MONTH using date range
-  * Use: WHERE CAST("Invoice Date" AS DATE) >= '2025-07-01' AND CAST("Invoice Date" AS DATE) <= '2025-07-31'
-  * NEVER use only EXTRACT(MONTH) = 7 without year filter - this includes ALL years and causes incorrect results
   * If year not specified, use current year (2025) as default
 
 SQL QUERY (only the query, nothing else):"""
+    
+    # RAG: Enhance prompt with retrieved context
+    try:
+        prompt = enhance_prompt_with_rag(base_prompt, rag_context)
+        logger.debug("RAG: Prompt enhanced with context")
+    except Exception as e:
+        logger.warning(f"RAG: Error enhancing prompt: {e}, using base prompt")
+        prompt = base_prompt
     
     # Try external LLMs first if user_id is provided
     if user_id:
@@ -330,6 +390,9 @@ SQL QUERY (only the query, nothing else):"""
             logger.error(f"External LLM call exception: {str(e)}, falling back to Ollama")
     
     # Fallback to Ollama
+    # Note: generate_sql_with_ollama is a synchronous function, so we call it without await.
+    # This is correct - async functions can call sync functions directly.
+    # The function is async because it needs to await generate_sql_with_external_llm() above.
     logger.info(f"Ollama query started: {question}")
     sql, error, provider, response_time, confidence = generate_sql_with_ollama(prompt, question, schema, source_file, is_net_revenue_query)
     
@@ -610,7 +673,7 @@ def generate_sql_with_ollama(
             month_only_pattern = r"EXTRACT\s*\(\s*MONTH\s+FROM\s+CAST\([^)]+AS\s+DATE\)\s*\)\s*=\s*(\d+)"
             if re.search(month_only_pattern, sql, re.IGNORECASE):
                 # Check if year filter already exists
-                if 'EXTRACT(YEAR' not in sql.upper() and 'EXTRACT\s*\(\s*YEAR' not in sql.upper():
+                if 'EXTRACT(YEAR' not in sql.upper() and not re.search(r'EXTRACT\s*\(\s*YEAR', sql, re.IGNORECASE):
                     # Extract month number
                     match = re.search(month_only_pattern, sql, re.IGNORECASE)
                     if match:

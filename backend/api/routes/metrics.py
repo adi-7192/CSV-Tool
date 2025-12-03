@@ -39,6 +39,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+@router.get("")
 @router.get("/")
 async def get_metrics(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
@@ -99,6 +100,14 @@ async def get_metrics(
         if transaction_type:
             validate_transaction_type(transaction_type)
         
+        # Check if sales table exists and has data
+        from core.database import table_exists, execute_query
+        has_data = False
+        if table_exists('sales'):
+            count_result = execute_query("SELECT COUNT(*) as count FROM sales")
+            if not count_result.empty and count_result.iloc[0]['count'] > 0:
+                has_data = True
+        
         metrics = calculate_metrics(start_date, end_date, transaction_type, source_file)
         
         duration_ms = (time.time() - start_time) * 1000
@@ -106,6 +115,7 @@ async def get_metrics(
         
         return {
             "data": metrics,
+            "has_data": has_data,
             "period": {
                 "start_date": start_date,
                 "end_date": end_date,

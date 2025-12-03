@@ -30,13 +30,22 @@ class Settings(BaseSettings):
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # API Key Encryption
+    API_KEY_ENCRYPTION_KEY: Optional[str] = None
+
+    # JWT Authentication
+    JWT_SECRET: str = "your-secret-key-change-in-production"  # Should be set via env var
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRES_IN: int = 86400  # 24 hours in seconds
+
     # Logging
     LOG_LEVEL: str = "INFO"
 
     class Config:
         env_file = "../.env"  # Look for .env in project root
         case_sensitive = True
-        extra = "ignore"  # Ignore extra environment variables
+        # Allow extra environment variables (needed for API_KEY_ENCRYPTION_KEY)
+        extra = "allow"
 
 
 # Global settings instance

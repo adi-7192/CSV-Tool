@@ -1,0 +1,477 @@
+/**
+ * Global Polish Styles
+ * 
+ * Final visual polish, microinteractions, and animation refinements
+ * for a premium, production-ready feel.
+ */
+
+/* ============================================================================
+   SMOOTH SCROLLING
+   ============================================================================ */
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* ============================================================================
+   SELECTION STYLING
+   ============================================================================ */
+
+::selection {
+  background-color: rgba(37, 99, 235, 0.2);
+  color: #1F2937;
+}
+
+::-moz-selection {
+  background-color: rgba(37, 99, 235, 0.2);
+  color: #1F2937;
+}
+
+/* ============================================================================
+   FOCUS OUTLINES
+   ============================================================================ */
+
+*:focus-visible {
+  outline: 2px solid #2563EB;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Remove default focus for custom-styled elements */
+button:focus,
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+}
+
+/* ============================================================================
+   BUTTON ENHANCEMENTS
+   ============================================================================ */
+
+.ant-btn {
+  transition: all 0.2s ease;
+  will-change: transform, box-shadow;
+}
+
+.ant-btn:hover:not(:disabled) {
+  transform: scale(1.02);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.ant-btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.ant-btn-primary:hover:not(:disabled) {
+  background-color: #1D4ED8;
+  border-color: #1D4ED8;
+  box-shadow: 0 4px 6px rgba(37, 99, 235, 0.3);
+}
+
+.ant-btn-default:hover:not(:disabled),
+.ant-btn-text:hover:not(:disabled) {
+  background-color: rgba(37, 99, 235, 0.1);
+  border-color: #2563EB;
+  color: #2563EB;
+}
+
+.ant-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.ant-btn-loading {
+  pointer-events: none;
+}
+
+.ant-btn-loading .ant-btn-loading-icon {
+  margin-right: 8px;
+}
+
+/* ============================================================================
+   FORM FIELD POLISH
+   ============================================================================ */
+
+.ant-input,
+.ant-input-password,
+.ant-select-selector,
+.ant-picker {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ant-input:hover:not(:disabled),
+.ant-input-password:hover:not(:disabled),
+.ant-select:hover .ant-select-selector:not(.ant-select-disabled),
+.ant-picker:hover:not(.ant-picker-disabled) {
+  border-color: #9CA3AF;
+}
+
+.ant-input:focus,
+.ant-input-focused,
+.ant-input-password:focus,
+.ant-input-password-focused,
+.ant-select-focused .ant-select-selector,
+.ant-picker-focused {
+  border-color: #2563EB !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1) !important;
+}
+
+.ant-input-status-error,
+.ant-input-password-status-error,
+.ant-select-status-error .ant-select-selector,
+.ant-picker-status-error {
+  border-color: #DC2626 !important;
+}
+
+.ant-form-item-explain-error {
+  animation: slideInDown 0.3s ease-out;
+  color: #DC2626;
+}
+
+/* ============================================================================
+   SELECT/DROPDOWN POLISH
+   ============================================================================ */
+
+.ant-select-dropdown {
+  animation: scaleIn 0.2s ease-out;
+  box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+}
+
+.ant-select-item {
+  transition: background-color 0.15s ease;
+}
+
+.ant-select-item:hover {
+  background-color: #F3F4F6;
+}
+
+.ant-select-item-option-selected {
+  background-color: rgba(37, 99, 235, 0.1);
+  color: #2563EB;
+  font-weight: 500;
+}
+
+.ant-select-item-option-selected::after {
+  content: '✓';
+  float: right;
+  color: #2563EB;
+  font-weight: bold;
+}
+
+/* ============================================================================
+   CARD INTERACTIONS
+   ============================================================================ */
+
+.card-enter {
+  animation: slideInUp 0.4s ease-out forwards;
+  opacity: 0;
+}
+
+.card-hoverable {
+  transition: all 0.2s ease;
+  will-change: transform, box-shadow;
+}
+
+.card-hoverable:hover {
+  box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+  border-color: #2563EB;
+}
+
+.card-hoverable:active {
+  transform: scale(0.99);
+}
+
+/* ============================================================================
+   MODAL POLISH
+   ============================================================================ */
+
+.ant-modal-mask {
+  animation: fadeIn 0.3s ease-in;
+  backdrop-filter: blur(2px);
+}
+
+.ant-modal-wrap {
+  animation: fadeIn 0.3s ease-in;
+}
+
+.ant-modal {
+  animation: scaleIn 0.3s ease-out;
+}
+
+.ant-modal-close {
+  transition: all 0.2s ease;
+}
+
+.ant-modal-close:hover {
+  background-color: #F3F4F6;
+  transform: scale(1.1);
+}
+
+.ant-modal-footer {
+  padding: 16px 24px;
+  border-top: 1px solid #E5E7EB;
+}
+
+.ant-modal-footer .ant-btn {
+  margin-left: 8px;
+}
+
+/* ============================================================================
+   TABLE ENHANCEMENTS
+   ============================================================================ */
+
+.ant-table-tbody > tr {
+  transition: background-color 0.15s ease;
+}
+
+.ant-table-tbody > tr:hover > td {
+  background-color: #F9FAFB !important;
+}
+
+.ant-table-tbody > tr.ant-table-row-selected > td {
+  background-color: rgba(37, 99, 235, 0.1) !important;
+}
+
+.ant-table-thead > tr > th {
+  transition: background-color 0.15s ease;
+}
+
+.ant-table-thead > tr > th.ant-table-column-sort {
+  background-color: #F9FAFB;
+}
+
+.ant-table-column-sorter {
+  transition: transform 0.2s ease;
+}
+
+.ant-table-column-sorter-up.active,
+.ant-table-column-sorter-down.active {
+  color: #2563EB;
+}
+
+/* ============================================================================
+   PAGINATION POLISH
+   ============================================================================ */
+
+.ant-pagination-item {
+  transition: all 0.2s ease;
+}
+
+.ant-pagination-item:hover:not(.ant-pagination-item-active) {
+  background-color: #F3F4F6;
+  border-color: #2563EB;
+}
+
+.ant-pagination-item-active {
+  background-color: #2563EB;
+  border-color: #2563EB;
+}
+
+.ant-pagination-item-active a {
+  color: #FFFFFF;
+}
+
+.ant-pagination-item:disabled,
+.ant-pagination-prev:disabled,
+.ant-pagination-next:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ============================================================================
+   TOAST NOTIFICATIONS
+   ============================================================================ */
+
+.ant-message {
+  animation: slideInDown 0.3s ease-out;
+}
+
+.ant-message-notice-content {
+  box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+}
+
+.ant-notification {
+  animation: slideInRight 0.3s ease-out;
+}
+
+.ant-notification-notice {
+  box-shadow: 0 10px 15px rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+}
+
+.ant-notification-notice-close {
+  transition: all 0.2s ease;
+}
+
+.ant-notification-notice-close:hover {
+  background-color: #F3F4F6;
+  transform: scale(1.1);
+}
+
+/* ============================================================================
+   EMPTY STATE POLISH
+   ============================================================================ */
+
+.empty-state-enter {
+  animation: fadeIn 0.4s ease-in;
+}
+
+.empty-state-icon {
+  animation: bounce 1s ease-in-out;
+}
+
+/* ============================================================================
+   SCROLL TO TOP BUTTON
+   ============================================================================ */
+
+.scroll-to-top {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background-color: #2563EB;
+  color: #FFFFFF;
+  border: none;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.3s ease;
+  z-index: 1000;
+  opacity: 0;
+  transform: translateY(20px);
+  pointer-events: none;
+}
+
+.scroll-to-top.visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.scroll-to-top:hover {
+  background-color: #1D4ED8;
+  transform: translateY(-4px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+}
+
+.scroll-to-top:active {
+  transform: translateY(-2px);
+}
+
+/* ============================================================================
+   KEYFRAME ANIMATIONS
+   ============================================================================ */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInDown {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes bounce {
+  0%, 20%, 50%, 80%, 100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-10px);
+  }
+  60% {
+    transform: translateY(-5px);
+  }
+}
+
+/* ============================================================================
+   ACCESSIBILITY - REDUCED MOTION
+   ============================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================================
+   PERFORMANCE OPTIMIZATIONS
+   ============================================================================ */
+
+.card-hoverable,
+.ant-btn,
+.ant-input,
+.ant-select-selector,
+.ant-picker {
+  will-change: transform, box-shadow;
+}
+
+/* ============================================================================
+   REMOVE FOUC (Flash of Unstyled Content)
+   ============================================================================ */
+
+body {
+  visibility: hidden;
+}
+
+body.loaded {
+  visibility: visible;
+  animation: fadeIn 0.3s ease-in;
+}
+

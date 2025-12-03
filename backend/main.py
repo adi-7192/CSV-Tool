@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.routes import health, upload, metrics, charts, chat, verification, data_status, data_routes
+from api.routes import health, upload, metrics, charts, chat, verification, data_status, data_routes, file_routes, user_api_keys, auth, users, admin_users
 from core.config import settings
 from core.database import init_database
 from utils.logger import setup_logger, app_logger
@@ -42,30 +42,51 @@ app = FastAPI(
     docs_url="/api/docs",
     redoc_url="/api/redoc",
     lifespan=lifespan,
+    redirect_slashes=False,  # Don't redirect /path to /path/ - prevents 307 issues
 )
 
 # CORS middleware (allow React frontend to access API)
+# In development, allow all localhost ports; in production, use specific origins
+cors_origins = [
+    "http://localhost:3000",  # React dev server
+    "http://localhost:5173",  # Vite dev server (default)
+    "http://localhost:5174",  # Vite dev server (alternate port)
+    "http://127.0.0.1:5173",  # Vite dev server (127.0.0.1)
+    "http://127.0.0.1:5174",  # Vite dev server (127.0.0.1 alternate)
+]
+
+# Add production frontend URL if set
+if settings.FRONTEND_URL:
+    cors_origins.append(settings.FRONTEND_URL)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React dev server
-        "http://localhost:5173",  # Vite dev server
-        settings.FRONTEND_URL,    # Production frontend
-    ],
+    allow_origins=cors_origins,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",  # Allow any localhost port in dev
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Include routers
+# Public routes (no authentication required)
 app.include_router(health.router, prefix="/api/health", tags=["Health"])
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+
+# Protected routes (authentication required - will be added via Depends in future)
+app.include_router(users.router, prefix="/api/users", tags=["Users"])
 app.include_router(upload.router, prefix="/api/upload", tags=["Upload"])
+app.include_router(file_routes.router, prefix="/api/files", tags=["Files"])
 app.include_router(metrics.router, prefix="/api/metrics", tags=["Metrics"])
 app.include_router(charts.router, prefix="/api/charts", tags=["Charts"])
 app.include_router(chat.router, prefix="/api/chat", tags=["AI Chat"])
 app.include_router(verification.router, prefix="/api/verification", tags=["Verification"])
 app.include_router(data_status.router, prefix="/api/data", tags=["Data Status"])
 app.include_router(data_routes.router, prefix="/api/data", tags=["Data"])
+app.include_router(user_api_keys.router, prefix="/api/user/api-key", tags=["User API Keys"])
+
+# Admin routes (require admin role)
+app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin"])
 
 
 # Root endpoint

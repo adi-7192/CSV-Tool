@@ -86,7 +86,7 @@ interface DataStore {
   error: string | null;
 
   // Methods
-  fetchMetrics: (start: string, end: string) => Promise<void>;
+  fetchMetrics: (start: string, end: string) => Promise<boolean>;
   fetchChartData: (start: string, end: string) => Promise<void>;
   fetchSKUPerformance: (start: string, end: string) => Promise<void>;
   fetchInsights: (start: string, end: string) => Promise<void>;
@@ -123,12 +123,15 @@ export const useDataStore = create<DataStore>((set) => ({
           metrics: response.data,
           metricsLoading: false,
         });
+        // Store has_data flag for empty state check
+        return response.has_data ?? true;
       } else {
         set({
           metrics: null,
           metricsLoading: false,
           error: 'Failed to fetch metrics',
         });
+        return false;
       }
     } catch (error) {
       const errorMessage =
@@ -137,6 +140,7 @@ export const useDataStore = create<DataStore>((set) => ({
         error: errorMessage,
         metricsLoading: false,
       });
+      return false;
     }
   },
 

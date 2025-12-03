@@ -294,21 +294,22 @@ export interface DeleteUploadResponse {
 }
 
 /**
- * Delete a specific upload by ID
- * @param fileId - File/ingestion ID to delete
+ * Delete a specific upload by ingestion ID
+ * @param ingestionId - Ingestion ID to delete
  * @returns Delete response with success status and message
  */
-export const deleteUpload = async (_fileId: string): Promise<DeleteUploadResponse> => {
+export const deleteUpload = async (ingestionId: string): Promise<DeleteUploadResponse> => {
   try {
-    // Note: This endpoint may not exist in the backend yet
-    // For now, return error response to indicate operation not supported
-    console.warn('deleteUpload: Endpoint not implemented in backend');
-    return {
-      success: false,
-      message: 'Delete operation not yet implemented in backend',
-    };
+    const response = await apiClient.delete<DeleteUploadResponse>(`/api/upload/${ingestionId}`);
+    return response.data;
   } catch (error) {
     console.error('Error deleting upload:', error);
+    if (error instanceof AxiosError) {
+      return {
+        success: false,
+        message: error.response?.data?.detail || 'Failed to delete upload',
+      };
+    }
     return {
       success: false,
       message: 'Failed to delete upload',
@@ -322,19 +323,51 @@ export const deleteUpload = async (_fileId: string): Promise<DeleteUploadRespons
  */
 export const deleteAllUploads = async (): Promise<DeleteUploadResponse> => {
   try {
-    // Note: This endpoint may not exist in the backend yet
-    // For now, return error response to indicate operation not supported
-    console.warn('deleteAllUploads: Endpoint not implemented in backend');
-    return {
-      success: false,
-      message: 'Delete all operation not yet implemented in backend',
-    };
+    const response = await apiClient.delete<DeleteUploadResponse>('/api/upload/all');
+    return response.data;
   } catch (error) {
     console.error('Error deleting all uploads:', error);
+    if (error instanceof AxiosError) {
+      return {
+        success: false,
+        message: error.response?.data?.detail || 'Failed to delete all uploads',
+      };
+    }
     return {
       success: false,
       message: 'Failed to delete all uploads',
     };
+  }
+};
+
+/**
+ * Download a file by ingestion ID
+ * @param ingestionId - Ingestion ID of the file to download
+ * @param filename - Optional filename for the download
+ */
+export const downloadFile = async (ingestionId: string, filename?: string): Promise<void> => {
+  try {
+    const response = await apiClient.get(`/api/upload/download/${ingestionId}`, {
+      responseType: 'blob',
+    });
+    
+    // Create blob and download
+    const blob = new Blob([response.data], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename || `download_${ingestionId}.csv`;
+    
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('Error downloading file:', error);
+    if (error instanceof AxiosError) {
+      throw new Error(error.response?.data?.detail || 'Failed to download file');
+    }
+    throw error;
   }
 };
 

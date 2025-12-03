@@ -121,6 +121,182 @@ async def get_upload_history():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/{ingestion_id}")
+async def delete_file(ingestion_id: str):
+    """
+    Delete a specific uploaded file and its data
+    
+    Args:
+        ingestion_id: The ingestion ID of the file to delete
+    
+    Returns:
+        {
+            "success": bool,
+            "deleted_rows": int,
+            "message": str
+        }
+    """
+    from core.database import get_connection, table_exists, execute_query
+    
+    if not table_exists('ingestion_log'):
+        raise HTTPException(status_code=404, detail="No uploads found")
+    
+    try:
+        conn = get_connection()
+        
+        # Get file info
+        sql = """
+        SELECT ingestion_id, filename
+        FROM ingestion_log
+        WHERE ingestion_id = ?
+        LIMIT 1
+        """
+        
+        result_df = conn.execute(sql, [ingestion_id]).fetchdf()
+        
+        if result_df.empty:
+            raise HTTPException(status_code=404, detail=f"File with ingestion_id {ingestion_id} not found")
+        
+        filename = result_df.iloc[0]['filename']
+        
+        # Count rows to be deleted
+        deleted_rows = 0
+        if table_exists('sales'):
+            count_sql = """
+            SELECT COUNT(*) as count
+            FROM sales
+            WHERE ingestion_id = ?
+            """
+            count_df = conn.execute(count_sql, [ingestion_id]).fetchdf()
+            if not count_df.empty:
+                deleted_rows = int(count_df.iloc[0]['count'])
+        
+        # Delete rows from sales table
+        if table_exists('sales') and deleted_rows > 0:
+            delete_sql = """
+            DELETE FROM sales
+            WHERE ingestion_id = ?
+            """
+            conn.execute(delete_sql, [ingestion_id])
+        
+        # Delete from ingestion_log
+        delete_log_sql = """
+        DELETE FROM ingestion_log
+        WHERE ingestion_id = ?
+        """
+        conn.execute(delete_log_sql, [ingestion_id])
+        
+        return {
+            'success': True,
+            'deleted_rows': deleted_rows,
+            'message': f'Successfully deleted {deleted_rows} rows for file {filename}'
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
+
+
+@router.delete("/all")
+async def delete_all_files():
+    """
+    Delete all uploaded files and data
+    
+    WARNING: This will delete ALL data in the database!
+    
+    Returns:
+        {
+            "success": bool,
+            "message": str
+        }
+    """
+    from services.uploads_service import delete_all_uploads
+    
+    result = delete_all_uploads()
+    
+    if not result.get('success'):
+        raise HTTPException(
+            status_code=500,
+            detail=result.get('message', 'Failed to delete all files')
+        )
+    
+    return result
+
+
+@router.get("/download/{ingestion_id}")
+async def download_file(ingestion_id: str):
+    """
+    Download the original CSV file for a specific upload
+    
+    Args:
+        ingestion_id: The ingestion ID of the file to download
+    
+    Returns:
+        CSV file download
+    """
+    from fastapi.responses import StreamingResponse
+    from core.database import execute_query, table_exists
+    import io
+    
+    # Get file info from ingestion_log
+    if not table_exists('ingestion_log'):
+        raise HTTPException(status_code=404, detail="No uploads found")
+    
+    try:
+        conn = get_connection()
+        
+        # Get file info from ingestion_log
+        sql = """
+        SELECT filename, ingestion_id
+        FROM ingestion_log
+        WHERE ingestion_id = ?
+        LIMIT 1
+        """
+        
+        result_df = conn.execute(sql, [ingestion_id]).fetchdf()
+        
+        if result_df.empty:
+            raise HTTPException(status_code=404, detail=f"File with ingestion_id {ingestion_id} not found")
+        
+        filename = result_df.iloc[0]['filename']
+        
+        # Export data for this ingestion_id from sales table
+        if not table_exists('sales'):
+            raise HTTPException(status_code=404, detail="No data found for this file")
+        
+        export_sql = """
+        SELECT *
+        FROM sales
+        WHERE ingestion_id = ?
+        ORDER BY loaded_at
+        """
+        
+        data_df = conn.execute(export_sql, [ingestion_id]).fetchdf()
+        
+        if data_df.empty:
+            raise HTTPException(status_code=404, detail="No data found for this file")
+        
+        # Convert to CSV
+        csv_buffer = io.StringIO()
+        data_df.to_csv(csv_buffer, index=False)
+        csv_content = csv_buffer.getvalue()
+        
+        # Create streaming response
+        return StreamingResponse(
+            io.BytesIO(csv_content.encode('utf-8')),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
 @router.post("/multiple")
 async def upload_multiple(files: List[UploadFile] = File(...)):
     """

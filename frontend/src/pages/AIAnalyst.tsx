@@ -39,6 +39,7 @@ import {
   ChatMessage,
   ChatConversation,
 } from '@/store/chatStore';
+import { useDataStore } from '@/store/dataStore';
 import {
   SPACING,
   COLORS,
@@ -112,6 +113,9 @@ const AIAnalyst: React.FC = () => {
     getCurrentMessages,
     getFilteredConversations,
   } = useChatStore();
+  
+  // Get date range from global store
+  const { dateRange } = useDataStore();
 
   const [inputValue, setInputValue] = useState('');
   const [hasData, setHasData] = useState<boolean | null>(null);
@@ -128,10 +132,12 @@ const AIAnalyst: React.FC = () => {
     has_key: boolean;
     masked_key: string | null;
     is_valid: boolean;
+    provider: string | null;
   }>({
     has_key: false,
     masked_key: null,
     is_valid: false,
+    provider: null,
   });
   const chatEndRef = useRef<HTMLDivElement>(null);
   const timeoutRef = useRef<number | null>(null);
@@ -145,12 +151,42 @@ const AIAnalyst: React.FC = () => {
   const filteredConversations = getFilteredConversations();
   const conversationGroups = groupConversationsByDate(filteredConversations);
 
-  // Scroll to bottom when new message is added
+  // Limit messages to prevent performance issues (show last 100 messages)
+  const MAX_MESSAGES_TO_RENDER = 100;
+  const displayedMessages = currentMessages.length > MAX_MESSAGES_TO_RENDER
+    ? currentMessages.slice(-MAX_MESSAGES_TO_RENDER)
+    : currentMessages;
+  
+  const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+
+  // Track if user has manually scrolled up
   useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    const container = chatContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      // Check if user is near bottom (within 100px)
+      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+      setIsUserScrolledUp(!isNearBottom);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  // Scroll to bottom when new message is added (only if user hasn't scrolled up)
+  useEffect(() => {
+    if (chatEndRef.current && !isUserScrolledUp) {
+      // Use setTimeout to ensure DOM is updated
+      setTimeout(() => {
+        if (chatEndRef.current) {
+          chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+      }, 100);
     }
-  }, [currentMessages, loading]);
+  }, [currentMessages.length, loading, isUserScrolledUp]);
 
   // Check if data exists
   const checkDataExists = async () => {
@@ -176,40 +212,56 @@ const AIAnalyst: React.FC = () => {
   }, []);
 
   // Check API key status
-  const checkAPIKeys = async (): Promise<{ hasOpenAI: boolean; hasAnthropic: boolean }> => {
+  const checkAPIKeys = async (): Promise<{ hasOpenAI: boolean; hasAnthropic: boolean; hasGemini: boolean; activeProvider: string | null }> => {
     try {
       const userId = localStorage.getItem('userId') || 'user-123';
-      const [openaiKey, anthropicKey] = await Promise.all([
+      const [openaiKey, anthropicKey, geminiKey] = await Promise.all([
         apiKeyService.getAPIKey('openai', userId).catch(() => null),
         apiKeyService.getAPIKey('anthropic', userId).catch(() => null),
+        apiKeyService.getAPIKey('gemini', userId).catch(() => null),
       ]);
-      const hasOpenAI = openaiKey !== null;
-      const hasAnthropic = anthropicKey !== null;
+      const hasOpenAI = openaiKey !== null && openaiKey.enabled;
+      const hasAnthropic = anthropicKey !== null && anthropicKey.enabled;
+      const hasGemini = geminiKey !== null && geminiKey.enabled;
       setHasOpenAIKey(hasOpenAI);
       setHasAnthropicKey(hasAnthropic);
       
-      // Update API key status for indicator (prioritize OpenAI)
-      if (openaiKey) {
+      // Update API key status for indicator (prioritize: OpenAI > Anthropic > Gemini)
+      let activeProvider: string | null = null;
+      if (openaiKey && openaiKey.enabled) {
+        activeProvider = 'OpenAI';
         setApiKeyStatus({
           has_key: true,
           masked_key: openaiKey.masked_key,
-          is_valid: true, // Assume valid if key exists (backend validates on save)
+          is_valid: true,
+          provider: 'openai',
         });
-      } else if (anthropicKey) {
+      } else if (anthropicKey && anthropicKey.enabled) {
+        activeProvider = 'Anthropic';
         setApiKeyStatus({
           has_key: true,
           masked_key: anthropicKey.masked_key,
           is_valid: true,
+          provider: 'anthropic',
+        });
+      } else if (geminiKey && geminiKey.enabled) {
+        activeProvider = 'Gemini';
+        setApiKeyStatus({
+          has_key: true,
+          masked_key: geminiKey.masked_key,
+          is_valid: true,
+          provider: 'gemini',
         });
       } else {
         setApiKeyStatus({
           has_key: false,
           masked_key: null,
           is_valid: false,
+          provider: null,
         });
       }
       
-      return { hasOpenAI, hasAnthropic };
+      return { hasOpenAI, hasAnthropic, hasGemini, activeProvider };
     } catch (error) {
       console.error('Error checking API keys:', error);
       setHasOpenAIKey(false);
@@ -218,8 +270,9 @@ const AIAnalyst: React.FC = () => {
         has_key: false,
         masked_key: null,
         is_valid: false,
+        provider: null,
       });
-      return { hasOpenAI: false, hasAnthropic: false };
+      return { hasOpenAI: false, hasAnthropic: false, hasGemini: false, activeProvider: null };
     }
   };
 
@@ -264,8 +317,14 @@ const AIAnalyst: React.FC = () => {
   const addErrorMessage = useCallback((
     conversationId: string,
     errorText: string,
-    exampleQuestions?: string[]
+    exampleQuestions?: string[],
+    provider?: string | null
   ) => {
+    // const providerName = provider === 'openai' ? 'OpenAI' : 
+    //                     provider === 'anthropic' ? 'Anthropic' : 
+                        provider === 'gemini' ? 'Gemini' : 
+                        provider === 'ollama' ? 'Ollama' : null;
+    
     const errorMessage: ChatMessage = {
       id: `error-${Date.now()}`,
       role: 'assistant',
@@ -273,21 +332,24 @@ const AIAnalyst: React.FC = () => {
       timestamp: new Date(),
       isError: true,
       exampleQuestions,
+      provider: provider || null,
     };
     addMessage(errorMessage, conversationId);
   }, [addMessage]);
 
   // Handle chat question submission
-  const handleSendMessage = useCallback(async () => {
-    if (!inputValue.trim() || loading || !activeConversationId) return;
+  const handleSendMessage = useCallback(async (questionOverride?: string) => {
+    const questionToSend = questionOverride || inputValue.trim();
+    if (!questionToSend || loading) return;
 
-    const userQuestion = inputValue.trim();
+    const userQuestion = questionToSend;
     setInputValue('');
 
-    // Ensure we have an active conversation
+    // Ensure we have an active conversation - create one if needed
     let conversationId = activeConversationId;
     if (!conversationId) {
       conversationId = createConversation();
+      setActiveConversation(conversationId);
     }
 
     // Add user message
@@ -350,15 +412,15 @@ const AIAnalyst: React.FC = () => {
       setElapsedTime(0);
       
       // Check API key status before showing timeout message
-      const { hasOpenAI, hasAnthropic } = await checkAPIKeys();
-      const hasAnyKey = hasOpenAI || hasAnthropic;
+      const { hasOpenAI, hasAnthropic, hasGemini } = await checkAPIKeys();
+      const hasAnyKey = hasOpenAI || hasAnthropic || hasGemini;
       
       let timeoutMessage: string;
       let exampleQuestions: string[] = [];
       
       if (!hasAnyKey) {
         // No API key - suggest adding one
-        timeoutMessage = "This is taking longer than expected. Add your OpenAI API key in Settings for faster responses.";
+        timeoutMessage = "This is taking longer than expected. Add your OpenAI, Anthropic, or Gemini API key in Settings for faster responses.";
         exampleQuestions = ['Add API Key'];
       } else {
         // Has key but still timing out - might be invalid or data issue
@@ -374,8 +436,15 @@ const AIAnalyst: React.FC = () => {
     }, TIMEOUT_DURATION);
 
     try {
-      // Call chat API
-      const response: ChatResponse | null = await chatService.askQuestion(userQuestion);
+      // Call chat API with date range context (with safety checks)
+      const dateContext = dateRange && dateRange.start && dateRange.end
+        ? { start_date: dateRange.start, end_date: dateRange.end }
+        : {};
+      
+      const response: ChatResponse | null = await chatService.askQuestion(
+        userQuestion,
+        dateContext
+      );
 
       // Clear timeout if response received
       if (timeoutRef.current) {
@@ -402,10 +471,16 @@ const AIAnalyst: React.FC = () => {
 
       // Check if response has error
       if (response.error) {
+        const provider = response.provider || 'unknown';
+        const providerName = provider === 'openai' ? 'OpenAI' : provider === 'anthropic' ? 'Anthropic' : provider === 'gemini' ? 'Gemini' : provider === 'ollama' ? 'Ollama' : 'AI';
+        const errorMsg = response.error || "I couldn't process that question. Please try rephrasing it.";
+        const fullErrorMsg = `${errorMsg}${provider !== 'unknown' ? ` (Using ${providerName})` : ''}`;
+        
         addErrorMessage(
           conversationId,
-          response.error || "I couldn't process that question. Please try rephrasing it.",
-          ['Show revenue last month', 'Top 10 products']
+          fullErrorMsg,
+          ['Show revenue last month', 'Top 10 products'],
+          provider
         );
         setLoading(false);
         return;
@@ -513,10 +588,8 @@ const AIAnalyst: React.FC = () => {
   // Handle example question click
   const handleExampleQuestion = (question: string) => {
     setInputValue(question);
-    // Auto-send after a short delay
-    setTimeout(() => {
-      handleSendMessage();
-    }, 100);
+    // Directly send the question, bypassing the stale closure
+    handleSendMessage(question);
   };
 
   // Handle Enter key press (Shift+Enter for new line, Enter to send)
@@ -532,9 +605,8 @@ const AIAnalyst: React.FC = () => {
     const handleExampleQuestionEvent = (e: CustomEvent) => {
       const question = e.detail;
       setInputValue(question);
-      setTimeout(() => {
-        handleSendMessage();
-      }, 100);
+      // Directly send the question
+      handleSendMessage(question);
     };
     
     window.addEventListener('exampleQuestion', handleExampleQuestionEvent as EventListener);
@@ -925,7 +997,7 @@ const AIAnalyst: React.FC = () => {
               }}
             >
               {apiKeyStatus.has_key && apiKeyStatus.is_valid
-                ? 'OpenAI API key active'
+                ? `${apiKeyStatus.provider === 'openai' ? 'OpenAI' : apiKeyStatus.provider === 'anthropic' ? 'Anthropic' : apiKeyStatus.provider === 'gemini' ? 'Gemini' : 'API'} active`
                 : apiKeyStatus.has_key && !apiKeyStatus.is_valid
                 ? 'API key invalid'
                 : 'Using local AI (slower)'}
@@ -1014,6 +1086,7 @@ const AIAnalyst: React.FC = () => {
 
         {/* Chat Messages Area */}
         <div
+          ref={chatContainerRef}
           style={{
             flex: 1,
             overflowY: 'auto',
@@ -1021,9 +1094,10 @@ const AIAnalyst: React.FC = () => {
             display: 'flex',
             flexDirection: 'column',
             gap: SPACING.md,
+            minHeight: 0, // Important for flex scrolling
           }}
         >
-          {currentMessages.length === 0 ? (
+          {displayedMessages.length === 0 ? (
             /* Empty State with Suggested Questions */
             <div
               style={{
@@ -1109,9 +1183,32 @@ const AIAnalyst: React.FC = () => {
           ) : (
             /* Messages */
             <>
-              {currentMessages.map((msg) => (
-                <MessageBubble key={msg.id} message={msg} />
-              ))}
+              {currentMessages.length > MAX_MESSAGES_TO_RENDER && (
+                <div
+                  style={{
+                    padding: SPACING.sm,
+                    textAlign: 'center',
+                    color: '#6B7280',
+                    fontSize: '12px',
+                    backgroundColor: '#F3F4F6',
+                    borderRadius: BORDER_RADIUS.sm,
+                  }}
+                >
+                  Showing last {MAX_MESSAGES_TO_RENDER} of {currentMessages.length} messages
+                </div>
+              )}
+              {displayedMessages.map((msg) => {
+                try {
+                  return <MessageBubble key={msg.id} message={msg} />;
+                } catch (error) {
+                  console.error('Error rendering message:', error, msg);
+                  return (
+                    <div key={msg.id} style={{ padding: SPACING.sm, color: COLORS.danger }}>
+                      Error rendering message: {msg.id}
+                    </div>
+                  );
+                }
+              })}
               
               {/* Loading indicator with animated dots and progress */}
               {loading && (() => {
@@ -1260,7 +1357,7 @@ const AIAnalyst: React.FC = () => {
             <Button
               type="primary"
               icon={<SendOutlined />}
-              onClick={handleSendMessage}
+              onClick={() => handleSendMessage()}
               disabled={!inputValue.trim() || loading}
               loading={loading}
               style={{
@@ -1400,9 +1497,15 @@ const ConversationItem: React.FC<ConversationItemProps> = ({
           style={{
             fontSize: '12px',
             color: '#9CA3AF',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '2px',
           }}
         >
-          {dayjs(conversation.updatedAt).fromNow()}
+          <span>{dayjs(conversation.updatedAt).fromNow()}</span>
+          <span style={{ fontSize: '11px', opacity: 0.8 }}>
+            {dayjs(conversation.updatedAt).format('MMM D, YYYY h:mm A')}
+          </span>
         </div>
       </div>
       {isHovered && (
@@ -1501,6 +1604,44 @@ const MessageBubble: React.FC<MessageBubbleProps> = ({ message }) => {
         >
           {message.content}
         </p>
+        
+        {/* Show provider/model info */}
+        {message.provider && !isUser && (
+          <div
+            style={{
+              marginTop: SPACING.xs,
+              paddingTop: SPACING.xs,
+              borderTop: `1px solid ${isError ? COLORS.danger + '20' : '#E5E7EB'}`,
+              fontSize: '11px',
+              color: isError ? COLORS.danger + 'CC' : '#6B7280',
+              display: 'flex',
+              alignItems: 'center',
+              gap: SPACING.xs,
+            }}
+          >
+            <span>Using:</span>
+            <span
+              style={{
+                fontWeight: 600,
+                color: message.provider === 'openai' ? '#10B981' :
+                       message.provider === 'anthropic' ? '#8B5CF6' :
+                       message.provider === 'gemini' ? '#F59E0B' :
+                       '#6B7280',
+              }}
+            >
+              {message.provider === 'openai' ? 'OpenAI GPT-4' :
+               message.provider === 'anthropic' ? 'Anthropic Claude' :
+               message.provider === 'gemini' ? 'Google Gemini 2.5 Flash' :
+               message.provider === 'ollama' ? 'Ollama (Local)' :
+               message.provider}
+            </span>
+            {message.executionTime && (
+              <span style={{ marginLeft: 'auto' }}>
+                {message.executionTime.toFixed(2)}s
+              </span>
+            )}
+          </div>
+        )}
         
         {/* Show SQL query for errors (collapsible) */}
         {isError && message.sql && (
