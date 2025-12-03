@@ -82,6 +82,42 @@ def init_database():
             )
         """)
         
+        # Create users table if it doesn't exist
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                email VARCHAR NOT NULL UNIQUE,
+                password_hash VARCHAR NOT NULL,
+                role VARCHAR NOT NULL DEFAULT 'user',
+                plan VARCHAR NOT NULL DEFAULT 'free',
+                onboarded BOOLEAN NOT NULL DEFAULT FALSE,
+                tenant_id VARCHAR,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Add plan and onboarded columns if they don't exist (migration for existing databases)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN plan VARCHAR DEFAULT 'free'")
+            logger.info("✅ Added 'plan' column to users table")
+        except Exception:
+            # Column already exists, ignore
+            pass
+        
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN onboarded BOOLEAN DEFAULT FALSE")
+            logger.info("✅ Added 'onboarded' column to users table")
+        except Exception:
+            # Column already exists, ignore
+            pass
+        
+        # Create index on email for faster lookups
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+        except Exception:
+            # Index might already exist
+            pass
+        
         # Create user_api_keys table if it doesn't exist
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_api_keys (

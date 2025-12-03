@@ -18,7 +18,7 @@ from utils.auth import get_current_user_id
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/user/api-key", tags=["User API Keys"])
+router = APIRouter(tags=["User API Keys"])
 
 
 @router.get("/ping")

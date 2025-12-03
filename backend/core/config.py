@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # API Key Encryption
     API_KEY_ENCRYPTION_KEY: Optional[str] = None
 
+    # JWT Authentication
+    JWT_SECRET: str = "your-secret-key-change-in-production"  # Should be set via env var
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRES_IN: int = 86400  # 24 hours in seconds
+
     # Logging
     LOG_LEVEL: str = "INFO"
 

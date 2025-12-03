@@ -320,8 +320,8 @@ const AIAnalyst: React.FC = () => {
     exampleQuestions?: string[],
     provider?: string | null
   ) => {
-    const providerName = provider === 'openai' ? 'OpenAI' : 
-                        provider === 'anthropic' ? 'Anthropic' : 
+    // const providerName = provider === 'openai' ? 'OpenAI' : 
+    //                     provider === 'anthropic' ? 'Anthropic' : 
                         provider === 'gemini' ? 'Gemini' : 
                         provider === 'ollama' ? 'Ollama' : null;
     
@@ -558,7 +558,7 @@ const AIAnalyst: React.FC = () => {
       if (error instanceof AxiosError) {
         if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
           // Check API key status for timeout errors
-          const { hasOpenAI, hasAnthropic, hasGemini } = await checkAPIKeys();
+          const { hasOpenAI, hasAnthropic } = await checkAPIKeys();
           const hasAnyKey = hasOpenAI || hasAnthropic;
           
           if (!hasAnyKey) {
@@ -1357,7 +1357,7 @@ const AIAnalyst: React.FC = () => {
             <Button
               type="primary"
               icon={<SendOutlined />}
-              onClick={handleSendMessage}
+              onClick={() => handleSendMessage()}
               disabled={!inputValue.trim() || loading}
               loading={loading}
               style={{

@@ -26,13 +26,12 @@ import {
   ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import { apiKeyService, APIKeyInfo } from '@/services/apiKeyService';
+import { useAuthStore } from '@/store/authStore';
 import { COLORS, SPACING, BORDER_RADIUS, SHADOWS } from '@/styles/designTokens';
+import { CheckCircleOutlined as CheckIcon, RocketOutlined } from '@ant-design/icons';
 
 const { Title, Text, Paragraph } = Typography;
 const { Password } = Input;
-
-// TODO: Replace with actual user ID from authentication
-const CURRENT_USER_ID = 'user-123'; // This should come from auth context
 
 type Provider = 'openai' | 'anthropic' | 'gemini';
 
@@ -44,6 +43,7 @@ interface APIKeyState {
 }
 
 const Settings: React.FC = () => {
+  const { user } = useAuthStore();
   const [apiKeys, setApiKeys] = useState<APIKeyState>({
     openai: null,
     anthropic: null,
@@ -64,13 +64,19 @@ const Settings: React.FC = () => {
   }, []);
 
   const loadAPIKeys = async () => {
+    if (!user?.id) {
+      console.warn('User not authenticated, cannot load API keys');
+      setApiKeys((prev) => ({ ...prev, loading: false }));
+      return;
+    }
+
     try {
       setApiKeys((prev) => ({ ...prev, loading: true }));
       
       // Only load Gemini key for now (OpenAI/Anthropic disabled)
       let geminiKey = null;
       try {
-        geminiKey = await apiKeyService.getAPIKey('gemini', CURRENT_USER_ID);
+        geminiKey = await apiKeyService.getAPIKey('gemini', String(user.id));
       } catch (err: any) {
         // 404 is normal when no key exists
         if (err.response?.status !== 404) {
@@ -133,11 +139,16 @@ const Settings: React.FC = () => {
     setValidating(true);
     setError(null);
 
+    if (!user?.id) {
+      setError('You must be logged in to save API keys');
+      return;
+    }
+
     try {
       const savedKey = await apiKeyService.createAPIKey(
         currentProvider,
         apiKeyInput.trim(),
-        CURRENT_USER_ID
+        String(user.id)
       );
 
       // Update state
@@ -230,10 +241,10 @@ const Settings: React.FC = () => {
   };
 
   const handleConfirmRemove = async () => {
-    if (!currentProvider) return;
+    if (!currentProvider || !user?.id) return;
 
     try {
-      await apiKeyService.deleteAPIKey(currentProvider, CURRENT_USER_ID);
+      await apiKeyService.deleteAPIKey(currentProvider, String(user.id));
 
       // Update state
       setApiKeys((prev) => ({
@@ -251,8 +262,13 @@ const Settings: React.FC = () => {
   };
 
   const handleToggleEnabled = async (provider: Provider, enabled: boolean) => {
+    if (!user?.id) {
+      message.error('You must be logged in to update API keys');
+      return;
+    }
+
     try {
-      const updatedKey = await apiKeyService.updateEnabledStatus(provider, enabled, CURRENT_USER_ID);
+      const updatedKey = await apiKeyService.updateEnabledStatus(provider, enabled, String(user.id));
       
       // Update state
       setApiKeys((prev) => ({
@@ -400,6 +416,151 @@ const Settings: React.FC = () => {
       <Title level={2} style={{ marginBottom: SPACING.md }}>
         Settings
       </Title>
+
+      {/* Plan & Billing Section */}
+      <Card
+        style={{
+          marginBottom: SPACING.lg,
+          borderRadius: BORDER_RADIUS.md,
+          boxShadow: SHADOWS.card,
+        }}
+      >
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          <div>
+            <Title level={3} style={{ marginBottom: SPACING.xs }}>
+              <RocketOutlined style={{ marginRight: SPACING.xs, color: COLORS.primary }} />
+              Plan & Billing
+            </Title>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              Manage your subscription and view plan details
+            </Paragraph>
+          </div>
+
+          {/* Current Plan */}
+          <div>
+            <Text strong style={{ fontSize: '16px', display: 'block', marginBottom: SPACING.sm }}>
+              Current Plan: <span style={{ color: COLORS.primary, textTransform: 'capitalize' }}>{user?.plan || 'Free'}</span>
+            </Text>
+            {user?.plan === 'free' && (
+              <Alert
+                message="Free Plan Limits"
+                description={
+                  <ul style={{ margin: '8px 0 0 0', paddingLeft: '20px' }}>
+                    <li>Up to 10,000 records</li>
+                    <li>Basic analytics</li>
+                    <li>AI chat support</li>
+                    <li>Email support</li>
+                  </ul>
+                }
+                type="info"
+                showIcon
+                style={{ borderRadius: BORDER_RADIUS.md }}
+              />
+            )}
+          </div>
+
+          {/* Upgrade Options */}
+          <div>
+            <Text strong style={{ fontSize: '14px', display: 'block', marginBottom: SPACING.md }}>
+              Upgrade Options
+            </Text>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+                gap: SPACING.md,
+              }}
+            >
+              {/* Pro Plan Card */}
+              <Card
+                style={{
+                  border: '1px solid #E2E8F0',
+                  borderRadius: BORDER_RADIUS.md,
+                }}
+                bodyStyle={{ padding: SPACING.md }}
+              >
+                <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                  <Title level={4} style={{ margin: 0 }}>
+                    Pro
+                  </Title>
+                  <div>
+                    <Text style={{ fontSize: '24px', fontWeight: '700' }}>$29</Text>
+                    <Text type="secondary">/month</Text>
+                  </div>
+                  <Space direction="vertical" size="small" style={{ width: '100%', marginTop: SPACING.sm }}>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Unlimited records</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Advanced analytics</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Priority AI support</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Custom reports</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>API access</Text>
+                    </div>
+                  </Space>
+                  <Button block disabled style={{ marginTop: SPACING.sm }}>
+                    Coming Soon
+                  </Button>
+                </Space>
+              </Card>
+
+              {/* Enterprise Plan Card */}
+              <Card
+                style={{
+                  border: '1px solid #E2E8F0',
+                  borderRadius: BORDER_RADIUS.md,
+                }}
+                bodyStyle={{ padding: SPACING.md }}
+              >
+                <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                  <Title level={4} style={{ margin: 0 }}>
+                    Enterprise
+                  </Title>
+                  <div>
+                    <Text style={{ fontSize: '24px', fontWeight: '700' }}>Custom</Text>
+                  </div>
+                  <Space direction="vertical" size="small" style={{ width: '100%', marginTop: SPACING.sm }}>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Everything in Pro</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Dedicated support</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>Custom integrations</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>SLA guarantee</Text>
+                    </div>
+                    <div>
+                      <CheckIcon style={{ color: '#10B981', marginRight: '8px' }} />
+                      <Text style={{ fontSize: '12px' }}>On-premise deployment</Text>
+                    </div>
+                  </Space>
+                  <Button block disabled style={{ marginTop: SPACING.sm }}>
+                    Coming Soon
+                  </Button>
+                </Space>
+              </Card>
+            </div>
+          </div>
+        </Space>
+      </Card>
 
       {/* API Keys Section */}
       <Card

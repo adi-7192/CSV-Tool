@@ -1,8 +1,8 @@
-import axios, { AxiosError } from 'axios';
+import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
-const apiClient = axios.create({
+export const apiClient = axios.create({
   baseURL: API_BASE_URL,
   timeout: 10000,
   headers: {
@@ -10,10 +10,36 @@ const apiClient = axios.create({
   },
 });
 
-// Add error handling interceptor
+// Request interceptor: Add auth token to requests
+apiClient.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    // Get token from localStorage (set by authStore)
+    const token = localStorage.getItem('auth_token');
+    if (token && config.headers) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// Response interceptor: Handle 401 errors globally
 apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError) => {
+    // Handle 401 Unauthorized - token expired or invalid
+    if (error.response?.status === 401) {
+      // Clear auth state
+      localStorage.removeItem('auth_token');
+      
+      // Only redirect if not already on login page
+      if (window.location.pathname !== '/login' && window.location.pathname !== '/signup') {
+        window.location.href = '/login';
+      }
+    }
+
     console.error('API Error:', error);
     if (error.response) {
       // Server responded with error status
@@ -58,6 +84,7 @@ export interface MetricsResponse {
     revenue?: number;
     refunds?: number;
   };
+  has_data?: boolean;
   period: {
     start_date: string;
     end_date: string;
@@ -677,6 +704,42 @@ export interface ChatRequest {
     end_date?: string;
   };
 }
+
+// ============================================================================
+// USER SERVICE
+// ============================================================================
+
+export const usersService = {
+  markOnboarded: async (): Promise<any> => {
+    const response = await apiClient.post('/api/users/onboarded');
+    return response.data;
+  },
+};
+
+// ============================================================================
+// ADMIN SERVICE
+// ============================================================================
+
+export interface User {
+  id: number;
+  email: string;
+  role: 'user' | 'admin';
+  plan: 'free' | 'pro' | 'enterprise';
+  onboarded: boolean;
+  tenant_id: string | null;
+  created_at: string;
+}
+
+export const adminService = {
+  getUsers: async (): Promise<User[]> => {
+    const response = await apiClient.get<User[]>('/api/admin/users');
+    return response.data;
+  },
+};
+
+// ============================================================================
+// CHAT SERVICE
+// ============================================================================
 
 export const chatService = {
   /**

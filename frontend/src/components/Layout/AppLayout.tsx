@@ -23,6 +23,7 @@ import {
 import { useNavigate, useLocation } from 'react-router-dom';
 import dayjs, { Dayjs } from 'dayjs';
 import { useDataStore } from '@/store/dataStore';
+import { useAuthStore } from '@/store/authStore';
 import { getDataDateRange } from '@/services/dataService';
 import { COLORS, SPACING } from '@/styles/design-tokens';
 import './AppLayout.css';
@@ -39,6 +40,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { dateRange, setDateRange } = useDataStore();
+  const { logout, user } = useAuthStore();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
@@ -151,38 +153,38 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   // Navigation menu items
   const menuItems: MenuProps['items'] = [
     {
-      key: '/dashboard',
+      key: '/app/dashboard',
       icon: <DashboardOutlined />,
       label: 'Dashboard',
       onClick: () => {
-        navigate('/dashboard');
+        navigate('/app/dashboard');
         if (isMobile) setMobileDrawerOpen(false);
       },
     },
     {
-      key: '/workspace',
+      key: '/app/workspace',
       icon: <DatabaseOutlined />,
       label: 'Data Workspace',
       onClick: () => {
-        navigate('/workspace');
+        navigate('/app/workspace');
         if (isMobile) setMobileDrawerOpen(false);
       },
     },
     {
-      key: '/data-management',
+      key: '/app/data-management',
       icon: <FolderOutlined />,
       label: 'Data Management',
       onClick: () => {
-        navigate('/data-management');
+        navigate('/app/data-management');
         if (isMobile) setMobileDrawerOpen(false);
       },
     },
     {
-      key: '/analyst',
+      key: '/app/analyst',
       icon: <DashboardOutlined />,
       label: 'AI Analyst',
       onClick: () => {
-        navigate('/analyst');
+        navigate('/app/analyst');
         if (isMobile) setMobileDrawerOpen(false);
       },
     },
@@ -204,7 +206,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
       icon: <SettingOutlined />,
       label: 'Settings',
       onClick: () => {
-        navigate('/settings');
+        navigate('/app/settings');
       },
     },
     {
@@ -216,8 +218,8 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
       label: 'Logout',
       danger: true,
       onClick: () => {
-        // TODO: Implement logout logic
-        console.log('Logout clicked');
+        logout();
+        navigate('/');
       },
     },
   ];
@@ -282,8 +284,10 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
           />
           {!collapsed && (
             <div className="user-details">
-              <div className="user-name">John Doe</div>
-              <div className="user-email">john@example.com</div>
+              <div className="user-name">
+                {user?.name || (user?.email ? user.email.split('@')[0] : 'Not signed in')}
+              </div>
+              <div className="user-email">{user?.email || 'Not signed in'}</div>
             </div>
           )}
         </div>
@@ -299,7 +303,10 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
               type="text"
               icon={<LogoutOutlined />}
               danger
-              onClick={() => console.log('Logout')}
+              onClick={() => {
+                logout();
+                navigate('/');
+              }}
               className="user-action-btn"
             />
           </div>
@@ -364,7 +371,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
           </div>
 
           <div className="header-right">
-            {location.pathname === '/dashboard' && (
+            {(location.pathname === '/app/dashboard' || location.pathname === '/dashboard') && (
               <RangePicker
                 value={dateRangeValue}
                 onChange={handleDateRangeChange}
@@ -399,7 +406,9 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
                     marginRight: SPACING.xs,
                   }}
                 />
-                <span className="header-user-name">Welcome</span>
+                <span className="header-user-name">
+                  {user?.name || (user?.email ? user.email.split('@')[0] : 'Welcome')}
+                </span>
               </Button>
             </Dropdown>
           </div>

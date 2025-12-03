@@ -48,34 +48,6 @@ interface SerializedChatConversation {
   updatedAt: string; // ISO string
 }
 
-// Convert serialized data back to Date objects
-const deserializeConversation = (conv: SerializedChatConversation | ChatConversation): ChatConversation => {
-  // If already deserialized (Date objects), return as-is
-  if (conv.createdAt instanceof Date && conv.updatedAt instanceof Date) {
-    // Still need to check messages
-    const chatConv = conv as ChatConversation;
-    return {
-      ...chatConv,
-      messages: chatConv.messages.map((msg) => ({
-        ...msg,
-        timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp as string),
-      })),
-    };
-  }
-  
-  // Otherwise, deserialize from ISO strings
-  const serialized = conv as SerializedChatConversation;
-  return {
-    ...serialized,
-    createdAt: new Date(serialized.createdAt),
-    updatedAt: new Date(serialized.updatedAt),
-    messages: serialized.messages.map((msg) => ({
-      ...msg,
-      timestamp: new Date(msg.timestamp),
-    })),
-  };
-};
-
 // Convert Date objects to ISO strings for storage
 const serializeConversation = (conv: ChatConversation): SerializedChatConversation => ({
   ...conv,
@@ -106,12 +78,6 @@ interface ChatStore {
 }
 
 const generateId = () => `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-interface PersistedState {
-  conversations: SerializedChatConversation[];
-  activeConversationId: string | null;
-  searchQuery: string;
-}
 
 export const useChatStore = create<ChatStore>()(
   persist(

@@ -5,11 +5,13 @@ import { UserOutlined, SettingOutlined, QuestionCircleOutlined, LogoutOutlined }
 import { useNavigate, useLocation } from 'react-router-dom';
 import dayjs, { Dayjs } from 'dayjs';
 import { useDataStore } from '@/store/dataStore';
+import { useAuthStore } from '@/store/authStore';
 
 const { RangePicker } = DatePicker;
 
 const TopBar: React.FC = () => {
   const { dateRange, setDateRange } = useDataStore();
+  const { user, logout } = useAuthStore();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -36,7 +38,7 @@ const TopBar: React.FC = () => {
       icon: <SettingOutlined />,
       label: 'Settings',
       onClick: () => {
-        navigate('/settings');
+        navigate('/app/settings');
       },
     },
     {
@@ -57,8 +59,8 @@ const TopBar: React.FC = () => {
       label: 'Logout',
       danger: true,
       onClick: () => {
-        console.log('Logout clicked');
-        // TODO: Implement logout logic
+        logout();
+        navigate('/');
       },
     },
   ];
@@ -95,7 +97,7 @@ const TopBar: React.FC = () => {
             letterSpacing: '-0.5px',
             cursor: 'pointer',
           }}
-          onClick={() => navigate('/dashboard')}
+          onClick={() => navigate('/app/dashboard')}
         >
           Analytics Dashboard
         </div>
@@ -103,41 +105,53 @@ const TopBar: React.FC = () => {
         {/* Navigation Links */}
         <div style={{ display: 'flex', gap: '8px' }}>
           <Button
-            type={location.pathname === '/dashboard' ? 'primary' : 'text'}
-            onClick={() => navigate('/dashboard')}
+            type={location.pathname === '/app/dashboard' ? 'primary' : 'text'}
+            onClick={() => navigate('/app/dashboard')}
             style={{
-              fontWeight: location.pathname === '/dashboard' ? '600' : '400',
+              fontWeight: location.pathname === '/app/dashboard' ? '600' : '400',
             }}
           >
             Dashboard
           </Button>
           <Button
-            type={location.pathname === '/workspace' ? 'primary' : 'text'}
-            onClick={() => navigate('/workspace')}
+            type={location.pathname === '/app/workspace' ? 'primary' : 'text'}
+            onClick={() => navigate('/app/workspace')}
             style={{
-              fontWeight: location.pathname === '/workspace' ? '600' : '400',
+              fontWeight: location.pathname === '/app/workspace' ? '600' : '400',
             }}
           >
             Data Workspace
           </Button>
           <Button
-            type={location.pathname === '/data-management' ? 'primary' : 'text'}
-            onClick={() => navigate('/data-management')}
+            type={location.pathname === '/app/data-management' ? 'primary' : 'text'}
+            onClick={() => navigate('/app/data-management')}
             style={{
-              fontWeight: location.pathname === '/data-management' ? '600' : '400',
+              fontWeight: location.pathname === '/app/data-management' ? '600' : '400',
             }}
           >
             Data Management
           </Button>
           <Button
-            type={location.pathname === '/analyst' ? 'primary' : 'text'}
-            onClick={() => navigate('/analyst')}
+            type={location.pathname === '/app/analyst' ? 'primary' : 'text'}
+            onClick={() => navigate('/app/analyst')}
             style={{
-              fontWeight: location.pathname === '/analyst' ? '600' : '400',
+              fontWeight: location.pathname === '/app/analyst' ? '600' : '400',
             }}
           >
             AI Analyst
           </Button>
+          {user?.role === 'admin' && (
+            <Button
+              type={location.pathname.startsWith('/admin') ? 'primary' : 'text'}
+              onClick={() => navigate('/admin')}
+              style={{
+                fontWeight: location.pathname.startsWith('/admin') ? '600' : '400',
+                color: location.pathname.startsWith('/admin') ? undefined : '#6366F1',
+              }}
+            >
+              Admin
+            </Button>
+          )}
         </div>
       </div>
 
@@ -194,7 +208,9 @@ const TopBar: React.FC = () => {
               e.currentTarget.style.backgroundColor = 'transparent';
             }}
           >
-            <span style={{ fontSize: '14px', fontWeight: '500' }}>Welcome</span>
+            <span style={{ fontSize: '14px', fontWeight: '500' }}>
+              {user?.email || 'Welcome'}
+            </span>
             <Avatar
               size={32}
               icon={<UserOutlined />}
