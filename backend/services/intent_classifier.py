@@ -10,7 +10,7 @@ Classifies user questions into:
 import re
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,22 @@ EXPLORATION_PATTERNS = [
     r'\bdisplay\b',
 ]
 
+# Add patterns for declining/growing products (should be METRIC, not EXPLORATION)
+DECLINING_PATTERNS = [
+    r'\b(which|what)\s+(products?|skus?|items?)\s+(are\s+)?(declining|falling|dropping|decreasing|underperforming)\b',
+    r'\bdeclining\s+(products?|skus?|items?)\b',
+    r'\b(products?|skus?)\s+(are\s+)?(declining|falling|dropping|decreasing)\b',
+    r'\bworst\s+(performing\s+)?(products?|skus?)\b',
+]
+
+GROWING_PATTERNS = [
+    r'\b(which|what)\s+(products?|skus?|items?)\s+(are\s+)?(growing|rising|increasing|improving|best\s+performing)\b',
+    r'\bgrowing\s+(products?|skus?|items?)\b',
+    r'\b(products?|skus?)\s+(are\s+)?(growing|rising|increasing|improving)\b',
+    r'\bbest\s+(performing\s+)?(products?|skus?)\b',
+    r'\bmovers\b',
+]
+
 # Entity extraction patterns
 ENTITY_PATTERNS = {
     'region': [
@@ -142,6 +158,98 @@ CONVERSATIONAL_PATTERNS = [
     r'\btell\s+me\s+about\s+(yourself|you)\b',
 ]
 
+# Business/data-related keywords that indicate a valid question
+BUSINESS_KEYWORDS = [
+    'revenue', 'sales', 'profit', 'margin', 'refund', 'return', 'order', 'product', 'sku',
+    'item', 'customer', 'city', 'region', 'location', 'month', 'year', 'date', 'period',
+    'compare', 'comparison', 'top', 'best', 'worst', 'highest', 'lowest', 'total', 'sum',
+    'count', 'average', 'rate', 'percentage', 'growth', 'decline', 'trend', 'analysis',
+    'insight', 'recommend', 'focus', 'strategy', 'business', 'performance', 'metric',
+    'mumbai', 'delhi', 'bangalore', 'chennai', 'kolkata', 'hyderabad', 'pune', 'ahmedabad'
+]
+
+
+def is_valid_question(question: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate if a question is meaningful and related to business/data analysis.
+    
+    Args:
+        question: User's input question
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+        - is_valid: True if question is valid, False otherwise
+        - error_message: Error message if invalid, None if valid
+    """
+    question_stripped = question.strip()
+    
+    # Check if question is too short
+    if len(question_stripped) < 2:
+        return False, "Your question is too short. Please ask a meaningful question about your sales data."
+    
+    # Check if question is just repeated characters (e.g., "jjj", "aaa", "111")
+    if len(question_stripped) >= 2:
+        # Remove spaces and check if all characters are the same
+        question_no_spaces = question_stripped.lower().replace(' ', '')
+        if len(question_no_spaces) > 0 and len(set(question_no_spaces)) == 1:
+            return False, "Your question doesn't make sense. Please ask a meaningful question about your sales data, such as 'What was my revenue last month?' or 'Show me top products'."
+    
+    # Check if question contains only numbers or special characters (no meaningful words)
+    question_alpha = re.sub(r'[^a-zA-Z]', '', question_stripped)
+    if len(question_alpha) < 2:
+        return False, "Your question needs to contain meaningful words. Please ask about your sales data, products, revenue, or business metrics."
+    
+    # Check for random character sequences (e.g., "asdf", "qwerty", "zxcv")
+    # If question is short and doesn't contain common English words, it's likely invalid
+    if len(question_stripped) <= 10:
+        # Check if it's a common keyboard pattern
+        keyboard_patterns = ['asdf', 'qwerty', 'zxcv', 'hjkl', 'fghj', 'tyui']
+        if question_stripped.lower() in keyboard_patterns:
+            return False, "Your question doesn't make sense. Please ask a meaningful question about your sales data."
+        
+        # Check if it's mostly consonants without vowels (likely random typing)
+        vowels = set('aeiou')
+        question_lower_chars = set(question_stripped.lower())
+        if len(question_lower_chars) > 0:
+            vowel_ratio = len(question_lower_chars & vowels) / len(question_lower_chars)
+            # If less than 20% vowels and no business keywords, likely invalid
+            if vowel_ratio < 0.2 and not any(keyword in question_stripped.lower() for keyword in BUSINESS_KEYWORDS):
+                return False, "Your question doesn't make sense. Please ask a meaningful question about your sales data."
+    
+    # Check if question contains any business/data-related keywords
+    question_lower = question_stripped.lower()
+    has_business_keyword = any(keyword in question_lower for keyword in BUSINESS_KEYWORDS)
+    
+    # Check for conversational patterns (these are valid even without business keywords)
+    has_conversational_pattern = any(
+        re.search(pattern, question_lower, re.IGNORECASE) 
+        for pattern in CONVERSATIONAL_PATTERNS
+    )
+    
+    # Check for common question words (what, how, which, show, tell, etc.)
+    question_words = ['what', 'how', 'which', 'show', 'tell', 'give', 'find', 'list', 
+                     'where', 'when', 'why', 'who', 'analyze', 'analyse', 'compare']
+    has_question_word = any(word in question_lower for word in question_words)
+    
+    # If it's conversational, it's valid
+    if has_conversational_pattern:
+        return True, None
+    
+    # If it has business keywords, it's valid
+    if has_business_keyword:
+        return True, None
+    
+    # If it has question words and is at least 5 characters, it might be valid
+    if has_question_word and len(question_stripped) >= 5:
+        return True, None
+    
+    # Check if question is too short even with question words
+    if len(question_stripped) < 5:
+        return False, "Your question is too short or unclear. Please ask a complete question about your sales data."
+    
+    # If none of the above, it's likely invalid
+    return False, "I couldn't understand your question. Please ask about your sales data, such as:\n- 'What was my revenue last month?'\n- 'Show me top 10 products'\n- 'Compare Mumbai vs Delhi sales'\n- 'Which products are declining?'"
+
 
 def classify_intent(question: str) -> QuestionIntent:
     """
@@ -172,8 +280,25 @@ def classify_intent(question: str) -> QuestionIntent:
             logger.info(f"Intent classified as ADVISORY: matched pattern '{pattern}'")
             break
     
-    # Check for METRIC patterns
+    # Check for declining/growing products (METRIC type)
     if intent.type != "ADVISORY":
+        for pattern in DECLINING_PATTERNS:
+            if re.search(pattern, question_lower, re.IGNORECASE):
+                intent.type = "METRIC"
+                intent.metric_type = "declining_products"
+                logger.info(f"Intent classified as METRIC (declining_products): matched pattern '{pattern}'")
+                break
+        
+        if intent.type != "METRIC":
+            for pattern in GROWING_PATTERNS:
+                if re.search(pattern, question_lower, re.IGNORECASE):
+                    intent.type = "METRIC"
+                    intent.metric_type = "growing_products"
+                    logger.info(f"Intent classified as METRIC (growing_products): matched pattern '{pattern}'")
+                    break
+    
+    # Check for METRIC patterns
+    if intent.type != "ADVISORY" and intent.type != "METRIC":
         for metric_type, patterns in METRIC_PATTERNS.items():
             for pattern in patterns:
                 if re.search(pattern, question_lower, re.IGNORECASE):

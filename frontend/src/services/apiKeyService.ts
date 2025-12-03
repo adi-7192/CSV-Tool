@@ -12,8 +12,9 @@ import apiClient from './api';
 export interface APIKeyInfo {
   id: string;
   user_id: string;
-  provider: 'openai' | 'anthropic';
+  provider: 'openai' | 'anthropic' | 'gemini';
   masked_key: string;
+  enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -25,7 +26,7 @@ export interface APIKeyResponse {
 }
 
 export interface CreateAPIKeyRequest {
-  provider: 'openai' | 'anthropic';
+  provider: 'openai' | 'anthropic' | 'gemini';
   api_key: string;
 }
 
@@ -33,7 +34,7 @@ class APIKeyService {
   /**
    * Get API key for a provider
    */
-  async getAPIKey(provider: 'openai' | 'anthropic', userId: string): Promise<APIKeyInfo | null> {
+  async getAPIKey(provider: 'openai' | 'anthropic' | 'gemini', userId: string): Promise<APIKeyInfo | null> {
     try {
       const response = await apiClient.get<APIKeyResponse>(
         `/api/user/api-key?provider=${provider}`,
@@ -58,12 +59,16 @@ class APIKeyService {
 
   /**
    * Create or update API key
+   * Simplified with shorter timeout (validation is now fast)
    */
   async createAPIKey(
-    provider: 'openai' | 'anthropic',
+    provider: 'openai' | 'anthropic' | 'gemini',
     apiKey: string,
     userId: string
   ): Promise<APIKeyInfo> {
+    // 15 second timeout should be plenty - validation takes ~1-2 seconds
+    const timeout = 15000;
+    
     const response = await apiClient.post<APIKeyResponse>(
       '/api/user/api-key',
       {
@@ -74,6 +79,7 @@ class APIKeyService {
         headers: {
           'X-User-ID': userId,
         },
+        timeout: timeout,
       }
     );
 
@@ -87,12 +93,40 @@ class APIKeyService {
   /**
    * Delete API key
    */
-  async deleteAPIKey(provider: 'openai' | 'anthropic', userId: string): Promise<void> {
+  async deleteAPIKey(provider: 'openai' | 'anthropic' | 'gemini', userId: string): Promise<void> {
     await apiClient.delete(`/api/user/api-key?provider=${provider}`, {
       headers: {
         'X-User-ID': userId,
       },
     });
+  }
+
+  /**
+   * Update enabled status of an API key
+   */
+  async updateEnabledStatus(
+    provider: 'openai' | 'anthropic' | 'gemini',
+    enabled: boolean,
+    userId: string
+  ): Promise<APIKeyInfo> {
+    const response = await apiClient.patch<APIKeyResponse>(
+      '/api/user/api-key/enable',
+      {
+        provider,
+        enabled,
+      },
+      {
+        headers: {
+          'X-User-ID': userId,
+        },
+      }
+    );
+
+    if (!response.data.success || !response.data.data) {
+      throw new Error(response.data.message || 'Failed to update enabled status');
+    }
+
+    return response.data.data;
   }
 }
 

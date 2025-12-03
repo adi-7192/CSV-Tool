@@ -5,6 +5,8 @@ import TopBar from '@/components/TopBar';
 import Dashboard from '@/pages/Dashboard';
 import Workspace from '@/pages/Workspace';
 import AIAnalyst from '@/pages/AIAnalyst';
+import DataManagement from '@/pages/DataManagement';
+import Settings from '@/pages/Settings';
 import dayjs from 'dayjs';
 import 'dayjs/locale/en';
 import locale from 'antd/locale/en_US';
@@ -22,6 +24,8 @@ export default function App() {
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/workspace" element={<Workspace />} />
               <Route path="/analyst" element={<AIAnalyst />} />
+              <Route path="/data-management" element={<DataManagement />} />
+              <Route path="/settings" element={<Settings />} />
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
             </Routes>
           </div>

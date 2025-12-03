@@ -12,8 +12,9 @@ class APIKeyInfo(BaseModel):
     
     id: str = Field(..., description="Unique key identifier")
     user_id: str = Field(..., description="User identifier")
-    provider: str = Field(..., description="API provider (openai or anthropic)")
+    provider: str = Field(..., description="API provider (openai, anthropic, or gemini)")
     masked_key: str = Field(..., description="Masked API key (first 6, last 4 chars)")
+    enabled: bool = Field(True, description="Whether this API key is enabled for use")
     created_at: str = Field(..., description="Creation timestamp")
     updated_at: str = Field(..., description="Last update timestamp")
 

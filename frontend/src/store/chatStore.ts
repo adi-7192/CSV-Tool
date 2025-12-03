@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 
 export interface ChatMessage {
   id: string;
@@ -23,6 +24,69 @@ export interface ChatConversation {
   updatedAt: Date;
 }
 
+// Serialized versions for localStorage
+interface SerializedChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string; // ISO string
+  sql?: string | null;
+  data?: any;
+  executionTime?: number | null;
+  confidence?: number | null;
+  provider?: string | null;
+  isError?: boolean;
+  showApiKeySuggestion?: boolean;
+  exampleQuestions?: string[];
+}
+
+interface SerializedChatConversation {
+  id: string;
+  title: string;
+  messages: SerializedChatMessage[];
+  createdAt: string; // ISO string
+  updatedAt: string; // ISO string
+}
+
+// Convert serialized data back to Date objects
+const deserializeConversation = (conv: SerializedChatConversation | ChatConversation): ChatConversation => {
+  // If already deserialized (Date objects), return as-is
+  if (conv.createdAt instanceof Date && conv.updatedAt instanceof Date) {
+    // Still need to check messages
+    const chatConv = conv as ChatConversation;
+    return {
+      ...chatConv,
+      messages: chatConv.messages.map((msg) => ({
+        ...msg,
+        timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp as string),
+      })),
+    };
+  }
+  
+  // Otherwise, deserialize from ISO strings
+  const serialized = conv as SerializedChatConversation;
+  return {
+    ...serialized,
+    createdAt: new Date(serialized.createdAt),
+    updatedAt: new Date(serialized.updatedAt),
+    messages: serialized.messages.map((msg) => ({
+      ...msg,
+      timestamp: new Date(msg.timestamp),
+    })),
+  };
+};
+
+// Convert Date objects to ISO strings for storage
+const serializeConversation = (conv: ChatConversation): SerializedChatConversation => ({
+  ...conv,
+  createdAt: conv.createdAt.toISOString(),
+  updatedAt: conv.updatedAt.toISOString(),
+  messages: conv.messages.map((msg) => ({
+    ...msg,
+    timestamp: msg.timestamp.toISOString(),
+  })),
+});
+
 interface ChatStore {
   conversations: ChatConversation[];
   activeConversationId: string | null;
@@ -43,12 +107,20 @@ interface ChatStore {
 
 const generateId = () => `conv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-export const useChatStore = create<ChatStore>((set, get) => ({
-  conversations: [],
-  activeConversationId: null,
-  searchQuery: '',
-  loading: false,
-  messages: [], // Backward compatibility
+interface PersistedState {
+  conversations: SerializedChatConversation[];
+  activeConversationId: string | null;
+  searchQuery: string;
+}
+
+export const useChatStore = create<ChatStore>()(
+  persist(
+    (set, get) => ({
+      conversations: [],
+      activeConversationId: null,
+      searchQuery: '',
+      loading: false,
+      messages: [], // Backward compatibility
 
   createConversation: () => {
     const id = generateId();
@@ -207,4 +279,55 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         conv.messages.some((msg) => msg.content.toLowerCase().includes(query))
     );
   },
-}));
+    }),
+    {
+      name: 'chat-store', // localStorage key
+      storage: createJSONStorage(() => localStorage),
+      // Serialize: Convert Date objects to ISO strings
+      partialize: (state) => ({
+        conversations: state.conversations.map(serializeConversation),
+        activeConversationId: state.activeConversationId,
+        searchQuery: state.searchQuery,
+      }),
+      // Deserialize: Convert ISO strings back to Date objects
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          // Deserialize conversations (convert ISO strings to Date objects)
+          state.conversations = (state.conversations as any[]).map((conv: any) => {
+            // Handle both serialized and already-deserialized formats
+            if (conv.createdAt instanceof Date && conv.updatedAt instanceof Date) {
+              // Already deserialized, just ensure messages are correct
+              return {
+                ...conv,
+                messages: conv.messages.map((msg: any) => ({
+                  ...msg,
+                  timestamp: msg.timestamp instanceof Date ? msg.timestamp : new Date(msg.timestamp),
+                })),
+              };
+            }
+            // Deserialize from ISO strings
+            return {
+              ...conv,
+              createdAt: new Date(conv.createdAt),
+              updatedAt: new Date(conv.updatedAt),
+              messages: conv.messages.map((msg: any) => ({
+                ...msg,
+                timestamp: new Date(msg.timestamp),
+              })),
+            };
+          });
+          
+          // Update backward compatibility messages
+          if (state.activeConversationId) {
+            const activeConv = state.conversations.find(
+              (c) => c.id === state.activeConversationId
+            );
+            state.messages = activeConv?.messages || [];
+          } else {
+            state.messages = [];
+          }
+        }
+      },
+    }
+  )
+);

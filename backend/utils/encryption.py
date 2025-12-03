@@ -34,7 +34,7 @@ class APIKeyEncryption:
     @classmethod
     def _get_encryption_key(cls) -> bytes:
         """
-        Get encryption key from environment variable
+        Get encryption key from environment variable or settings
         
         Raises:
             EncryptionError: If encryption key is not set or invalid
@@ -42,7 +42,14 @@ class APIKeyEncryption:
         Returns:
             bytes: Encryption key as bytes
         """
+        # Try environment variable first, then settings
         encryption_key = os.getenv('API_KEY_ENCRYPTION_KEY')
+        if not encryption_key:
+            try:
+                from core.config import settings
+                encryption_key = settings.API_KEY_ENCRYPTION_KEY
+            except Exception:
+                pass
         
         if not encryption_key:
             raise EncryptionError(

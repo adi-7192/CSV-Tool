@@ -505,3 +505,5 @@ ALTER TABLE sales ADD COLUMN new_column VARCHAR;
 
 
 
+
+

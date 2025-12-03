@@ -204,21 +204,38 @@ def query_total_revenue(
 
 def query_net_revenue(
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    region: Optional[str] = None,
+    product: Optional[str] = None
 ) -> QueryResult:
     """
     Get net revenue = gross - refunds - cancellations - free replacements
     This is the CORRECT formula that includes ALL components.
+    
+    Supports filtering by region and product (like query_total_revenue).
     """
     date_col = get_date_column()
     rev_col = get_revenue_column()
     txn_col = get_transaction_type_column()
+    region_col = get_region_column()
+    sku_col = get_sku_column()
     
     txn_ref = quote_column(txn_col)
     rev_ref = quote_column(rev_col)
     
+    # Build WHERE conditions
+    conditions = []
+    
     date_filter = build_date_filter(date_col, start_date, end_date)
-    where_clause = f"WHERE {date_filter}" if date_filter else ""
+    if date_filter:
+        conditions.append(date_filter)
+    
+    if region:
+        conditions.append(f'{quote_column(region_col)} ILIKE \'%{region}%\'')
+    if product:
+        conditions.append(f'{quote_column(sku_col)} ILIKE \'%{product}%\'')
+    
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     
     sql = f'''
     SELECT 
@@ -684,11 +701,18 @@ def query_advisory_data(
 def execute_metric_query(
     intent,  # QuestionIntent from intent_classifier
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    question: Optional[str] = None
 ) -> QueryResult:
     """
     Execute the appropriate query template based on intent.
     This is the DEFAULT path for METRIC questions.
+    
+    Args:
+        intent: QuestionIntent from intent classifier
+        start_date: Start date filter
+        end_date: End date filter
+        question: Original question text (for detecting net revenue)
     """
     metric_type = intent.metric_type
     entities = intent.entities
@@ -700,8 +724,20 @@ def execute_metric_query(
     logger.info(f"Executing metric query: type={metric_type}, region={region}, product={product}")
     
     if metric_type == 'revenue':
-        # Check if it's net revenue
-        return query_total_revenue(start_date, end_date, region, product)
+        # Check if it's net revenue by examining the question
+        is_net_revenue = False
+        if question:
+            question_lower = question.lower()
+            is_net_revenue = any(kw in question_lower for kw in [
+                'net revenue', 'net profit', 'after refunds', 'net earnings',
+                'net sales', 'net income', 'net amount'
+            ])
+        
+        if is_net_revenue:
+            logger.info("Detected net revenue query - using query_net_revenue with filters")
+            return query_net_revenue(start_date, end_date, region, product)
+        else:
+            return query_total_revenue(start_date, end_date, region, product)
     
     elif metric_type == 'refund_rate':
         return query_refund_rate(start_date, end_date, intent.group_by)

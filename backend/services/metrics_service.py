@@ -4,7 +4,7 @@ Metrics Service - Business KPI calculations
 Extracted and refactored from legacy/app.py
 """
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import logging
 
@@ -3195,3 +3195,110 @@ def get_skus_by_region(
     except Exception as e:
         log_error(e, 'get_skus_by_region', {'region': region, 'limit': limit})
         return pd.DataFrame(columns=['sku', 'asin', 'units', 'revenue'])
+
+
+def compare_periods(
+    period1_start: str,
+    period1_end: str,
+    period2_start: str,
+    period2_end: str,
+    metrics: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Compare two time periods across multiple metrics.
+    
+    Useful for month-over-month or period-over-period comparisons.
+    
+    Args:
+        period1_start: Start date of first period (YYYY-MM-DD)
+        period1_end: End date of first period (YYYY-MM-DD)
+        period2_start: Start date of second period (YYYY-MM-DD)
+        period2_end: End date of second period (YYYY-MM-DD)
+        metrics: List of metrics to compare (default: ['revenue', 'orders', 'refund_rate'])
+    
+    Returns:
+        Dictionary with comparison results including:
+        - period1: Metrics for first period
+        - period2: Metrics for second period
+        - changes: Percentage changes for each metric
+        - summary: Human-readable summary
+    """
+    if metrics is None:
+        metrics = ['revenue', 'orders', 'refund_rate']
+    
+    if not table_exists('sales'):
+        return {
+            'period1': {},
+            'period2': {},
+            'changes': {},
+            'summary': 'No data available'
+        }
+    
+    try:
+        # Get metrics for both periods
+        period1_metrics = calculate_metrics(start_date=period1_start, end_date=period1_end)
+        period2_metrics = calculate_metrics(start_date=period2_start, end_date=period2_end)
+        
+        # Extract values
+        period1_data = {
+            'revenue': period1_metrics.get('gross_revenue', 0),
+            'net_revenue': period1_metrics.get('net_revenue', 0),
+            'orders': period1_metrics.get('orders', 0),
+            'refund_rate': period1_metrics.get('refund_rate', 0),
+            'avg_order_value': period1_metrics.get('avg_order_value', 0),
+        }
+        
+        period2_data = {
+            'revenue': period2_metrics.get('gross_revenue', 0),
+            'net_revenue': period2_metrics.get('net_revenue', 0),
+            'orders': period2_metrics.get('orders', 0),
+            'refund_rate': period2_metrics.get('refund_rate', 0),
+            'avg_order_value': period2_metrics.get('avg_order_value', 0),
+        }
+        
+        # Calculate percentage changes
+        changes = {}
+        for metric in metrics:
+            val1 = period1_data.get(metric, 0)
+            val2 = period2_data.get(metric, 0)
+            
+            if val1 == 0:
+                if val2 > 0:
+                    changes[metric] = 100.0  # Infinite growth
+                else:
+                    changes[metric] = 0.0
+            else:
+                changes[metric] = ((val2 - val1) / val1) * 100
+        
+        # Build summary
+        summary_parts = []
+        for metric in metrics:
+            change = changes.get(metric, 0)
+            direction = "↑" if change > 0 else "↓" if change < 0 else "→"
+            summary_parts.append(f"{metric}: {direction}{abs(change):.1f}%")
+        
+        summary = f"Period 2 vs Period 1: {', '.join(summary_parts)}"
+        
+        return {
+            'period1': {
+                'start_date': period1_start,
+                'end_date': period1_end,
+                'metrics': period1_data
+            },
+            'period2': {
+                'start_date': period2_start,
+                'end_date': period2_end,
+                'metrics': period2_data
+            },
+            'changes': changes,
+            'summary': summary
+        }
+        
+    except Exception as e:
+        logger.error(f"Error comparing periods: {e}", exc_info=True)
+        return {
+            'period1': {},
+            'period2': {},
+            'changes': {},
+            'summary': f'Error: {str(e)}'
+        }

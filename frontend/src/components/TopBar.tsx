@@ -36,8 +36,7 @@ const TopBar: React.FC = () => {
       icon: <SettingOutlined />,
       label: 'Settings',
       onClick: () => {
-        console.log('Settings clicked');
-        // TODO: Navigate to settings page
+        navigate('/settings');
       },
     },
     {
@@ -120,6 +119,15 @@ const TopBar: React.FC = () => {
             }}
           >
             Data Workspace
+          </Button>
+          <Button
+            type={location.pathname === '/data-management' ? 'primary' : 'text'}
+            onClick={() => navigate('/data-management')}
+            style={{
+              fontWeight: location.pathname === '/data-management' ? '600' : '400',
+            }}
+          >
+            Data Management
           </Button>
           <Button
             type={location.pathname === '/analyst' ? 'primary' : 'text'}

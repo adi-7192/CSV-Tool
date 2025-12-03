@@ -293,6 +293,138 @@ def build_business_rule_documents() -> List[Dict[str, Any]]:
     return rules
 
 
+def build_data_insight_documents() -> List[Dict[str, Any]]:
+    """
+    Build documents from actual data insights for embedding.
+    This indexes real business patterns, not just schema.
+    """
+    from core.database import execute_query, table_exists
+    from services.metrics_service import (
+        get_top_products, get_revenue_by_city, get_movers_decliners,
+        calculate_metrics
+    )
+    
+    documents = []
+    
+    if not table_exists('sales'):
+        return documents
+    
+    try:
+        # Get date range from database
+        date_range = execute_query("SELECT MIN(order_date) as min_date, MAX(order_date) as max_date FROM sales")
+        if date_range.empty:
+            return documents
+        
+        min_date = str(date_range.iloc[0]['min_date'])[:10]
+        max_date = str(date_range.iloc[0]['max_date'])[:10]
+        
+        # 1. Top Products Summary
+        try:
+            top_products_df = get_top_products(limit=10, start_date=min_date, end_date=max_date, metric='revenue')
+            if not top_products_df.empty:
+                top_skus = top_products_df.head(5)['sku'].tolist()
+                doc = {
+                    'id': 'insight_top_products',
+                    'content': f"Top 5 products by revenue ({min_date} to {max_date}): {', '.join(top_skus)}. These are the best-performing SKUs in the dataset.",
+                    'metadata': {
+                        'type': 'data_insight',
+                        'category': 'products',
+                        'date_range': f"{min_date} to {max_date}"
+                    }
+                }
+                documents.append(doc)
+        except Exception as e:
+            logger.warning(f"Could not build top products insight: {e}")
+        
+        # 2. Regional Performance Summary
+        try:
+            city_revenue = get_revenue_by_city(start_date=min_date, end_date=max_date, limit=5)
+            if city_revenue and city_revenue.get('data'):
+                top_cities = [item.get('city', '') for item in city_revenue['data'][:3]]
+                doc = {
+                    'id': 'insight_top_cities',
+                    'content': f"Top 3 cities by revenue ({min_date} to {max_date}): {', '.join(top_cities)}. These regions generate the most sales.",
+                    'metadata': {
+                        'type': 'data_insight',
+                        'category': 'geography',
+                        'date_range': f"{min_date} to {max_date}"
+                    }
+                }
+                documents.append(doc)
+        except Exception as e:
+            logger.warning(f"Could not build city revenue insight: {e}")
+        
+        # 3. Overall Metrics Summary
+        try:
+            metrics = calculate_metrics(start_date=min_date, end_date=max_date)
+            if metrics:
+                gross_rev = metrics.get('gross_revenue', 0)
+                net_rev = metrics.get('net_revenue', 0)
+                refund_rate = metrics.get('refund_rate', 0)
+                orders = metrics.get('orders', 0)
+                
+                doc = {
+                    'id': 'insight_overall_metrics',
+                    'content': f"Overall business metrics ({min_date} to {max_date}): Gross revenue ₹{gross_rev/100000:.1f}L, Net revenue ₹{net_rev/100000:.1f}L, {orders:,} orders, {refund_rate:.1f}% refund rate.",
+                    'metadata': {
+                        'type': 'data_insight',
+                        'category': 'summary',
+                        'date_range': f"{min_date} to {max_date}"
+                    }
+                }
+                documents.append(doc)
+        except Exception as e:
+            logger.warning(f"Could not build overall metrics insight: {e}")
+        
+        # 4. Movers and Decliners (if date range is sufficient)
+        try:
+            from datetime import datetime, timedelta
+            start_dt = datetime.strptime(min_date, '%Y-%m-%d')
+            end_dt = datetime.strptime(max_date, '%Y-%m-%d')
+            days = (end_dt - start_dt).days + 1
+            
+            if days >= 7:  # Minimum for movers/decliners
+                movers_decliners = get_movers_decliners(start_date=min_date, end_date=max_date, limit=5)
+                if movers_decliners:
+                    decliners = movers_decliners.get('decliners', [])
+                    movers = movers_decliners.get('movers', [])
+                    
+                    if decliners:
+                        declining_skus = [item.get('sku', '') for item in decliners[:3]]
+                        doc = {
+                            'id': 'insight_declining_products',
+                            'content': f"Declining products ({min_date} to {max_date}): {', '.join(declining_skus)}. These SKUs show negative growth trends and may need attention.",
+                            'metadata': {
+                                'type': 'data_insight',
+                                'category': 'trends',
+                                'trend': 'declining',
+                                'date_range': f"{min_date} to {max_date}"
+                            }
+                        }
+                        documents.append(doc)
+                    
+                    if movers:
+                        growing_skus = [item.get('sku', '') for item in movers[:3]]
+                        doc = {
+                            'id': 'insight_growing_products',
+                            'content': f"Growing products ({min_date} to {max_date}): {', '.join(growing_skus)}. These SKUs show positive growth trends and are performing well.",
+                            'metadata': {
+                                'type': 'data_insight',
+                                'category': 'trends',
+                                'trend': 'growing',
+                                'date_range': f"{min_date} to {max_date}"
+                            }
+                        }
+                        documents.append(doc)
+        except Exception as e:
+            logger.warning(f"Could not build movers/decliners insight: {e}")
+        
+    except Exception as e:
+        logger.error(f"Error building data insight documents: {e}")
+    
+    return documents
+
+
 def index_all_documents():
     """Index all documents into ChromaDB"""
     collection = get_collection()
@@ -318,6 +450,11 @@ def index_all_documents():
     rule_docs = build_business_rule_documents()
     all_docs.extend(rule_docs)
     logger.info(f"Built {len(rule_docs)} business rule documents")
+    
+    # Data insight documents (NEW - actual data patterns)
+    insight_docs = build_data_insight_documents()
+    all_docs.extend(insight_docs)
+    logger.info(f"Built {len(insight_docs)} data insight documents")
     
     if not all_docs:
         logger.warning("No documents to index")

@@ -49,6 +49,7 @@ async def create_api_key(request: CreateAPIKeyRequest):
                 user_id=result['user_id'],
                 provider=result['provider'],
                 masked_key=result['masked_key'],
+                enabled=result.get('enabled', True),
                 created_at=result['created_at'],
                 updated_at=result['updated_at'],
             ),
@@ -105,6 +106,7 @@ async def get_api_key(user_id: str, provider: str):
                 user_id=key_info['user_id'],
                 provider=key_info['provider'],
                 masked_key=key_info['key'],  # Already masked
+                enabled=key_info.get('enabled', True),
                 created_at=key_info['created_at'],
                 updated_at=key_info['updated_at'],
             ),
@@ -135,6 +137,7 @@ async def get_all_api_keys(user_id: str):
                     user_id=key['user_id'],
                     provider=key['provider'],
                     masked_key=key['masked_key'],
+                    enabled=key.get('enabled', True),
                     created_at=key['created_at'],
                     updated_at=key['updated_at'],
                 )

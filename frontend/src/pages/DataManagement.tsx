@@ -25,6 +25,7 @@ import {
   deleteUpload,
   deleteAllUploads,
   getUploadDetails,
+  downloadFile,
   UploadFile,
   UploadDetailsResponse,
 } from '@/services/dataService';
@@ -186,12 +187,12 @@ const DataManagement: React.FC = () => {
 
     setDeleting(true);
     try {
-      const fileId = selectedFile.file_id || selectedFile.ingestion_id;
-      if (!fileId) {
+      const ingestionId = selectedFile.ingestion_id || selectedFile.file_id;
+      if (!ingestionId) {
         message.error('File ID not found');
         return;
       }
-      const result = await deleteUpload(fileId);
+      const result = await deleteUpload(ingestionId);
       if (result?.success) {
         message.success(`Successfully deleted ${(result.deleted_rows || 0).toLocaleString()} rows from ${selectedFile.filename}`);
         setDeleteModalVisible(false);
@@ -274,12 +275,16 @@ const DataManagement: React.FC = () => {
   // Handle download
   const handleDownload = async (file: UploadFile) => {
     try {
-      // Navigate to workspace with file filter
-      navigate('/workspace', { state: { fileId: file.file_id } });
-      message.info('Opening workspace with file filter');
-    } catch (error) {
+      const ingestionId = file.ingestion_id || file.file_id;
+      if (!ingestionId) {
+        message.error('File ID not found');
+        return;
+      }
+      await downloadFile(ingestionId, file.filename);
+      message.success('File download started');
+    } catch (error: any) {
       console.error('Error downloading file:', error);
-      message.error('Failed to download file');
+      message.error(error?.message || 'Failed to download file');
     }
   };
 

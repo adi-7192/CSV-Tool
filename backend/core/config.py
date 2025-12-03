@@ -30,13 +30,17 @@ class Settings(BaseSettings):
     # Frontend
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # API Key Encryption
+    API_KEY_ENCRYPTION_KEY: Optional[str] = None
+
     # Logging
     LOG_LEVEL: str = "INFO"
 
     class Config:
         env_file = "../.env"  # Look for .env in project root
         case_sensitive = True
-        extra = "ignore"  # Ignore extra environment variables
+        # Allow extra environment variables (needed for API_KEY_ENCRYPTION_KEY)
+        extra = "allow"
 
 
 # Global settings instance

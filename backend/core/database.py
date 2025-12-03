@@ -82,6 +82,28 @@ def init_database():
             )
         """)
         
+        # Create user_api_keys table if it doesn't exist
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_api_keys (
+                id VARCHAR PRIMARY KEY,
+                user_id VARCHAR NOT NULL,
+                provider VARCHAR NOT NULL,
+                encrypted_key VARCHAR NOT NULL,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, provider)
+            )
+        """)
+        
+        # Add enabled column if it doesn't exist (migration for existing databases)
+        try:
+            conn.execute("ALTER TABLE user_api_keys ADD COLUMN enabled BOOLEAN DEFAULT TRUE")
+            logger.info("✅ Added 'enabled' column to user_api_keys table")
+        except Exception:
+            # Column already exists, ignore
+            pass
+        
         logger.info("✅ Database initialization complete")
         
     except Exception as e:

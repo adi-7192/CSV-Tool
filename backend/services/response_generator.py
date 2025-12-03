@@ -120,6 +120,63 @@ def format_metric_response(
             e = entities[0]
             return f"{e['entity']}{date_range}: {format_currency(e['total_revenue'])} ({e['transaction_count']:,} orders)"
     
+    elif 'movers' in data or 'decliners' in data:
+        # Movers and decliners from get_movers_decliners function
+        movers = data.get('movers', [])
+        decliners = data.get('decliners', [])
+        label = data.get('label', '')
+        granularity = data.get('granularity', '')
+        
+        lines = []
+        if label:
+            lines.append(f"**{label}**\n")
+        
+        # Check question to see if user asked about declining or growing
+        question_lower = question.lower()
+        is_declining_question = any(kw in question_lower for kw in ['declining', 'falling', 'dropping', 'worst', 'underperforming'])
+        is_growing_question = any(kw in question_lower for kw in ['growing', 'rising', 'increasing', 'best', 'movers', 'improving'])
+        
+        if is_declining_question and decliners:
+            lines.append(f"**Declining Products ({len(decliners)}):**\n")
+            for i, item in enumerate(decliners[:10], 1):
+                growth = item.get('growth', 0)
+                revenue = item.get('revenue', 0)
+                sku = item.get('sku', 'Unknown')
+                lines.append(f"{i}. {sku}: {format_currency(revenue)} (↓{abs(growth):.1f}%)")
+            if not decliners:
+                lines.append("No products showing significant decline.")
+        
+        elif is_growing_question and movers:
+            lines.append(f"**Growing Products ({len(movers)}):**\n")
+            for i, item in enumerate(movers[:10], 1):
+                growth = item.get('growth', 0)
+                revenue = item.get('revenue', 0)
+                sku = item.get('sku', 'Unknown')
+                lines.append(f"{i}. {sku}: {format_currency(revenue)} (↑{growth:.1f}%)")
+            if not movers:
+                lines.append("No products showing significant growth.")
+        
+        else:
+            # Show both if question is ambiguous
+            if decliners:
+                lines.append(f"**Declining Products ({len(decliners)}):**\n")
+                for i, item in enumerate(decliners[:5], 1):
+                    growth = item.get('growth', 0)
+                    revenue = item.get('revenue', 0)
+                    sku = item.get('sku', 'Unknown')
+                    lines.append(f"{i}. {sku}: {format_currency(revenue)} (↓{abs(growth):.1f}%)")
+                lines.append("")
+            
+            if movers:
+                lines.append(f"**Growing Products ({len(movers)}):**\n")
+                for i, item in enumerate(movers[:5], 1):
+                    growth = item.get('growth', 0)
+                    revenue = item.get('revenue', 0)
+                    sku = item.get('sku', 'Unknown')
+                    lines.append(f"{i}. {sku}: {format_currency(revenue)} (↑{growth:.1f}%)")
+        
+        return "\n".join(lines) if lines else "No significant movers or decliners found."
+    
     # Generic fallback
     return f"Query completed{date_range}. Data: {json.dumps(data, default=str)[:500]}"
 
@@ -151,28 +208,78 @@ async def generate_response_with_gemini(
     data_json = json.dumps(query_result.data, default=str, indent=2)
     
     if intent_type == "ADVISORY":
-        # Advisory prompt: analyze and recommend
-        prompt = f"""You are a business data analyst. The user asked: "{question}"
+        # Strategic Advisor prompt: analyze and recommend
+        # Check if we have movers/decliners data for trend analysis
+        has_trends = 'movers' in query_result.data or 'decliners' in query_result.data
+        trends_context = ""
+        
+        if has_trends:
+            movers = query_result.data.get('movers', [])
+            decliners = query_result.data.get('decliners', [])
+            label = query_result.data.get('label', '')
+            
+            trends_context = f"\n\nTREND ANALYSIS ({label}):\n"
+            if decliners:
+                trends_context += f"- {len(decliners)} products are declining (need attention)\n"
+                trends_context += f"- Top declining SKUs: {', '.join([d.get('sku', '') for d in decliners[:3]])}\n"
+            if movers:
+                trends_context += f"- {len(movers)} products are growing (opportunities)\n"
+                trends_context += f"- Top growing SKUs: {', '.join([m.get('sku', '') for m in movers[:3]])}\n"
+        
+        prompt = f"""You are a senior Amazon seller consultant and strategic business advisor analyzing sales data.
 
-Here is the data from their DuckDB analytics database:
+USER QUESTION: "{question}"
 
+DATA FROM ANALYTICS DATABASE:
 {data_json}
+{trends_context}
 
-Based on this ACTUAL data (do not invent any numbers), provide:
-1. A clear summary of the key findings
-2. Identify any concerning trends (high refund rates, declining products, etc.)
-3. Provide 2-3 actionable recommendations
+Your task is to act as a strategic advisor. Provide:
+
+1. **Direct Answer**: Answer the user's question using the data above
+2. **Key Insight**: What does this data mean? What's the business significance?
+3. **Actionable Recommendations**: What should they do next? Be specific.
+4. **Risk/Opportunity**: What should they watch out for or capitalize on?
 
 CRITICAL RULES:
-- Only cite numbers that appear in the data above
-- If something looks concerning, explain why
-- Be specific and actionable in your recommendations
-- Format currency values in Indian Rupees (₹)
-- Keep your response concise but insightful"""
+- ONLY use numbers from the data above - never invent statistics
+- Be specific with numbers (e.g., "₹2.5L revenue" not "some revenue")
+- Recommendations must be actionable (e.g., "Focus marketing on Mumbai" not "improve sales")
+- Format currency in Indian Rupees (₹) with abbreviations (₹1.5L, ₹2.3Cr)
+- If trends show declining products, recommend investigating quality/descriptions
+- If trends show growing products, recommend scaling inventory/marketing
+- Keep response structured but conversational (2-3 paragraphs max)
+
+Think like a consultant who understands Amazon FBA business."""
 
     else:
         # Metric prompt: format and explain
-        prompt = f"""You are a helpful data assistant. The user asked: "{question}"
+        # Special handling for movers/decliners
+        if 'movers' in query_result.data or 'decliners' in query_result.data:
+            question_lower = question.lower()
+            focus = ""
+            if any(kw in question_lower for kw in ['declining', 'falling', 'dropping', 'worst']):
+                focus = "\n\nIMPORTANT: The user asked about DECLINING products. Focus on the 'decliners' list in the data. Ignore 'movers' unless they specifically ask."
+            elif any(kw in question_lower for kw in ['growing', 'rising', 'increasing', 'best', 'movers']):
+                focus = "\n\nIMPORTANT: The user asked about GROWING products. Focus on the 'movers' list in the data. Ignore 'decliners' unless they specifically ask."
+            
+            prompt = f"""You are a helpful data assistant. The user asked: "{question}"
+
+Here is the query result from their database:
+
+{data_json}
+{focus}
+
+Please respond in a clear, natural way that:
+1. Directly answers their question using the data above
+2. Formats numbers nicely (use ₹ for currency, abbreviate large numbers like ₹1.5L or ₹2.3Cr)
+3. For movers/decliners: Show the SKU name, revenue, and growth percentage
+4. Adds brief context if helpful (e.g., "based on {query_result.data.get('label', 'period comparison')}")
+
+CRITICAL: Only use numbers from the data above. Do not invent or estimate any values.
+Keep your response concise but informative."""
+        else:
+            prompt = f"""You are a helpful data assistant. The user asked: "{question}"
 
 Here is the query result from their database:
 

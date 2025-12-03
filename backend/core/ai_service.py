@@ -304,7 +304,7 @@ WHERE [date filters]
                     break
     
     # Quote column name if it contains spaces
-    date_col_ref = f'"{date_col}"' if ' ' in date_col else f'"{date_col}"'  # Always quote for consistency
+    date_col_ref = f'"{date_col}"' if ' ' in date_col else date_col
     
     # Add date filtering instruction if context provided
     date_filter_instruction = ""
@@ -390,6 +390,9 @@ SQL QUERY (only the query, nothing else):"""
             logger.error(f"External LLM call exception: {str(e)}, falling back to Ollama")
     
     # Fallback to Ollama
+    # Note: generate_sql_with_ollama is a synchronous function, so we call it without await.
+    # This is correct - async functions can call sync functions directly.
+    # The function is async because it needs to await generate_sql_with_external_llm() above.
     logger.info(f"Ollama query started: {question}")
     sql, error, provider, response_time, confidence = generate_sql_with_ollama(prompt, question, schema, source_file, is_net_revenue_query)
     

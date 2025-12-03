@@ -15,6 +15,7 @@ import {
   Typography,
   Space,
   Alert,
+  Switch,
 } from 'antd';
 import {
   KeyOutlined,
@@ -33,11 +34,12 @@ const { Password } = Input;
 // TODO: Replace with actual user ID from authentication
 const CURRENT_USER_ID = 'user-123'; // This should come from auth context
 
-type Provider = 'openai' | 'anthropic';
+type Provider = 'openai' | 'anthropic' | 'gemini';
 
 interface APIKeyState {
   openai: APIKeyInfo | null;
   anthropic: APIKeyInfo | null;
+  gemini: APIKeyInfo | null;
   loading: boolean;
 }
 
@@ -45,6 +47,7 @@ const Settings: React.FC = () => {
   const [apiKeys, setApiKeys] = useState<APIKeyState>({
     openai: null,
     anthropic: null,
+    gemini: null,
     loading: true,
   });
 
@@ -64,19 +67,25 @@ const Settings: React.FC = () => {
     try {
       setApiKeys((prev) => ({ ...prev, loading: true }));
       
-      const [openaiKey, anthropicKey] = await Promise.all([
-        apiKeyService.getAPIKey('openai', CURRENT_USER_ID),
-        apiKeyService.getAPIKey('anthropic', CURRENT_USER_ID),
-      ]);
+      // Only load Gemini key for now (OpenAI/Anthropic disabled)
+      let geminiKey = null;
+      try {
+        geminiKey = await apiKeyService.getAPIKey('gemini', CURRENT_USER_ID);
+      } catch (err: any) {
+        // 404 is normal when no key exists
+        if (err.response?.status !== 404) {
+          console.warn('Failed to load Gemini key:', err);
+        }
+      }
 
       setApiKeys({
-        openai: openaiKey,
-        anthropic: anthropicKey,
+        openai: null,  // Disabled
+        anthropic: null,  // Disabled
+        gemini: geminiKey,
         loading: false,
       });
     } catch (error: any) {
       console.error('Failed to load API keys:', error);
-      message.error('Failed to load API keys');
       setApiKeys((prev) => ({ ...prev, loading: false }));
     }
   };
@@ -116,6 +125,11 @@ const Settings: React.FC = () => {
       return;
     }
 
+    if (currentProvider === 'gemini' && apiKeyInput.trim().length < 20) {
+      setError('Invalid Gemini API key format. Key should be at least 20 characters long.');
+      return;
+    }
+
     setValidating(true);
     setError(null);
 
@@ -132,15 +146,84 @@ const Settings: React.FC = () => {
         [currentProvider]: savedKey,
       }));
 
-      message.success(`${currentProvider === 'openai' ? 'OpenAI' : 'Anthropic'} API key saved successfully`);
+      const providerName = currentProvider === 'openai' ? 'OpenAI' : currentProvider === 'anthropic' ? 'Anthropic' : 'Gemini';
+      message.success(`${providerName} API key saved successfully`);
       setAddModalVisible(false);
       setApiKeyInput('');
+      
+      // Reload all API keys to ensure consistency
+      await loadAPIKeys();
     } catch (error: any) {
-      const errorMessage =
-        error.response?.data?.detail ||
-        error.message ||
-        'Failed to validate or save API key';
+      console.error('API key save error:', error);
+      console.error('Error response data:', error.response?.data);
+      console.error('Error response status:', error.response?.status);
+      
+      let errorMessage = 'Failed to validate or save API key';
+      
+      if (error.response) {
+        // Backend returned an error
+        const responseData = error.response.data;
+        const detail = responseData?.detail || responseData?.message || responseData?.error;
+        
+        if (detail) {
+          // Handle string or object detail
+          if (typeof detail === 'string') {
+            errorMessage = detail;
+            
+            // Special handling for Gemini API errors - preserve multi-line formatting
+            if (currentProvider === 'gemini' && detail.includes('\n')) {
+              // For Gemini, show the full error message with troubleshooting steps
+              errorMessage = detail;
+            } else if (currentProvider === 'gemini') {
+              // Enhance Gemini error messages with troubleshooting
+              if (detail.toLowerCase().includes('api key')) {
+                errorMessage = `${detail}\n\nTroubleshooting:\n• Verify the API key is correct (no extra spaces)\n• Check that 'Generative Language API' is enabled in Google Cloud Console\n• Ensure API key has no IP/HTTP referrer restrictions\n• Verify the API key is active (not deleted or expired)`;
+              } else if (detail.toLowerCase().includes('rate limit')) {
+                errorMessage = `${detail}\n\nPlease wait a moment and try again, or check your API quota in Google Cloud Console.`;
+              } else if (detail.toLowerCase().includes('timeout')) {
+                errorMessage = `${detail}\n\nPlease check your internet connection and try again.`;
+              }
+            }
+          } else if (typeof detail === 'object') {
+            // If detail is an object, try to extract message
+            errorMessage = detail.message || detail.error || JSON.stringify(detail);
+          } else {
+            errorMessage = String(detail);
+          }
+        } else if (error.response.status === 404) {
+          errorMessage = 'API endpoint not found. Please check your API key format and try again.';
+        } else if (error.response.status === 400) {
+          // Try to get more specific error message
+          if (responseData) {
+            const detailStr = typeof responseData === 'string' ? responseData : JSON.stringify(responseData);
+            errorMessage = detailStr;
+            
+            // Add Gemini-specific troubleshooting for 400 errors
+            if (currentProvider === 'gemini') {
+              errorMessage += '\n\nTroubleshooting:\n• Verify the API key is correct\n• Check that Generative Language API is enabled in Google Cloud Console\n• Ensure API key has no restrictions';
+            }
+          } else {
+            errorMessage = 'Invalid API key or request. Please check your key and try again.';
+          }
+        } else if (error.response.status === 401) {
+          errorMessage = 'Authentication required. Please refresh the page and try again.';
+        } else if (error.response.status === 500) {
+          errorMessage = 'Server error. Please try again later.';
+        } else {
+          errorMessage = `Error ${error.response.status}: ${error.response.statusText || 'Unknown error'}`;
+        }
+      } else if (error.message) {
+        errorMessage = error.message;
+      }
+      
+      // For Gemini errors, preserve newlines in the error display
       setError(errorMessage);
+      
+      // Show error message (truncate very long messages for toast)
+      const toastMessage = errorMessage.length > 200 
+        ? errorMessage.substring(0, 200) + '...' 
+        : errorMessage;
+      message.error(toastMessage, 10); // Show for 10 seconds for Gemini errors
     } finally {
       setValidating(false);
     }
@@ -158,7 +241,8 @@ const Settings: React.FC = () => {
         [currentProvider]: null,
       }));
 
-      message.success(`${currentProvider === 'openai' ? 'OpenAI' : 'Anthropic'} API key removed successfully`);
+      const providerName = currentProvider === 'openai' ? 'OpenAI' : currentProvider === 'anthropic' ? 'Anthropic' : 'Gemini';
+      message.success(`${providerName} API key removed successfully`);
       setRemoveModalVisible(false);
     } catch (error: any) {
       message.error('Failed to remove API key');
@@ -166,14 +250,34 @@ const Settings: React.FC = () => {
     }
   };
 
+  const handleToggleEnabled = async (provider: Provider, enabled: boolean) => {
+    try {
+      const updatedKey = await apiKeyService.updateEnabledStatus(provider, enabled, CURRENT_USER_ID);
+      
+      // Update state
+      setApiKeys((prev) => ({
+        ...prev,
+        [provider]: updatedKey,
+      }));
+
+      const providerName = getProviderName(provider);
+      message.success(`${providerName} API key ${enabled ? 'enabled' : 'disabled'} successfully`);
+    } catch (error: any) {
+      message.error(`Failed to ${enabled ? 'enable' : 'disable'} API key`);
+      console.error('Failed to update enabled status:', error);
+    }
+  };
+
   const getProviderName = (provider: Provider) => {
-    return provider === 'openai' ? 'OpenAI' : 'Anthropic';
+    if (provider === 'openai') return 'OpenAI';
+    if (provider === 'anthropic') return 'Anthropic';
+    return 'Gemini';
   };
 
   const getProviderLink = (provider: Provider) => {
-    return provider === 'openai'
-      ? 'https://platform.openai.com/api-keys'
-      : 'https://console.anthropic.com/settings/keys';
+    if (provider === 'openai') return 'https://platform.openai.com/api-keys';
+    if (provider === 'anthropic') return 'https://console.anthropic.com/settings/keys';
+    return 'https://makersuite.google.com/app/apikey';
   };
 
   const renderAPIKeySection = (provider: Provider) => {
@@ -222,6 +326,17 @@ const Settings: React.FC = () => {
 
           {hasKey ? (
             <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.sm }}>
+                <Text strong style={{ fontSize: '14px' }}>
+                  Enable for AI Chat:
+                </Text>
+                <Switch
+                  checked={key.enabled}
+                  onChange={(checked) => handleToggleEnabled(provider, checked)}
+                  checkedChildren="Enabled"
+                  unCheckedChildren="Disabled"
+                />
+              </div>
               <Text type="secondary" style={{ fontSize: '14px', display: 'block', marginBottom: SPACING.xs }}>
                 API Key:
               </Text>
@@ -241,6 +356,15 @@ const Settings: React.FC = () => {
                   Last updated: {new Date(key.updated_at).toLocaleDateString()}
                 </Text>
               </div>
+              {!key.enabled && (
+                <Alert
+                  message="This API key is disabled"
+                  description="AI chat will not use this key. Enable it to use this provider."
+                  type="info"
+                  showIcon
+                  style={{ marginTop: SPACING.sm, borderRadius: BORDER_RADIUS.md }}
+                />
+              )}
             </div>
           ) : (
             <div>
@@ -302,8 +426,12 @@ const Settings: React.FC = () => {
             </div>
           ) : (
             <>
-              {renderAPIKeySection('openai')}
-              {renderAPIKeySection('anthropic')}
+              {/* Gemini is the primary provider */}
+              {renderAPIKeySection('gemini')}
+              
+              {/* OpenAI and Anthropic temporarily disabled */}
+              {/* {renderAPIKeySection('openai')} */}
+              {/* {renderAPIKeySection('anthropic')} */}
             </>
           )}
         </Space>
@@ -390,7 +518,19 @@ const Settings: React.FC = () => {
           {error && (
             <Alert
               message="Error"
-              description={error}
+              description={
+                <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {error.split('\n').map((line, index) => (
+                    <div key={index} style={{ marginBottom: index < error.split('\n').length - 1 ? '4px' : 0 }}>
+                      {line.startsWith('•') || line.startsWith('-') ? (
+                        <span style={{ marginLeft: '8px' }}>{line}</span>
+                      ) : (
+                        <span>{line}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              }
               type="error"
               showIcon
               style={{ borderRadius: BORDER_RADIUS.md }}
