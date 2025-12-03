@@ -1,0 +1,5 @@
+
+> frontend@0.0.0 build
+> tsc && vite build
+
+src/pages/DataManagement.tsx(459,37): error TS2304: Cannot find name 'handleDownload'.

@@ -1,0 +1,108 @@
+/* Workspace Page Styles */
+
+.workspace-table-container {
+  overflow-x: auto;
+  border-radius: 12px; /* BORDER_RADIUS.lg */
+  border: 1px solid #E5E7EB; /* COLORS.border equivalent */
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); /* SHADOWS.sm */
+}
+
+.workspace-table {
+  background-color: #FFFFFF; /* COLORS.background */
+}
+
+/* Table Row Hover Effect */
+.workspace-table .ant-table-tbody > tr:hover > td {
+  background-color: #F9FAFB !important; /* COLORS.backgroundSecondary */
+  transition: background-color 0.2s ease;
+}
+
+/* Alternating Row Colors */
+.workspace-table .ant-table-tbody > tr:nth-child(even) {
+  background-color: #FFFFFF; /* COLORS.background */
+}
+
+.workspace-table .ant-table-tbody > tr:nth-child(odd) {
+  background-color: #FAFAFA; /* Slightly lighter than backgroundSecondary */
+}
+
+/* Table Header Styling */
+.workspace-table .ant-table-thead > tr > th {
+  background-color: #F9FAFB !important; /* COLORS.backgroundSecondary */
+  border-bottom: 2px solid #E5E7EB !important; /* COLORS.border equivalent */
+  font-weight: 600 !important;
+  color: #1F2937 !important; /* COLORS.neutralDark */
+  padding: 16px !important; /* SPACING.md */
+  font-size: 14px !important; /* TYPOGRAPHY.body.fontSize */
+}
+
+/* Table Cell Styling */
+.workspace-table .ant-table-tbody > tr > td {
+  padding: 16px !important; /* SPACING.md */
+  border-bottom: 1px solid #E5E7EB !important; /* COLORS.border equivalent */
+  font-size: 14px !important; /* TYPOGRAPHY.body.fontSize */
+  transition: all 0.2s ease;
+}
+
+/* Table Border Radius */
+.workspace-table .ant-table-container {
+  border-radius: 12px; /* BORDER_RADIUS.lg */
+  overflow: hidden;
+}
+
+/* Responsive Filters */
+.workspace-filters-desktop {
+  display: block;
+}
+
+.workspace-filters-mobile {
+  display: none;
+}
+
+@media (max-width: 768px) {
+  .workspace-filters-desktop {
+    display: none;
+  }
+  
+  .workspace-filters-mobile {
+    display: block;
+  }
+  
+  .workspace-table-container {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  .workspace-table {
+    min-width: 800px;
+  }
+}
+
+/* Smooth Transitions */
+.workspace-table .ant-table-tbody > tr {
+  transition: all 0.2s ease;
+}
+
+/* Pagination Styling */
+.workspace-table-container + div .ant-pagination {
+  margin-top: 24px; /* SPACING.lg */
+}
+
+.workspace-table-container + div .ant-pagination-item {
+  border-radius: 4px; /* BORDER_RADIUS.sm */
+  transition: all 0.2s ease;
+}
+
+.workspace-table-container + div .ant-pagination-item:hover {
+  border-color: #2563EB; /* COLORS.primary */
+}
+
+.workspace-table-container + div .ant-pagination-item-active {
+  background-color: #2563EB; /* COLORS.primary */
+  border-color: #2563EB; /* COLORS.primary */
+}
+
+.workspace-table-container + div .ant-pagination-item-active a {
+  color: #FFFFFF;
+}
+

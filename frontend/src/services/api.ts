@@ -695,7 +695,14 @@ export const chatService = {
         requestBody.context = context;
       }
       
-      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody);
+      // Get user ID from localStorage (same as API key service)
+      const userId = localStorage.getItem('userId') || 'user-123';
+      
+      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody, {
+        headers: {
+          'X-User-ID': userId,
+        },
+      });
       return response.data;
     } catch (error) {
       console.error('Error asking question:', error);

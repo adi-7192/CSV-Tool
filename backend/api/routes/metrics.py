@@ -39,6 +39,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+@router.get("")
 @router.get("/")
 async def get_metrics(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),

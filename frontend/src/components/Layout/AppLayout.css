@@ -1,0 +1,362 @@
+/* AppLayout Styles */
+
+.app-layout {
+  min-height: 100vh;
+  background-color: var(--color-bg-secondary, #F9FAFB);
+  overflow: visible;
+}
+
+/* Sidebar Styles */
+.app-sider {
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.05) !important;
+  position: fixed !important;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  height: 100vh;
+  overflow: hidden;
+  z-index: 100;
+}
+
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: #FFFFFF;
+}
+
+/* Logo Section */
+.sidebar-logo {
+  padding: 24px 16px;
+  border-bottom: 1px solid #E5E7EB;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.logo-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+}
+
+.logo-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #FFFFFF;
+  font-size: 20px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.logo-text {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1F2937;
+  letter-spacing: -0.5px;
+  white-space: nowrap;
+  transition: opacity 0.3s ease;
+}
+
+.app-sider.ant-layout-sider-collapsed .logo-text {
+  opacity: 0;
+  width: 0;
+  overflow: hidden;
+}
+
+.sidebar-toggle {
+  color: #6B7280;
+  transition: all 0.2s ease;
+}
+
+.sidebar-toggle:hover {
+  color: #2563EB;
+  background-color: #F3F4F6;
+}
+
+/* Navigation Menu */
+.sidebar-menu {
+  flex: 1;
+  border: none;
+  padding: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.sidebar-menu .ant-menu-item {
+  height: 44px;
+  line-height: 44px;
+  margin: 4px 0;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+  padding-left: 16px !important;
+}
+
+.sidebar-menu .ant-menu-item:hover {
+  background-color: #F3F4F6;
+}
+
+.sidebar-menu .ant-menu-item-selected {
+  background-color: rgba(37, 99, 235, 0.1) !important;
+  border-left: 3px solid #2563EB;
+  color: #2563EB;
+  font-weight: 500;
+}
+
+.sidebar-menu .ant-menu-item-selected::after {
+  display: none;
+}
+
+.sidebar-menu .ant-menu-item-icon {
+  font-size: 18px;
+  margin-right: 12px;
+}
+
+.app-sider.ant-layout-sider-collapsed .sidebar-menu .ant-menu-item {
+  padding-left: 20px !important;
+  justify-content: center;
+}
+
+.app-sider.ant-layout-sider-collapsed .sidebar-menu .ant-menu-item-icon {
+  margin-right: 0;
+}
+
+/* User Profile Section */
+.sidebar-user {
+  padding: 16px;
+  border-top: 1px solid #E5E7EB;
+  flex-shrink: 0;
+  background-color: #FFFFFF;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.user-details {
+  flex: 1;
+  min-width: 0;
+  transition: opacity 0.3s ease;
+}
+
+.app-sider.ant-layout-sider-collapsed .user-details {
+  opacity: 0;
+  width: 0;
+  overflow: hidden;
+}
+
+.user-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1F2937;
+  line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-email {
+  font-size: 12px;
+  color: #6B7280;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.user-actions {
+  display: flex;
+  gap: 4px;
+  transition: opacity 0.3s ease;
+}
+
+.app-sider.ant-layout-sider-collapsed .user-actions {
+  opacity: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.user-action-btn {
+  flex: 1;
+  color: #6B7280;
+  transition: all 0.2s ease;
+}
+
+.user-action-btn:hover {
+  color: #2563EB;
+  background-color: #F3F4F6;
+}
+
+/* Header Styles */
+.app-layout-main {
+  margin-left: 240px;
+  transition: margin-left 0.3s ease;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+}
+
+.app-sider.ant-layout-sider-collapsed ~ .app-layout-main {
+  margin-left: 80px;
+}
+
+.app-header {
+  height: 64px;
+  background-color: #FFFFFF;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 99;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+}
+
+.mobile-menu-btn {
+  color: #6B7280;
+  font-size: 18px;
+  padding: 8px;
+}
+
+.mobile-menu-btn:hover {
+  color: #2563EB;
+  background-color: #F3F4F6;
+}
+
+.header-breadcrumb {
+  font-size: 14px;
+}
+
+.header-breadcrumb .ant-breadcrumb-link {
+  color: #6B7280;
+}
+
+.header-breadcrumb .ant-breadcrumb-link:hover {
+  color: #2563EB;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-date-picker {
+  border-radius: 6px;
+  border: 1px solid #E2E8F0;
+  transition: all 0.2s ease;
+}
+
+.header-date-picker:hover {
+  border-color: #2563EB;
+}
+
+.header-action-btn {
+  color: #6B7280;
+  font-size: 18px;
+  padding: 8px;
+  transition: all 0.2s ease;
+}
+
+.header-action-btn:hover {
+  color: #2563EB;
+  background-color: #F3F4F6;
+}
+
+.header-user-btn {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  height: auto;
+  color: #1F2937;
+  transition: all 0.2s ease;
+}
+
+.header-user-btn:hover {
+  background-color: #F3F4F6;
+}
+
+.header-user-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Content Styles */
+.app-content {
+  padding: 24px;
+  background-color: #F9FAFB;
+  min-height: calc(100vh - 64px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Mobile Styles */
+@media (max-width: 768px) {
+  .app-layout-main {
+    margin-left: 0 !important;
+  }
+
+  .app-header {
+    padding: 0 16px;
+  }
+
+  .app-content {
+    padding: 16px;
+  }
+
+  .header-user-name {
+    display: none;
+  }
+
+  .header-date-picker {
+    display: none;
+  }
+}
+
+/* Smooth Transitions */
+.app-sider {
+  transition: all 0.3s ease !important;
+}
+
+.app-layout-main {
+  transition: margin-left 0.3s ease;
+}
+
+/* Scrollbar Styling */
+.sidebar-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sidebar-menu::-webkit-scrollbar-thumb {
+  background: #D1D5DB;
+  border-radius: 3px;
+}
+
+.sidebar-menu::-webkit-scrollbar-thumb:hover {
+  background: #9CA3AF;
+}
+
