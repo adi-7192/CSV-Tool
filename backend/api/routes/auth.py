@@ -109,12 +109,13 @@ async def register(request: RegisterRequest):
         
         user = create_user(user_data)
         
-        # Generate token
+        # Generate token with token_version (new users start at 0)
         token = create_access_token(
             user_id=user.id,
             email=user.email,
             role=user.role,
-            tenant_id=user.tenant_id
+            tenant_id=user.tenant_id,
+            token_version=user.token_version
         )
         
         logger.info(f"User registered: {user.email} (ID: {user.id})")
@@ -181,12 +182,13 @@ async def login(request: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Generate token
+    # Generate token with current token_version
     token = create_access_token(
         user_id=user.id,
         email=user.email,
         role=user.role,
-        tenant_id=user.tenant_id
+        tenant_id=user.tenant_id,
+        token_version=user.token_version
     )
     
     logger.info(f"User logged in: {user.email} (ID: {user.id}, Role: {user.role})")

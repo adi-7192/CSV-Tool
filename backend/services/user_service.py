@@ -102,7 +102,8 @@ def get_user_by_email(email: str) -> Optional[UserInDB]:
         plan=row.get('plan', 'free'),
         onboarded=bool(row.get('onboarded', False)),
         tenant_id=row.get('tenant_id'),
-        created_at=row['created_at']
+        created_at=row['created_at'],
+        token_version=int(row.get('token_version', 0))
     )
 
 
@@ -134,7 +135,8 @@ def get_user_by_id(user_id: int) -> Optional[UserInDB]:
         plan=row.get('plan', 'free'),
         onboarded=bool(row.get('onboarded', False)),
         tenant_id=row.get('tenant_id'),
-        created_at=row['created_at']
+        created_at=row['created_at'],
+        token_version=int(row.get('token_version', 0))
     )
 
 
@@ -161,7 +163,8 @@ def get_all_users() -> list[UserInDB]:
             plan=row.get('plan', 'free'),
             onboarded=bool(row.get('onboarded', False)),
             tenant_id=row.get('tenant_id'),
-            created_at=row['created_at']
+            created_at=row['created_at'],
+            token_version=int(row.get('token_version', 0))
         ))
     
     return users

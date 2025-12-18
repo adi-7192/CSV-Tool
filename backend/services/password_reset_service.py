@@ -234,7 +234,7 @@ def update_user_password(user_id: int, new_password_hash: str) -> bool:
     conn.execute(
         """
         UPDATE users
-        SET password_hash = ?, password_changed_at = ?
+        SET password_hash = ?, password_changed_at = ?, token_version = token_version + 1
         WHERE id = ?
         """,
         [new_password_hash, now, user_id]

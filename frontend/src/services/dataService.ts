@@ -214,7 +214,25 @@ export const downloadTransactionsCSV = async (
  * @param file - File object to upload
  * @returns Upload response with status and row count
  */
-export const uploadCSV = async (file: File): Promise<UploadResponse | null> => {
+export interface DuplicateUploadError {
+  error: 'DUPLICATE_UPLOAD';
+  message: string;
+  existing_ingestion_id: string;
+  existing_filename: string;
+  existing_uploaded_at: string;
+  existing_rows: number;
+}
+
+export interface RequiredColumnsError {
+  error: 'REQUIRED_COLUMNS_MISSING';
+  message: string;
+  missing_columns: string[];
+  expected_schema: Record<string, string>;
+  csv_columns: string[];
+  detected_mapping: Record<string, string>;
+}
+
+export const uploadCSV = async (file: File): Promise<UploadResponse | DuplicateUploadError | RequiredColumnsError | null> => {
   try {
     const formData = new FormData();
     formData.append('file', file);
@@ -229,7 +247,33 @@ export const uploadCSV = async (file: File): Promise<UploadResponse | null> => {
   } catch (error) {
     console.error('Error uploading CSV:', error);
     if (error instanceof AxiosError) {
-      console.error('Response:', error.response?.data);
+      const responseData = error.response?.data;
+      
+      // Handle duplicate upload (409)
+      if (error.response?.status === 409 && responseData?.error === 'DUPLICATE_UPLOAD') {
+        return {
+          error: 'DUPLICATE_UPLOAD',
+          message: responseData.message || 'This file has already been uploaded',
+          existing_ingestion_id: responseData.existing_ingestion_id,
+          existing_filename: responseData.existing_filename,
+          existing_uploaded_at: responseData.existing_uploaded_at,
+          existing_rows: responseData.existing_rows || 0,
+        } as DuplicateUploadError;
+      }
+      
+      // Handle required columns missing (400)
+      if (error.response?.status === 400 && responseData?.error === 'REQUIRED_COLUMNS_MISSING') {
+        return {
+          error: 'REQUIRED_COLUMNS_MISSING',
+          message: responseData.message || 'Required columns are missing',
+          missing_columns: responseData.missing_columns || [],
+          expected_schema: responseData.expected_schema || {},
+          csv_columns: responseData.csv_columns || [],
+          detected_mapping: responseData.detected_mapping || {},
+        } as RequiredColumnsError;
+      }
+      
+      console.error('Response:', responseData);
     }
     return null;
   }

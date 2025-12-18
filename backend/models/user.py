@@ -34,4 +34,5 @@ class UserInDB(UserBase):
     id: int
     password_hash: str
     created_at: datetime
+    token_version: int = 0  # Incremented on password change to invalidate existing sessions
 

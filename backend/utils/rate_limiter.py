@@ -1,11 +1,11 @@
 """
-In-memory rate limiter for password reset endpoints.
+Rate limiter for password reset endpoints.
 
-Simple sliding window rate limiter using in-memory storage.
-For production, consider using Redis for distributed rate limiting.
+Supports both Redis (distributed) and in-memory (fallback) rate limiting.
+Automatically falls back to in-memory if Redis is not available.
 """
 from datetime import datetime, timedelta
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 from collections import defaultdict
 import threading
 import logging
@@ -13,6 +13,14 @@ import logging
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Try to import Redis
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
+    logger.warning("Redis not available - using in-memory rate limiter")
 
 
 class RateLimiter:
@@ -95,15 +103,134 @@ class RateLimiter:
                     del self._requests[key]
 
 
-# Global rate limiter instance
-_rate_limiter: RateLimiter = None
+class RedisRateLimiter:
+    """
+    Redis-based rate limiter for distributed rate limiting.
+    
+    Uses Redis INCR + EXPIRE for atomic rate limiting across multiple processes.
+    Falls back to in-memory limiter if Redis is unavailable.
+    """
+    
+    def __init__(self, redis_url: Optional[str] = None):
+        self.redis_client = None
+        self.redis_available = False
+        
+        if REDIS_AVAILABLE and redis_url:
+            try:
+                self.redis_client = redis.from_url(redis_url, decode_responses=True)
+                # Test connection
+                self.redis_client.ping()
+                self.redis_available = True
+                logger.info(f"Redis rate limiter initialized with URL: {redis_url}")
+            except Exception as e:
+                logger.warning(f"Failed to connect to Redis: {e}. Falling back to in-memory limiter.")
+                self.redis_available = False
+        else:
+            if not REDIS_AVAILABLE:
+                logger.warning("Redis library not installed. Using in-memory limiter.")
+            else:
+                logger.info("REDIS_URL not set. Using in-memory limiter.")
+    
+    def is_rate_limited(
+        self,
+        key: str,
+        max_requests: int,
+        window_minutes: int
+    ) -> Tuple[bool, int]:
+        """
+        Check if key is rate limited using Redis.
+        
+        Uses atomic INCR + EXPIRE pattern for thread-safe rate limiting.
+        
+        Args:
+            key: Identifier (e.g., IP address or email)
+            max_requests: Maximum requests allowed in window
+            window_minutes: Time window in minutes
+            
+        Returns:
+            Tuple of (is_limited: bool, requests_remaining: int)
+        """
+        if not self.redis_available or not self.redis_client:
+            # Fallback to in-memory
+            return _in_memory_limiter.is_rate_limited(key, max_requests, window_minutes)
+        
+        try:
+            redis_key = f"ratelimit:{key}"
+            window_seconds = window_minutes * 60
+            
+            # Atomic increment
+            current_count = self.redis_client.incr(redis_key)
+            
+            # Set expiration on first request
+            if current_count == 1:
+                self.redis_client.expire(redis_key, window_seconds)
+            
+            # Check if limit exceeded
+            if current_count > max_requests:
+                logger.warning(f"Rate limit exceeded for key: {key[:20]}... (count: {current_count})")
+                return True, 0
+            
+            requests_remaining = max(0, max_requests - current_count)
+            return False, requests_remaining
+            
+        except Exception as e:
+            logger.error(f"Redis rate limit check failed: {e}. Falling back to in-memory.")
+            # Fallback to in-memory
+            return _in_memory_limiter.is_rate_limited(key, max_requests, window_minutes)
+    
+    def record_request(self, key: str) -> None:
+        """
+        Record a request for the given key.
+        
+        Note: In Redis implementation, recording is done in is_rate_limited()
+        via INCR, so this is a no-op for Redis but kept for API compatibility.
+        """
+        if not self.redis_available or not self.redis_client:
+            # Fallback to in-memory
+            _in_memory_limiter.record_request(key)
+    
+    def reset(self, key: str) -> None:
+        """Reset rate limit for a key (useful for testing)."""
+        if self.redis_available and self.redis_client:
+            try:
+                redis_key = f"ratelimit:{key}"
+                self.redis_client.delete(redis_key)
+            except Exception as e:
+                logger.error(f"Redis reset failed: {e}")
+        else:
+            _in_memory_limiter.reset(key)
+
+
+# Global rate limiter instances
+_rate_limiter: Optional[RateLimiter] = None
+_redis_rate_limiter: Optional[RedisRateLimiter] = None
+_in_memory_limiter: Optional[RateLimiter] = None
 
 
 def get_rate_limiter() -> RateLimiter:
-    """Get or create the global rate limiter instance."""
-    global _rate_limiter
-    if _rate_limiter is None:
-        _rate_limiter = RateLimiter()
+    """
+    Get or create the global rate limiter instance.
+    
+    Returns RedisRateLimiter if Redis is available, otherwise RateLimiter (in-memory).
+    """
+    global _rate_limiter, _redis_rate_limiter, _in_memory_limiter
+    
+    # Initialize in-memory limiter (always available as fallback)
+    if _in_memory_limiter is None:
+        _in_memory_limiter = RateLimiter()
+    
+    # Try Redis if URL is configured
+    if settings.REDIS_URL:
+        if _redis_rate_limiter is None:
+            _redis_rate_limiter = RedisRateLimiter(redis_url=settings.REDIS_URL)
+        
+        # Use Redis if available, otherwise fallback to in-memory
+        if _redis_rate_limiter.redis_available:
+            _rate_limiter = _redis_rate_limiter
+            return _rate_limiter
+    
+    # Use in-memory limiter
+    _rate_limiter = _in_memory_limiter
     return _rate_limiter
 
 

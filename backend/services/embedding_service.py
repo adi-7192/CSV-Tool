@@ -12,6 +12,7 @@ Uses sentence-transformers for embeddings, ChromaDB for vector storage.
 
 import logging
 import os
+import threading
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
@@ -22,7 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Singleton instance
 _chroma_client = None
-_collection = None
+# Thread-local storage for collections (one per tenant per thread)
+_collections_cache: Dict[str, Any] = {}
+_collections_lock = threading.Lock()
 
 
 def is_chromadb_available() -> bool:
@@ -48,28 +51,66 @@ def get_chroma_client():
     return _chroma_client
 
 
-def get_collection(name: str = "sales_context"):
-    """Get or create the main collection"""
-    global _collection
-    
-    if _collection is None:
-        client = get_chroma_client()
-        _collection = client.get_or_create_collection(
-            name=name,
-            metadata={"description": "Sales data context for RAG"}
-        )
-        logger.info(f"Collection '{name}' ready with {_collection.count()} documents")
-    
-    return _collection
-
-
-def build_schema_documents() -> List[Dict[str, Any]]:
+def get_collection(tenant_id: Optional[str] = None, name: Optional[str] = None):
     """
-    Build documents from database schema for embedding
+    Get or create a collection for a specific tenant.
+    
+    TENANT ISOLATION: Each tenant gets their own collection to ensure
+    strict data isolation in RAG queries.
+    
+    Args:
+        tenant_id: User's tenant ID (REQUIRED for multi-tenant)
+        name: Optional collection name (defaults to f"rag_{tenant_id}")
+        
+    Returns:
+        ChromaDB collection for the tenant
+        
+    Raises:
+        ValueError: If tenant_id is None (safety check)
+    """
+    if not tenant_id:
+        raise ValueError("tenant_id is required for ChromaDB collection. Cannot query without tenant isolation.")
+    
+    # Use tenant-specific collection name
+    collection_name = name or f"rag_{tenant_id}"
+    
+    # Check cache first (thread-safe)
+    with _collections_lock:
+        if collection_name in _collections_cache:
+            return _collections_cache[collection_name]
+    
+    # Create or get collection
+    client = get_chroma_client()
+    collection = client.get_or_create_collection(
+        name=collection_name,
+        metadata={
+            "description": f"Sales data context for RAG - Tenant {tenant_id}",
+            "tenant_id": tenant_id
+        }
+    )
+    
+    # Cache it
+    with _collections_lock:
+        _collections_cache[collection_name] = collection
+    
+    logger.info(f"Collection '{collection_name}' ready for tenant {tenant_id} with {collection.count()} documents")
+    return collection
+
+
+def build_schema_documents(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Build documents from database schema for embedding with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
     
     Returns list of documents with 'id', 'content', 'metadata'
     """
     from core.database import get_connection, execute_query
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    if not tenant_id:
+        raise ValueError("tenant_id is required for schema documents. Cannot index without tenant isolation.")
     
     documents = []
     
@@ -102,8 +143,9 @@ def build_schema_documents() -> List[Dict[str, Any]]:
             }
             documents.append(col_doc)
         
-        # Get data statistics
-        stats_query = """
+        # Get data statistics (TENANT ISOLATED)
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        stats_query = f"""
         SELECT 
             COUNT(*) as total_records,
             COUNT(DISTINCT sku) as distinct_products,
@@ -111,6 +153,7 @@ def build_schema_documents() -> List[Dict[str, Any]]:
             MIN(order_date) as min_date,
             MAX(order_date) as max_date
         FROM sales
+        WHERE {tenant_filter}
         """
         try:
             stats_df = execute_query(stats_query)
@@ -293,16 +336,23 @@ def build_business_rule_documents() -> List[Dict[str, Any]]:
     return rules
 
 
-def build_data_insight_documents() -> List[Dict[str, Any]]:
+def build_data_insight_documents(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Build documents from actual data insights for embedding.
+    Build documents from actual data insights for embedding with tenant isolation.
     This indexes real business patterns, not just schema.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
     """
     from core.database import execute_query, table_exists
     from services.metrics_service import (
         get_top_products, get_revenue_by_city, get_movers_decliners,
         calculate_metrics
     )
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    if not tenant_id:
+        raise ValueError("tenant_id is required for data insight documents. Cannot index without tenant isolation.")
     
     documents = []
     
@@ -310,17 +360,18 @@ def build_data_insight_documents() -> List[Dict[str, Any]]:
         return documents
     
     try:
-        # Get date range from database
-        date_range = execute_query("SELECT MIN(order_date) as min_date, MAX(order_date) as max_date FROM sales")
+        # Get date range from database (TENANT ISOLATED)
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        date_range = execute_query(f"SELECT MIN(order_date) as min_date, MAX(order_date) as max_date FROM sales WHERE {tenant_filter}")
         if date_range.empty:
             return documents
         
         min_date = str(date_range.iloc[0]['min_date'])[:10]
         max_date = str(date_range.iloc[0]['max_date'])[:10]
         
-        # 1. Top Products Summary
+        # 1. Top Products Summary (TENANT ISOLATED)
         try:
-            top_products_df = get_top_products(limit=10, start_date=min_date, end_date=max_date, metric='revenue')
+            top_products_df = get_top_products(limit=10, start_date=min_date, end_date=max_date, metric='revenue', tenant_id=tenant_id)
             if not top_products_df.empty:
                 top_skus = top_products_df.head(5)['sku'].tolist()
                 doc = {
@@ -336,9 +387,9 @@ def build_data_insight_documents() -> List[Dict[str, Any]]:
         except Exception as e:
             logger.warning(f"Could not build top products insight: {e}")
         
-        # 2. Regional Performance Summary
+        # 2. Regional Performance Summary (TENANT ISOLATED)
         try:
-            city_revenue = get_revenue_by_city(start_date=min_date, end_date=max_date, limit=5)
+            city_revenue = get_revenue_by_city(start_date=min_date, end_date=max_date, limit=5, tenant_id=tenant_id)
             if city_revenue and city_revenue.get('data'):
                 top_cities = [item.get('city', '') for item in city_revenue['data'][:3]]
                 doc = {
@@ -354,9 +405,9 @@ def build_data_insight_documents() -> List[Dict[str, Any]]:
         except Exception as e:
             logger.warning(f"Could not build city revenue insight: {e}")
         
-        # 3. Overall Metrics Summary
+        # 3. Overall Metrics Summary (TENANT ISOLATED)
         try:
-            metrics = calculate_metrics(start_date=min_date, end_date=max_date)
+            metrics = calculate_metrics(start_date=min_date, end_date=max_date, tenant_id=tenant_id)
             if metrics:
                 gross_rev = metrics.get('gross_revenue', 0)
                 net_rev = metrics.get('net_revenue', 0)
@@ -384,7 +435,7 @@ def build_data_insight_documents() -> List[Dict[str, Any]]:
             days = (end_dt - start_dt).days + 1
             
             if days >= 7:  # Minimum for movers/decliners
-                movers_decliners = get_movers_decliners(start_date=min_date, end_date=max_date, limit=5)
+                movers_decliners = get_movers_decliners(start_date=min_date, end_date=max_date, limit=5, tenant_id=tenant_id)
                 if movers_decliners:
                     decliners = movers_decliners.get('decliners', [])
                     movers = movers_decliners.get('movers', [])
@@ -425,9 +476,17 @@ def build_data_insight_documents() -> List[Dict[str, Any]]:
     return documents
 
 
-def index_all_documents():
-    """Index all documents into ChromaDB"""
-    collection = get_collection()
+def index_all_documents(tenant_id: Optional[str] = None):
+    """
+    Index all documents into ChromaDB with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
+    """
+    if not tenant_id:
+        raise ValueError("tenant_id is required for indexing documents. Cannot index without tenant isolation.")
+    
+    collection = get_collection(tenant_id=tenant_id)
     
     # Clear existing documents
     try:
@@ -441,20 +500,20 @@ def index_all_documents():
     # Build all documents
     all_docs = []
     
-    # Schema documents
-    schema_docs = build_schema_documents()
+    # Schema documents (TENANT ISOLATED)
+    schema_docs = build_schema_documents(tenant_id=tenant_id)
     all_docs.extend(schema_docs)
-    logger.info(f"Built {len(schema_docs)} schema documents")
+    logger.info(f"Built {len(schema_docs)} schema documents for tenant {tenant_id}")
     
-    # Business rule documents
+    # Business rule documents (shared across all tenants - no tenant_id needed)
     rule_docs = build_business_rule_documents()
     all_docs.extend(rule_docs)
     logger.info(f"Built {len(rule_docs)} business rule documents")
     
-    # Data insight documents (NEW - actual data patterns)
-    insight_docs = build_data_insight_documents()
+    # Data insight documents (TENANT ISOLATED - actual data patterns)
+    insight_docs = build_data_insight_documents(tenant_id=tenant_id)
     all_docs.extend(insight_docs)
-    logger.info(f"Built {len(insight_docs)} data insight documents")
+    logger.info(f"Built {len(insight_docs)} data insight documents for tenant {tenant_id}")
     
     if not all_docs:
         logger.warning("No documents to index")
@@ -475,23 +534,27 @@ def index_all_documents():
     return len(all_docs)
 
 
-def semantic_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+def semantic_search(query: str, top_k: int = 5, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Perform semantic search on indexed documents
+    Perform semantic search on indexed documents with tenant isolation.
     
     Args:
         query: Natural language query
         top_k: Number of results to return
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
         
     Returns:
         List of relevant documents with scores
     """
-    collection = get_collection()
+    if not tenant_id:
+        raise ValueError("tenant_id is required for semantic search. Cannot query without tenant isolation.")
+    
+    collection = get_collection(tenant_id=tenant_id)
     
     # Check if collection has documents
     if collection.count() == 0:
-        logger.warning("Collection is empty, indexing documents first...")
-        index_all_documents()
+        logger.warning(f"Collection is empty for tenant {tenant_id}, indexing documents first...")
+        index_all_documents(tenant_id=tenant_id)
     
     try:
         results = collection.query(
@@ -519,17 +582,21 @@ def semantic_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         return []
 
 
-def get_relevant_context(question: str) -> str:
+def get_relevant_context(question: str, tenant_id: Optional[str] = None) -> str:
     """
-    Get relevant context for a question as a formatted string
+    Get relevant context for a question as a formatted string with tenant isolation.
     
     Args:
         question: User's question
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
         
     Returns:
         Formatted context string for LLM prompt
     """
-    results = semantic_search(question, top_k=5)
+    if not tenant_id:
+        raise ValueError("tenant_id is required for context retrieval. Cannot query without tenant isolation.")
+    
+    results = semantic_search(question, top_k=5, tenant_id=tenant_id)
     
     if not results:
         return ""
@@ -553,13 +620,10 @@ def get_relevant_context(question: str) -> str:
 
 # Initialize on import
 def init_embeddings():
-    """Initialize the embedding service"""
+    """Initialize the embedding service (no-op, collections are created on-demand per tenant)"""
     try:
-        collection = get_collection()
-        if collection.count() == 0:
-            logger.info("Empty collection, will index on first query")
-        else:
-            logger.info(f"Embedding service ready with {collection.count()} documents")
+        client = get_chroma_client()
+        logger.info("Embedding service initialized (collections created per tenant on-demand)")
     except Exception as e:
         logger.error(f"Failed to initialize embedding service: {e}")
 

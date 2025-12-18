@@ -1,13 +1,15 @@
 """
 Upload API Endpoints - Handle CSV file uploads
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from typing import Dict, Any, List
 import pandas as pd
 
 from services.upload_service import process_csv_upload
 from models.responses import UploadResponse
 from services.database_reset import reset_database, check_database_schema
+from api.deps.auth_deps import get_current_user
+from models.user import UserInDB
 
 router = APIRouter()
 
@@ -65,9 +67,13 @@ async def upload_csv(
 
 
 @router.get("/history")
-async def get_upload_history():
+async def get_upload_history(
+    current_user: UserInDB = Depends(get_current_user),
+):
     """
-    Get upload history from ingestion_log table
+    Get upload history from ingestion_log table (tenant-isolated).
+    
+    TENANT ISOLATION: Only returns uploads belonging to the current user's tenant.
     
     Returns list of uploads with metadata:
     - ingestion_id
@@ -77,14 +83,23 @@ async def get_upload_history():
     - date_range_start
     - date_range_end
     - validation_status
+    - file_size
+    - file_hash
     """
-    from core.database import execute_query, table_exists
+    from core.database import get_connection, table_exists
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id or str(current_user.id)
     
     if not table_exists('ingestion_log'):
         return {"uploads": []}
     
     try:
-        sql = """
+        conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        
+        sql = f"""
         SELECT
             ingestion_id,
             filename,
@@ -92,13 +107,17 @@ async def get_upload_history():
             rows_inserted,
             date_range_start,
             date_range_end,
-            validation_status
+            validation_status,
+            file_size,
+            file_hash,
+            processing_time_seconds
         FROM ingestion_log
+        WHERE {tenant_filter}
         ORDER BY uploaded_at DESC
-        LIMIT 50
+        LIMIT 100
         """
         
-        result_df = execute_query(sql)
+        result_df = conn.execute(sql).fetchdf()
         
         if result_df.empty:
             return {"uploads": []}
@@ -118,16 +137,99 @@ async def get_upload_history():
         return {"uploads": uploads}
     
     except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error fetching upload history: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{ingestion_id}")
-async def delete_file(ingestion_id: str):
+@router.delete("/all")
+async def delete_all_files(
+    current_user: UserInDB = Depends(get_current_user),
+):
     """
-    Delete a specific uploaded file and its data
+    Delete all uploaded files and data for the current tenant (tenant-isolated).
+    
+    TENANT ISOLATION: Only deletes files belonging to the current user's tenant.
+    
+    Returns:
+        {
+            "success": bool,
+            "message": str,
+            "deleted_rows": int
+        }
+    """
+    from core.database import get_connection, table_exists
+    from utils.tenant_filter import get_tenant_filter_sql
+    from services.embedding_service import get_chroma_client
+    
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    
+    try:
+        conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        
+        # Count rows to be deleted
+        deleted_rows = 0
+        if table_exists('sales'):
+            count_sql = f"SELECT COUNT(*) as count FROM sales WHERE {tenant_filter}"
+            count_df = conn.execute(count_sql).fetchdf()
+            if not count_df.empty:
+                deleted_rows = int(count_df.iloc[0]['count'])
+        
+        # 1. Delete all sales rows for this tenant
+        if table_exists('sales') and deleted_rows > 0:
+            delete_sql = f"DELETE FROM sales WHERE {tenant_filter}"
+            conn.execute(delete_sql)
+        
+        # 2. Delete ingestion logs for this tenant
+        if table_exists('ingestion_log'):
+            delete_log_sql = f"DELETE FROM ingestion_log WHERE {tenant_filter}"
+            conn.execute(delete_log_sql)
+        
+        # 3. Delete tenant's ChromaDB collection
+        try:
+            chroma_client = get_chroma_client()
+            collection_name = f"rag_{tenant_id}"
+            try:
+                collection = chroma_client.get_collection(collection_name)
+                collection.delete()  # Delete all documents in collection
+            except Exception:
+                # Collection doesn't exist, which is fine
+                pass
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Could not delete ChromaDB collection: {e}")
+        
+        return {
+            'success': True,
+            'deleted_rows': deleted_rows,
+            'message': f'Successfully deleted all data ({deleted_rows} rows)'
+        }
+    
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error deleting all files: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error deleting all files: {str(e)}")
+
+
+@router.delete("/{ingestion_id}")
+async def delete_file(
+    ingestion_id: str,
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """
+    Delete a specific uploaded file and its data (tenant-isolated).
+    
+    TENANT ISOLATION: Only deletes files belonging to the current user's tenant.
+    Users cannot delete other tenants' files even if they know the ingestion_id.
     
     Args:
         ingestion_id: The ingestion ID of the file to delete
+        current_user: Authenticated user (from JWT token)
     
     Returns:
         {
@@ -137,54 +239,80 @@ async def delete_file(ingestion_id: str):
         }
     """
     from core.database import get_connection, table_exists, execute_query
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id or str(current_user.id)
     
     if not table_exists('ingestion_log'):
         raise HTTPException(status_code=404, detail="No uploads found")
     
     try:
         conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
         
-        # Get file info
-        sql = """
+        # Get file info - verify it belongs to this tenant
+        # First check if any sales rows exist for this ingestion_id AND tenant_id
+        if table_exists('sales'):
+            verify_sql = f"""
+            SELECT COUNT(*) as count
+            FROM sales
+            WHERE ingestion_id = ? AND {tenant_filter}
+            LIMIT 1
+            """
+            verify_df = conn.execute(verify_sql, [ingestion_id]).fetchdf()
+            if verify_df.empty or verify_df.iloc[0]['count'] == 0:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"File with ingestion_id {ingestion_id} not found or does not belong to your account"
+                )
+        
+        # Get file info from ingestion_log - verify it belongs to this tenant
+        sql = f"""
         SELECT ingestion_id, filename
         FROM ingestion_log
-        WHERE ingestion_id = ?
+        WHERE ingestion_id = ? AND {tenant_filter}
         LIMIT 1
         """
         
         result_df = conn.execute(sql, [ingestion_id]).fetchdf()
         
         if result_df.empty:
-            raise HTTPException(status_code=404, detail=f"File with ingestion_id {ingestion_id} not found")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"File with ingestion_id {ingestion_id} not found or does not belong to your account"
+            )
         
         filename = result_df.iloc[0]['filename']
         
-        # Count rows to be deleted
+        # Count rows to be deleted (TENANT ISOLATED)
         deleted_rows = 0
         if table_exists('sales'):
-            count_sql = """
+            count_sql = f"""
             SELECT COUNT(*) as count
             FROM sales
-            WHERE ingestion_id = ?
+            WHERE ingestion_id = ? AND {tenant_filter}
             """
             count_df = conn.execute(count_sql, [ingestion_id]).fetchdf()
             if not count_df.empty:
                 deleted_rows = int(count_df.iloc[0]['count'])
         
-        # Delete rows from sales table
+        # Delete rows from sales table (TENANT ISOLATED)
         if table_exists('sales') and deleted_rows > 0:
-            delete_sql = """
+            delete_sql = f"""
             DELETE FROM sales
-            WHERE ingestion_id = ?
+            WHERE ingestion_id = ? AND {tenant_filter}
             """
             conn.execute(delete_sql, [ingestion_id])
         
-        # Delete from ingestion_log
-        delete_log_sql = """
-        DELETE FROM ingestion_log
-        WHERE ingestion_id = ?
-        """
-        conn.execute(delete_log_sql, [ingestion_id])
+        # Delete from ingestion_log (tenant-isolated)
+        # Since we already verified the ingestion belongs to this tenant, we can safely delete it
+        if deleted_rows > 0 or table_exists('ingestion_log'):
+            delete_log_sql = f"""
+            DELETE FROM ingestion_log
+            WHERE ingestion_id = ? AND {tenant_filter}
+            """
+            conn.execute(delete_log_sql, [ingestion_id])
         
         return {
             'success': True,
@@ -196,32 +324,6 @@ async def delete_file(ingestion_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
-
-
-@router.delete("/all")
-async def delete_all_files():
-    """
-    Delete all uploaded files and data
-    
-    WARNING: This will delete ALL data in the database!
-    
-    Returns:
-        {
-            "success": bool,
-            "message": str
-        }
-    """
-    from services.uploads_service import delete_all_uploads
-    
-    result = delete_all_uploads()
-    
-    if not result.get('success'):
-        raise HTTPException(
-            status_code=500,
-            detail=result.get('message', 'Failed to delete all files')
-        )
-    
-    return result
 
 
 @router.get("/download/{ingestion_id}")

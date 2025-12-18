@@ -29,21 +29,24 @@ from services.sql_validator import (
 logger = logging.getLogger(__name__)
 
 
-def retrieve_context(question: str, schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def retrieve_context(question: str, schema: Optional[Dict[str, Any]] = None, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Retrieve relevant context from ChromaDB based on question
+    Retrieve relevant context from ChromaDB based on question with tenant isolation.
     
     Args:
         question: User's natural language question
         schema: Optional database schema (if None, will fetch)
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
         
     Returns:
         Dictionary with retrieved context including:
-        - semantic_matches: Results from ChromaDB
+        - semantic_matches: Results from ChromaDB (tenant-isolated)
         - schema: Actual database schema with correct column names
         - column_mappings: Correct column names to use
         - business_rules: Relevant business rules for the query type
     """
+    if not tenant_id:
+        raise ValueError("tenant_id is required for RAG context retrieval. Cannot query without tenant isolation.")
     # Get schema if not provided
     if schema is None:
         from core.ai_service import get_database_schema
@@ -62,16 +65,16 @@ def retrieve_context(question: str, schema: Optional[Dict[str, Any]] = None) -> 
         'all_columns': list(get_actual_columns()),
     }
     
-    # Perform semantic search in ChromaDB
+    # Perform semantic search in ChromaDB (TENANT ISOLATED)
     try:
-        # Ensure documents are indexed
-        collection = get_collection()
+        # Ensure documents are indexed for this tenant
+        collection = get_collection(tenant_id=tenant_id)
         if collection.count() == 0:
-            logger.info("Indexing documents for first-time use...")
-            index_all_documents()
+            logger.info(f"Indexing documents for tenant {tenant_id} for first-time use...")
+            index_all_documents(tenant_id=tenant_id)
         
-        # Search for relevant context
-        semantic_results = semantic_search(question, top_k=5)
+        # Search for relevant context (tenant-isolated)
+        semantic_results = semantic_search(question, top_k=5, tenant_id=tenant_id)
         context['semantic_matches'] = semantic_results
         
         # Extract business rules from results
@@ -185,9 +188,18 @@ REMINDER: Use the EXACT column names from the COLUMN NAME MAPPINGS section above
     return enhanced_prompt
 
 
-def get_data_statistics() -> Dict[str, Any]:
-    """Get current data statistics for context"""
+def get_data_statistics(tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get current data statistics for context with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
+    """
     from core.database import execute_query
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    if not tenant_id:
+        raise ValueError("tenant_id is required for data statistics. Cannot query without tenant isolation.")
     
     stats = {
         'has_data': False,
@@ -198,14 +210,16 @@ def get_data_statistics() -> Dict[str, Any]:
     
     try:
         date_col = get_date_column()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
         
-        # Get basic stats
+        # Get basic stats (TENANT ISOLATED)
         query = f"""
         SELECT 
             COUNT(*) as total_records,
             MIN("{date_col}") as min_date,
             MAX("{date_col}") as max_date
         FROM sales
+        WHERE {tenant_filter}
         """
         df = execute_query(query)
         if not df.empty:
@@ -216,12 +230,12 @@ def get_data_statistics() -> Dict[str, Any]:
                 'max': str(df.iloc[0]['max_date']),
             }
         
-        # Get transaction types
+        # Get transaction types (TENANT ISOLATED)
         txn_col = get_transaction_type_column()
         query = f"""
         SELECT DISTINCT "{txn_col}" as txn_type
         FROM sales
-        WHERE "{txn_col}" IS NOT NULL
+        WHERE {tenant_filter} AND "{txn_col}" IS NOT NULL
         """
         df = execute_query(query)
         if not df.empty:

@@ -110,9 +110,31 @@ def init_database():
                 date_range_end DATE,
                 validation_status VARCHAR,
                 validation_issues JSON,
-                processing_time_seconds FLOAT
+                processing_time_seconds FLOAT,
+                file_hash VARCHAR,
+                file_size INTEGER,
+                tenant_id VARCHAR
             )
         """)
+        
+        # Add file_hash, file_size, and tenant_id columns if they don't exist (migration)
+        try:
+            conn.execute("ALTER TABLE ingestion_log ADD COLUMN file_hash VARCHAR")
+            logger.info("✅ Added 'file_hash' column to ingestion_log table")
+        except Exception:
+            pass
+        
+        try:
+            conn.execute("ALTER TABLE ingestion_log ADD COLUMN file_size INTEGER")
+            logger.info("✅ Added 'file_size' column to ingestion_log table")
+        except Exception:
+            pass
+        
+        try:
+            conn.execute("ALTER TABLE ingestion_log ADD COLUMN tenant_id VARCHAR")
+            logger.info("✅ Added 'tenant_id' column to ingestion_log table")
+        except Exception:
+            pass
         
         # Create users table if it doesn't exist
         conn.execute("""
@@ -208,6 +230,15 @@ def init_database():
         try:
             conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMP")
             logger.info("✅ Added 'password_changed_at' column to users table")
+        except Exception:
+            # Column already exists, ignore
+            pass
+        
+        # Add token_version column to users table for session invalidation
+        # When password changes, token_version is incremented, invalidating all existing JWTs
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+            logger.info("✅ Added 'token_version' column to users table")
         except Exception:
             # Column already exists, ignore
             pass

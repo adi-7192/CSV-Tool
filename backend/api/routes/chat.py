@@ -375,12 +375,12 @@ async def ask_question(
                     error="Schema retrieval failed"
                 )
             
-            # STEP 1: Retrieve RAG context (ChromaDB semantic search)
+            # STEP 1: Retrieve RAG context (ChromaDB semantic search) - TENANT ISOLATED
             try:
-                rag_context = retrieve_context(request.question, schema)
-                logger.info(f"RAG: Retrieved context with {len(rag_context.get('semantic_matches', []))} semantic matches")
+                rag_context = retrieve_context(request.question, schema, tenant_id=tenant_id)
+                logger.info(f"RAG: Retrieved context with {len(rag_context.get('semantic_matches', []))} semantic matches for tenant {tenant_id}")
             except Exception as rag_error:
-                logger.warning(f"RAG context retrieval failed: {rag_error}")
+                logger.warning(f"RAG context retrieval failed for tenant {tenant_id}: {rag_error}")
                 rag_context = {'column_mappings': {}, 'semantic_matches': [], 'business_rules': []}
             
             # Generate SQL with LLM (will be enhanced with RAG context internally)

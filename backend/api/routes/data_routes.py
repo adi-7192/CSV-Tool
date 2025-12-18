@@ -1,10 +1,11 @@
 """
 Data Routes - Raw transaction data endpoints with tenant isolation
 """
-from fastapi import APIRouter, Query, HTTPException, UploadFile, File, Depends
+from fastapi import APIRouter, Query, HTTPException, UploadFile, File, Depends, Body
 from fastapi.responses import StreamingResponse
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
+from pydantic import BaseModel
 from services.data_service import get_transactions, get_unique_skus, get_data_statistics, export_transactions_csv
 from services.upload_service import process_csv_upload
 from utils.validators import (
@@ -207,40 +208,105 @@ async def get_data_summary_endpoint(
 
 @router.get("/export")
 async def export_transactions_endpoint(
+    format: str = Query("csv", description="Export format: csv or parquet"),
     date_from: Optional[str] = Query(None, description="Start date filter (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="End date filter (YYYY-MM-DD)"),
     sku: Optional[str] = Query(None, description="SKU filter (exact match)"),
     transaction_type: Optional[str] = Query(None, description="Transaction type filter"),
+    ingestion_id: Optional[str] = Query(None, description="Filter by ingestion ID"),
+    source_file: Optional[str] = Query(None, description="Filter by source file name"),
     current_user: UserInDB = Depends(get_current_user),
 ):
     """
-    Export filtered transactions as CSV file (tenant-isolated).
+    Export filtered transactions as CSV or Parquet file (tenant-isolated).
     
-    Parameters same as /transactions endpoint.
-    Returns CSV file download.
+    Supports streaming for large exports. Max 100,000 rows without filters.
+    If no filters provided and data exceeds limit, returns 400 error.
+    
+    Args:
+        format: Export format - "csv" (default) or "parquet"
+        date_from: Start date filter (YYYY-MM-DD)
+        date_to: End date filter (YYYY-MM-DD)
+        sku: SKU filter (exact match)
+        transaction_type: Transaction type filter
+        ingestion_id: Filter by ingestion ID
+        source_file: Filter by source file name
+        current_user: Authenticated user (from JWT token)
+    
+    Returns:
+        StreamingResponse with CSV or Parquet file download
     """
+    from services.data_service import export_transactions_csv, export_transactions_parquet, export_transactions_csv_streaming
+    
+    # Validate format
+    if format not in ["csv", "parquet"]:
+        raise HTTPException(status_code=400, detail="Format must be 'csv' or 'parquet'")
+    
+    # TENANT ISOLATION: Pass user's tenant_id
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    
     try:
-        # TENANT ISOLATION: Pass user's tenant_id
-        tenant_id = current_user.tenant_id or str(current_user.id)
-        csv_buffer = export_transactions_csv(
-            date_from=date_from,
-            date_to=date_to,
-            sku=sku,
-            transaction_type=transaction_type,
-            tenant_id=tenant_id,
-        )
+        # Check if filters are provided (for max rows validation)
+        has_filters = any([date_from, date_to, sku, transaction_type, ingestion_id, source_file])
         
-        # Generate filename with current date
-        filename = f"transactions_export_{datetime.now().strftime('%Y-%m-%d')}.csv"
-        
-        return StreamingResponse(
-            csv_buffer,
-            media_type="text/csv",
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}"
-            }
-        )
+        if format == "parquet":
+            # Parquet export
+            parquet_path = export_transactions_parquet(
+                date_from=date_from,
+                date_to=date_to,
+                sku=sku,
+                transaction_type=transaction_type,
+                ingestion_id=ingestion_id,
+                source_file=source_file,
+                tenant_id=tenant_id,
+            )
+            
+            filename = f"transactions_export_{datetime.now().strftime('%Y-%m-%d')}.parquet"
+            
+            def cleanup_temp_file():
+                """Cleanup temp file after streaming"""
+                import os
+                try:
+                    if os.path.exists(parquet_path):
+                        os.remove(parquet_path)
+                except Exception:
+                    pass
+            
+            from fastapi.responses import FileResponse
+            return FileResponse(
+                parquet_path,
+                media_type="application/octet-stream",
+                filename=filename,
+                background=cleanup_temp_file,
+            )
+        else:
+            # CSV export (streaming)
+            filename = f"transactions_export_{datetime.now().strftime('%Y-%m-%d')}.csv"
+            
+            # Use streaming export for large files
+            return StreamingResponse(
+                export_transactions_csv_streaming(
+                    date_from=date_from,
+                    date_to=date_to,
+                    sku=sku,
+                    transaction_type=transaction_type,
+                    ingestion_id=ingestion_id,
+                    source_file=source_file,
+                    tenant_id=tenant_id,
+                    max_rows=100000,
+                    require_filters=not has_filters,
+                ),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}"
+                }
+            )
+    except HTTPException:
+        raise
     except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error exporting transactions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -289,10 +355,37 @@ async def upload_csv_endpoint(
     result = process_csv_upload(file_content, file.filename, tenant_id=tenant_id)
     
     if not result.get('success'):
-        raise HTTPException(
-            status_code=500,
-            detail=result.get('error', 'Upload processing failed')
-        )
+        # Handle duplicate upload (409)
+        if result.get('error') == 'DUPLICATE_UPLOAD' or result.get('status_code') == 409:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    'error': 'DUPLICATE_UPLOAD',
+                    'message': result.get('message', 'This file has already been uploaded'),
+                    'existing_ingestion_id': result.get('existing_ingestion_id'),
+                    'existing_filename': result.get('existing_filename'),
+                    'existing_uploaded_at': result.get('existing_uploaded_at'),
+                    'existing_rows': result.get('existing_rows', 0),
+                }
+            )
+        # Handle required columns missing (400)
+        elif result.get('error') == 'REQUIRED_COLUMNS_MISSING' or result.get('status_code') == 400:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    'error': 'REQUIRED_COLUMNS_MISSING',
+                    'message': result.get('message', 'Required columns are missing'),
+                    'missing_columns': result.get('missing_columns', []),
+                    'expected_schema': result.get('expected_schema', {}),
+                    'csv_columns': result.get('csv_columns', []),
+                    'detected_mapping': result.get('detected_mapping', {}),
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=result.get('status_code', 500),
+                detail=result.get('error', 'Upload processing failed')
+            )
     
     return {
         "success": True,
@@ -302,4 +395,182 @@ async def upload_csv_endpoint(
         "ingestion_id": result.get('ingestion_id'),
         "tenant_id": tenant_id,
     }
+
+
+class ResetDataRequest(BaseModel):
+    """Request model for reset tenant data endpoint"""
+    confirm: str  # Must be "DELETE" to confirm
+
+
+@router.post("/reset")
+async def reset_tenant_data(
+    request: ResetDataRequest = Body(...),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """
+    Reset all data for the current tenant (self-serve).
+    
+    TENANT ISOLATION: Only deletes data belonging to the current user's tenant.
+    This includes:
+    - All sales rows with tenant_id = current_user.tenant_id
+    - Tenant's ChromaDB collection (rag_{tenant_id})
+    - Ingestion logs for this tenant's files
+    
+    Requires confirmation: request body must include {"confirm": "DELETE"}
+    
+    Args:
+        request: Confirmation request body
+        current_user: Authenticated user (from JWT token)
+    
+    Returns:
+        {
+            "success": bool,
+            "deleted_rows": int,
+            "message": str
+        }
+    """
+    from core.database import get_connection, table_exists
+    from utils.tenant_filter import get_tenant_filter_sql
+    from services.embedding_service import get_chroma_client
+    
+    # Require confirmation
+    if request.confirm != "DELETE":
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation required. Send {'confirm': 'DELETE'} to reset all your data."
+        )
+    
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    
+    try:
+        conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        
+        deleted_rows = 0
+        
+        # 1. Delete all sales rows for this tenant
+        if table_exists('sales'):
+            count_sql = f"SELECT COUNT(*) as count FROM sales WHERE {tenant_filter}"
+            count_df = conn.execute(count_sql).fetchdf()
+            if not count_df.empty:
+                deleted_rows = int(count_df.iloc[0]['count'])
+            
+            if deleted_rows > 0:
+                delete_sql = f"DELETE FROM sales WHERE {tenant_filter}"
+                conn.execute(delete_sql)
+        
+        # 2. Delete ingestion logs for this tenant (tenant-isolated)
+        if table_exists('ingestion_log'):
+            delete_log_sql = f"DELETE FROM ingestion_log WHERE {tenant_filter}"
+            conn.execute(delete_log_sql)
+        
+        # 3. Delete tenant's ChromaDB collection
+        try:
+            chroma_client = get_chroma_client()
+            collection_name = f"rag_{tenant_id}"
+            try:
+                collection = chroma_client.get_collection(name=collection_name)
+                collection.delete()  # Delete all documents in collection
+                # Note: ChromaDB doesn't have a direct "delete collection" API, but deleting all docs effectively clears it
+            except Exception:
+                # Collection doesn't exist, which is fine
+                pass
+        except Exception as e:
+            # ChromaDB deletion failed, but continue with other cleanup
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to delete ChromaDB collection for tenant {tenant_id}: {e}")
+        
+        return {
+            "success": True,
+            "deleted_rows": deleted_rows,
+            "message": f"Successfully reset all data for your account. Deleted {deleted_rows} rows."
+        }
+    
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error resetting tenant data: {e}")
+        raise HTTPException(status_code=500, detail=f"Error resetting data: {str(e)}")
+
+
+@router.get("/ingestions")
+async def get_ingestions_endpoint(
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """
+    Get list of ingestions (uploaded files) for the current tenant.
+    
+    TENANT ISOLATION: Only returns ingestions belonging to the current user's tenant.
+    
+    Returns:
+        {
+            "ingestions": [
+                {
+                    "ingestion_id": str,
+                    "filename": str,
+                    "uploaded_at": str,
+                    "rows_inserted": int,
+                    "file_size": int,
+                    "date_range_start": str | null,
+                    "date_range_end": str | null,
+                    "validation_status": str
+                }
+            ]
+        }
+    """
+    from core.database import get_connection, table_exists
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    
+    if not table_exists('ingestion_log'):
+        return {"ingestions": []}
+    
+    try:
+        conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        
+        sql = f"""
+        SELECT
+            ingestion_id,
+            filename,
+            uploaded_at,
+            rows_inserted,
+            file_size,
+            date_range_start,
+            date_range_end,
+            validation_status,
+            processing_time_seconds
+        FROM ingestion_log
+        WHERE {tenant_filter}
+        ORDER BY uploaded_at DESC
+        """
+        
+        result_df = conn.execute(sql).fetchdf()
+        
+        if result_df.empty:
+            return {"ingestions": []}
+        
+        # Convert to list of dicts
+        ingestions = result_df.to_dict('records')
+        
+        # Format dates as strings
+        for ingestion in ingestions:
+            if 'uploaded_at' in ingestion and pd.notna(ingestion['uploaded_at']):
+                ingestion['uploaded_at'] = str(ingestion['uploaded_at'])
+            if 'date_range_start' in ingestion and pd.notna(ingestion['date_range_start']):
+                ingestion['date_range_start'] = str(ingestion['date_range_start'])
+            if 'date_range_end' in ingestion and pd.notna(ingestion['date_range_end']):
+                ingestion['date_range_end'] = str(ingestion['date_range_end'])
+        
+        return {"ingestions": ingestions}
+    
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error fetching ingestions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 

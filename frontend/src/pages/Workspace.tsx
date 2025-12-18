@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Card, Pagination, Spin, Alert, DatePicker, Select, Button, Row, Col, Upload, Statistic, message } from 'antd';
+import { Table, Card, Pagination, Spin, Alert, DatePicker, Select, Button, Row, Col, Upload, Statistic, message, Modal, Collapse } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { ReloadOutlined, DownloadOutlined, InboxOutlined, CheckCircleOutlined } from '@ant-design/icons';
 import type { UploadProps } from 'antd';
 import dayjs, { Dayjs } from 'dayjs';
-import { getTransactions, getUniqueSKUs, getDataStatistics, downloadTransactionsCSV, uploadCSV, Transaction } from '@/services/dataService';
+import { getTransactions, getUniqueSKUs, getDataStatistics, downloadTransactionsCSV, uploadCSV, Transaction, DuplicateUploadError, RequiredColumnsError } from '@/services/dataService';
+import ColumnMappingModal from '@/components/ColumnMappingModal';
 import { dataService } from '@/services/api';
 import { formatCurrency } from '@/utils/formatters';
 import { useAuthStore } from '@/store/authStore';
@@ -49,6 +50,12 @@ const Workspace: React.FC = () => {
     message: string;
     rowsInserted?: number;
   } | null>(null);
+  const [duplicateUpload, setDuplicateUpload] = useState<DuplicateUploadError | null>(null);
+  const [requiredColumnsError, setRequiredColumnsError] = useState<RequiredColumnsError | null>(null);
+  const [columnMappingModalVisible, setColumnMappingModalVisible] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [detectedMapping, setDetectedMapping] = useState<Record<string, string>>({});
+  const [csvColumns, setCsvColumns] = useState<string[]>([]);
 
   // Check data availability on mount (only when authenticated)
   useEffect(() => {
@@ -187,94 +194,177 @@ const Workspace: React.FC = () => {
     }
   };
 
-  // Handle file upload
+  // Handle file upload - auto-upload by default, show mapping only if needed
+  const handleFileUpload = async (file: File) => {
+    setUploading(true);
+    setUploadStatus(null);
+    setPendingFile(file);
+    
+    try {
+      const result = await uploadCSV(file);
+      
+      // Handle duplicate upload
+      if (result && 'error' in result && result.error === 'DUPLICATE_UPLOAD') {
+        setDuplicateUpload(result as DuplicateUploadError);
+        setUploading(false);
+        return;
+      }
+      
+      // Handle required columns missing - show mapping modal
+      if (result && 'error' in result && result.error === 'REQUIRED_COLUMNS_MISSING') {
+        const errorData = result as RequiredColumnsError;
+        // Read CSV to get columns for mapping modal
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = e.target?.result as string;
+          const lines = text.split('\n');
+          if (lines.length > 0) {
+            const detectedCols = lines[0].split(',').map((col) => col.trim().replace(/"/g, ''));
+            setCsvColumns(detectedCols);
+            // Use backend's detected mapping as starting point
+            setDetectedMapping(errorData.detected_mapping || {});
+            setColumnMappingModalVisible(true);
+          }
+        };
+        reader.readAsText(file);
+        setUploading(false);
+        return;
+      }
+      
+      // Success
+      if (result && 'success' in result && result.success) {
+        setUploadStatus({
+          success: true,
+          message: result.message,
+          rowsInserted: result.rows_inserted,
+        });
+        message.success(`Successfully uploaded ${result.rows_inserted} rows`);
+        
+        // Refresh data after upload
+        const fetchData = async () => {
+          setLoading(true);
+          const result = await getTransactions(
+            currentPage,
+            pageSize,
+            dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
+            dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
+            selectedSKU,
+            selectedTransactionType
+          );
+          
+          if (result) {
+            setTransactions(result.data);
+            setTotal(result.total);
+            setTotalPages(result.total_pages);
+          }
+          setLoading(false);
+        };
+        
+        // Refresh statistics
+        const fetchStats = async () => {
+          const stats = await getDataStatistics();
+          if (stats) {
+            setStatistics(stats);
+          }
+        };
+        
+        // Update hasData state
+        setHasData(true);
+        
+        await Promise.all([fetchData(), fetchStats()]);
+      } else {
+        const errorMsg = (result && 'message' in result) ? result.message : 'Upload failed. Please try again.';
+        setUploadStatus({
+          success: false,
+          message: errorMsg,
+        });
+        message.error(errorMsg);
+      }
+    } catch (error: any) {
+      console.error('Upload error:', error);
+      let errorMessage = 'Upload failed. ';
+      
+      if (error.code === 'ERR_NETWORK' || !error.response) {
+        errorMessage += 'Unable to connect to server. Please check if the backend is running.';
+      } else if (error.response?.status === 401) {
+        errorMessage += 'Authentication failed. Please log in again.';
+      } else if (error.response?.status === 413) {
+        errorMessage += 'File too large. Maximum size is 100MB.';
+      } else if (error.response?.status === 400) {
+        // Check if it's a mapping error
+        const responseData = error.response?.data;
+        if (responseData?.error === 'REQUIRED_COLUMNS_MISSING') {
+          // Handle mapping error - show modal
+          const errorData: RequiredColumnsError = {
+            error: 'REQUIRED_COLUMNS_MISSING',
+            message: responseData.message || 'Required columns are missing',
+            missing_columns: responseData.missing_columns || [],
+            expected_schema: responseData.expected_schema || {},
+            csv_columns: responseData.csv_columns || [],
+            detected_mapping: responseData.detected_mapping || {},
+          };
+          setRequiredColumnsError(errorData);
+          // Read CSV to get columns for mapping modal
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const text = e.target?.result as string;
+            const lines = text.split('\n');
+            if (lines.length > 0) {
+              const detectedCols = lines[0].split(',').map((col) => col.trim().replace(/"/g, ''));
+              setCsvColumns(detectedCols);
+              setDetectedMapping(errorData.detected_mapping || {});
+              setColumnMappingModalVisible(true);
+            }
+          };
+          reader.readAsText(file);
+          setUploading(false);
+          return;
+        }
+        errorMessage += responseData?.detail || 'Invalid file format.';
+      } else if (error.response?.status === 500) {
+        errorMessage += 'Server error. Please try again later.';
+      } else {
+        errorMessage += error.response?.data?.detail || error.message || 'Unknown error occurred.';
+      }
+      
+      setUploadStatus({
+        success: false,
+        message: errorMessage,
+      });
+      message.error(errorMessage);
+    } finally {
+      setUploading(false);
+      setPendingFile(null);
+    }
+  };
+
+  // Handle column mapping confirmation (when mapping modal is shown)
+  const handleColumnMappingConfirm = async (_mapping: Record<string, string>) => {
+    if (!pendingFile) return;
+    // Note: mapping parameter is reserved for future use when backend accepts custom mappings
+    // For now, we re-upload with the same file and let backend auto-detect again
+    // In future, we can pass custom mapping to backend
+    
+    setColumnMappingModalVisible(false);
+    setRequiredColumnsError(null);
+    
+    // Re-upload the file (backend will auto-detect again)
+    // TODO: In future, pass custom mapping to backend
+    await handleFileUpload(pendingFile);
+  };
+
+  // Upload props - auto-upload by default
   const uploadProps: UploadProps = {
     name: 'file',
     multiple: false,
     accept: '.csv',
-    beforeUpload: async (file) => {
-      setUploading(true);
-      setUploadStatus(null);
-      
+    customRequest: async ({ file, onSuccess, onError }) => {
       try {
-        const result = await uploadCSV(file);
-        
-        if (result?.success) {
-          setUploadStatus({
-            success: true,
-            message: result.message,
-            rowsInserted: result.rows_inserted,
-          });
-          message.success(`Successfully uploaded ${result.rows_inserted} rows`);
-          
-          // Refresh data after upload
-          const fetchData = async () => {
-            setLoading(true);
-            const result = await getTransactions(
-              currentPage,
-              pageSize,
-              dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
-              dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
-              selectedSKU,
-              selectedTransactionType
-            );
-            
-            if (result) {
-              setTransactions(result.data);
-              setTotal(result.total);
-              setTotalPages(result.total_pages);
-            }
-            setLoading(false);
-          };
-          
-          // Refresh statistics
-          const fetchStats = async () => {
-            const stats = await getDataStatistics();
-            if (stats) {
-              setStatistics(stats);
-            }
-          };
-          
-          // Update hasData state
-          setHasData(true);
-          
-          await Promise.all([fetchData(), fetchStats()]);
-        } else {
-          const errorMsg = result?.message || 'Upload failed. Please try again.';
-          setUploadStatus({
-            success: false,
-            message: errorMsg,
-          });
-          message.error(errorMsg);
-        }
-      } catch (error: any) {
-        console.error('Upload error:', error);
-        let errorMessage = 'Upload failed. ';
-        
-        if (error.code === 'ERR_NETWORK' || !error.response) {
-          errorMessage += 'Unable to connect to server. Please check if the backend is running.';
-        } else if (error.response?.status === 401) {
-          errorMessage += 'Authentication failed. Please log in again.';
-        } else if (error.response?.status === 413) {
-          errorMessage += 'File too large. Maximum size is 100MB.';
-        } else if (error.response?.status === 400) {
-          errorMessage += error.response?.data?.detail || 'Invalid file format.';
-        } else if (error.response?.status === 500) {
-          errorMessage += 'Server error. Please try again later.';
-        } else {
-          errorMessage += error.response?.data?.detail || error.message || 'Unknown error occurred.';
-        }
-        
-        setUploadStatus({
-          success: false,
-          message: errorMessage,
-        });
-        message.error(errorMessage);
-      } finally {
-        setUploading(false);
+        await handleFileUpload(file as File);
+        onSuccess?.(file);
+      } catch (error) {
+        onError?.(error as Error);
       }
-      
-      return false; // Prevent auto upload
     },
     showUploadList: false,
   };
@@ -429,9 +519,63 @@ const Workspace: React.FC = () => {
                 Click or drag CSV file to upload
               </p>
               <p className="ant-upload-hint" style={{ color: '#64748B' }}>
-                Support for CSV files up to 100MB
+                Support for CSV files up to 100MB. Column mapping is automatic.
               </p>
             </Dragger>
+            
+            {/* Advanced: Review/Change Mapping (collapsed by default) */}
+            <div style={{ marginTop: '16px', maxWidth: '500px', margin: '16px auto 0' }}>
+              <Collapse
+                ghost
+                items={[
+                  {
+                    key: '1',
+                    label: (
+                      <span style={{ color: '#64748B', fontSize: '14px' }}>
+                        Advanced: Review/Change Column Mapping
+                      </span>
+                    ),
+                    children: (
+                      <div style={{ padding: '8px 0' }}>
+                        <p style={{ color: '#64748B', fontSize: '13px', marginBottom: '12px' }}>
+                          By default, columns are automatically detected and mapped. If your CSV has non-standard column names, you can manually review and change the mapping before uploading.
+                        </p>
+                        <Button
+                          type="link"
+                          size="small"
+                          onClick={() => {
+                            const input = document.createElement('input');
+                            input.type = 'file';
+                            input.accept = '.csv';
+                            input.onchange = (e) => {
+                              const file = (e.target as HTMLInputElement).files?.[0];
+                              if (file) {
+                                const reader = new FileReader();
+                                reader.onload = (event) => {
+                                  const text = event.target?.result as string;
+                                  const lines = text.split('\n');
+                                  if (lines.length > 0) {
+                                    const detectedCols = lines[0].split(',').map((col) => col.trim().replace(/"/g, ''));
+                                    setCsvColumns(detectedCols);
+                                    setDetectedMapping({});
+                                    setPendingFile(file);
+                                    setColumnMappingModalVisible(true);
+                                  }
+                                };
+                                reader.readAsText(file);
+                              }
+                            };
+                            input.click();
+                          }}
+                        >
+                          Select CSV to Review Mapping
+                        </Button>
+                      </div>
+                    ),
+                  },
+                ]}
+              />
+            </div>
             
             {uploading && (
               <div style={{ marginTop: '16px', textAlign: 'center' }}>
@@ -511,9 +655,62 @@ const Workspace: React.FC = () => {
             Click or drag CSV file to this area to upload
           </p>
           <p className="ant-upload-hint" style={{ color: '#64748B' }}>
-            Support for CSV files. Files will be processed and added to the database.
+            Support for CSV files. Column mapping is automatic.
           </p>
         </Dragger>
+        
+        {/* Advanced: Review/Change Mapping (collapsed by default) */}
+        <Collapse
+          ghost
+          style={{ marginTop: '8px' }}
+          items={[
+            {
+              key: '1',
+              label: (
+                <span style={{ color: '#64748B', fontSize: '13px' }}>
+                  Advanced: Review/Change Column Mapping
+                </span>
+              ),
+              children: (
+                <div style={{ padding: '8px 0' }}>
+                  <p style={{ color: '#64748B', fontSize: '12px', marginBottom: '12px' }}>
+                    By default, columns are automatically detected. If your CSV has non-standard column names, you can manually review and change the mapping before uploading.
+                  </p>
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = '.csv';
+                      input.onchange = (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (event) => {
+                            const text = event.target?.result as string;
+                            const lines = text.split('\n');
+                            if (lines.length > 0) {
+                              const detectedCols = lines[0].split(',').map((col) => col.trim().replace(/"/g, ''));
+                              setCsvColumns(detectedCols);
+                              setDetectedMapping({});
+                              setPendingFile(file);
+                              setColumnMappingModalVisible(true);
+                            }
+                          };
+                          reader.readAsText(file);
+                        }
+                      };
+                      input.click();
+                    }}
+                  >
+                    Select CSV to Review Mapping
+                  </Button>
+                </div>
+              ),
+            },
+          ]}
+        />
         
         {uploading && (
           <div style={{ marginTop: '16px', textAlign: 'center' }}>
@@ -728,6 +925,101 @@ const Workspace: React.FC = () => {
           </>
         )}
       </Card>
+
+      {/* Duplicate Upload Modal */}
+      <Modal
+        title="File Already Uploaded"
+        open={!!duplicateUpload}
+        onCancel={() => setDuplicateUpload(null)}
+        footer={[
+          <Button key="cancel" onClick={() => setDuplicateUpload(null)}>
+            Cancel
+          </Button>,
+          <Button
+            key="keep"
+            onClick={() => {
+              setDuplicateUpload(null);
+              message.info('Keeping existing upload. You can upload a different file.');
+            }}
+          >
+            Keep Both
+          </Button>,
+          <Button
+            key="replace"
+            type="primary"
+            danger
+            onClick={async () => {
+              if (!duplicateUpload) return;
+              
+              try {
+                // Delete existing ingestion
+                const { deleteUpload } = await import('@/services/dataService');
+                await deleteUpload(duplicateUpload.existing_ingestion_id);
+                message.success('Deleted existing upload. Please upload the file again.');
+                setDuplicateUpload(null);
+              } catch (error) {
+                message.error('Failed to delete existing upload. Please try again.');
+              }
+            }}
+          >
+            Replace (Delete Old)
+          </Button>,
+        ]}
+      >
+        <p>This file has already been uploaded:</p>
+        <ul>
+          <li><strong>File:</strong> {duplicateUpload?.existing_filename}</li>
+          <li><strong>Uploaded:</strong> {duplicateUpload?.existing_uploaded_at ? new Date(duplicateUpload.existing_uploaded_at).toLocaleString() : 'Unknown'}</li>
+          <li><strong>Rows:</strong> {duplicateUpload?.existing_rows.toLocaleString()}</li>
+        </ul>
+        <p>Would you like to replace the existing upload or keep both?</p>
+      </Modal>
+
+      {/* Required Columns Error Modal */}
+      <Modal
+        title="Required Columns Missing"
+        open={!!requiredColumnsError}
+        onCancel={() => setRequiredColumnsError(null)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setRequiredColumnsError(null)}>
+            Close
+          </Button>,
+        ]}
+        width={600}
+      >
+        <Alert
+          message="Missing Required Columns"
+          description={`The following required columns were not detected: ${requiredColumnsError?.missing_columns.join(', ')}`}
+          type="error"
+          style={{ marginBottom: '16px' }}
+        />
+        
+        <div>
+          <h4>Expected Column Names:</h4>
+          <ul>
+            {requiredColumnsError?.missing_columns.map((col) => (
+              <li key={col}>
+                <strong>{col}:</strong> {requiredColumnsError?.expected_schema[col] || 'Any column with similar name'}
+              </li>
+            ))}
+          </ul>
+          
+          <h4 style={{ marginTop: '16px' }}>Detected Columns:</h4>
+          <p>{requiredColumnsError?.csv_columns.join(', ') || 'None'}</p>
+        </div>
+      </Modal>
+
+      {/* Column Mapping Modal */}
+      <ColumnMappingModal
+        open={columnMappingModalVisible}
+        csvColumns={csvColumns}
+        detectedMapping={detectedMapping}
+        onConfirm={handleColumnMappingConfirm}
+        onCancel={() => {
+          setColumnMappingModalVisible(false);
+          setPendingFile(null);
+        }}
+      />
     </div>
   );
 };

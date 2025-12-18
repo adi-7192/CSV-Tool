@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_FORGOT_PASSWORD_PER_IP: int = 5  # per 15 minutes
     RATE_LIMIT_FORGOT_PASSWORD_PER_EMAIL: int = 3  # per 15 minutes
     RATE_LIMIT_WINDOW_MINUTES: int = 15
+    
+    # Redis (optional - for distributed rate limiting)
+    REDIS_URL: Optional[str] = None  # e.g., "redis://localhost:6379/0"
 
     # Logging
     LOG_LEVEL: str = "INFO"
