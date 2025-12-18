@@ -1,17 +1,11 @@
 /**
  * Data Service - Raw transaction data API calls
+ * 
+ * Uses the shared apiClient from api.ts which includes JWT authentication interceptor.
+ * All endpoints in this service require authentication.
  */
-import axios, { AxiosError } from 'axios';
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-
-const apiClient = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 10000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+import { AxiosError } from 'axios';
+import { apiClient } from './api';
 
 export interface Transaction {
   order_id: string;

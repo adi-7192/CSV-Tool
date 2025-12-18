@@ -460,6 +460,8 @@ def transform_to_standard_schema(
     
     validation_report['transformations'].append("Added data lineage: source_file, ingestion_id, loaded_at, updated_at")
     
+    # Note: tenant_id will be added in process_csv_upload after transformation
+    
     # 5. Remove duplicates based on business key
     if all(col in df_standard.columns for col in BUSINESS_KEY):
         before_dedup = len(df_standard)
@@ -625,9 +627,10 @@ def store_to_database(
 def process_csv_upload(
     file_content: bytes,
     filename: str,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Complete CSV upload pipeline with full error handling
+    Complete CSV upload pipeline with full error handling and tenant isolation
     
     Pipeline:
     1. Read CSV
@@ -636,6 +639,11 @@ def process_csv_upload(
     4. Validate data quality
     5. Store to database with upsert
     6. Log to ingestion_log (optional)
+    
+    Args:
+        file_content: Raw CSV file bytes
+        filename: Original filename
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
     
     Returns: Complete upload result with validation report
     """
@@ -748,6 +756,15 @@ def process_csv_upload(
                 validation_warnings.append(msg.replace('order_id', 'order numbers'))
             else:
                 validation_warnings.append(msg)
+
+        # TENANT ISOLATION: Add tenant_id to all rows for data isolation
+        if tenant_id:
+            df_standard['tenant_id'] = tenant_id
+            logger.info(f"📊 Added tenant_id={tenant_id} to {len(df_standard)} rows")
+        else:
+            # For backward compatibility, set to None (will be filtered out in queries)
+            df_standard['tenant_id'] = None
+            logger.warning("⚠️ No tenant_id provided - data will not be tenant-isolated")
 
         # Step 4: Store to database
         storage_result = store_to_database(df_standard)

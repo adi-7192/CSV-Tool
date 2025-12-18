@@ -55,13 +55,17 @@ class APIKeyService:
             
             # Check if key already exists for this user/provider
             logger.debug(f"Checking for existing API key for user {user_id}, provider {provider}")
-            existing = execute_query(
-                f"""
+            # Use parameterized query to prevent SQL injection
+            # DuckDB uses positional parameters, so order matters: user_id, provider
+            conn = get_connection()
+            existing = conn.execute(
+                """
                 SELECT id, encrypted_key, enabled, created_at, updated_at
                 FROM user_api_keys
-                WHERE user_id = '{user_id}' AND provider = '{provider}'
-                """
-            )
+                WHERE user_id = ? AND provider = ?
+                """,
+                [user_id, provider]
+            ).fetchdf()
             
             now = datetime.now()
             
@@ -143,13 +147,16 @@ class APIKeyService:
         """
         try:
             logger.debug(f"Retrieving API key for user {user_id}, provider {provider}, decrypt={decrypt}")
-            result = execute_query(
-                f"""
+            # Use parameterized query to prevent SQL injection
+            conn = get_connection()
+            result = conn.execute(
+                """
                 SELECT id, user_id, provider, encrypted_key, enabled, created_at, updated_at
                 FROM user_api_keys
-                WHERE user_id = '{user_id}' AND provider = '{provider}'
-                """
-            )
+                WHERE user_id = ? AND provider = ?
+                """,
+                [user_id, provider]
+            ).fetchdf()
             
             if result.empty:
                 logger.debug(f"No API key found for user {user_id}, provider {provider}")
@@ -219,14 +226,17 @@ class APIKeyService:
             list: List of API key info dicts (all keys masked)
         """
         try:
-            result = execute_query(
-                f"""
+            # Use parameterized query to prevent SQL injection
+            conn = get_connection()
+            result = conn.execute(
+                """
                 SELECT id, user_id, provider, encrypted_key, enabled, created_at, updated_at
                 FROM user_api_keys
-                WHERE user_id = '{user_id}'
+                WHERE user_id = ?
                 ORDER BY provider
-                """
-            )
+                """,
+                [user_id]
+            ).fetchdf()
             
             if result.empty:
                 return []

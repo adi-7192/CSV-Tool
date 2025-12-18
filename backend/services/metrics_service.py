@@ -374,9 +374,12 @@ def calculate_metrics(
     end_date: Optional[str] = None,
     transaction_type: Optional[str] = None,
     source_file: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Calculate core business metrics (KPIs) using transaction-aware logic
+    Calculate core business metrics (KPIs) using transaction-aware logic with tenant isolation.
+    
+    TENANT ISOLATION: All queries are filtered by tenant_id to ensure users only see their own data.
     
     Net Revenue Calculation:
         net_revenue = gross_revenue - refund_amount - cancellation_amount - free_replacement_cost
@@ -392,6 +395,7 @@ def calculate_metrics(
         end_date: End date filter (YYYY-MM-DD)
         transaction_type: Optional transaction type filter
         source_file: Optional source file filter
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
     
     Returns:
         Dictionary with accurate KPI values accounting for all transaction types:
@@ -417,7 +421,8 @@ def calculate_metrics(
             'start_date': start_date,
             'end_date': end_date,
             'transaction_type': transaction_type,
-            'source_file': source_file
+            'source_file': source_file,
+            'tenant_id': tenant_id
         }
     )
     
@@ -443,6 +448,12 @@ def calculate_metrics(
         }
     
     try:
+        # TENANT ISOLATION: Build tenant filter
+        tenant_filter = ""
+        if tenant_id:
+            safe_tenant_id = tenant_id.replace("'", "''")
+            tenant_filter = f"AND tenant_id = '{safe_tenant_id}'"
+        
         # Build date filter
         date_filter = ""
         if start_date and end_date:
@@ -492,7 +503,7 @@ def calculate_metrics(
             order_date,
             quantity
         FROM sales
-        WHERE 1=1 {date_filter} {txn_filter} {source_filter}
+        WHERE 1=1 {tenant_filter} {date_filter} {txn_filter} {source_filter}
         """
         
         df = execute_query(all_data_sql)

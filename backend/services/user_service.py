@@ -50,6 +50,10 @@ def create_user(user_data: UserCreate) -> UserInDB:
     except ImportError:
         now = datetime.utcnow()
     
+    # TENANT ISOLATION: Set tenant_id = user.id (as string) for strict data isolation
+    # Each user's data is scoped to their own tenant_id
+    tenant_id = str(new_id)
+    
     conn.execute("""
         INSERT INTO users (id, email, password_hash, role, plan, onboarded, tenant_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -60,11 +64,11 @@ def create_user(user_data: UserCreate) -> UserInDB:
         user_data.role,
         user_data.plan,
         user_data.onboarded,
-        user_data.tenant_id,
+        tenant_id,  # Always set to user's own ID for isolation
         now
     ])
     
-    logger.info(f"Created user {new_id} with email {user_data.email}")
+    logger.info(f"Created user {new_id} with email {user_data.email}, tenant_id={tenant_id}")
     
     # Return created user
     return get_user_by_id(new_id)

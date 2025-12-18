@@ -19,6 +19,7 @@ import {
   LogoutOutlined,
   BellOutlined,
   HomeOutlined,
+  CrownOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import dayjs, { Dayjs } from 'dayjs';
@@ -188,6 +189,23 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
         if (isMobile) setMobileDrawerOpen(false);
       },
     },
+    // Admin link - only visible to admin users
+    ...(user?.role === 'admin'
+      ? [
+          {
+            type: 'divider' as const,
+          },
+          {
+            key: '/admin/users',
+            icon: <CrownOutlined />,
+            label: 'Admin Panel',
+            onClick: () => {
+              navigate('/admin/users');
+              if (isMobile) setMobileDrawerOpen(false);
+            },
+          },
+        ]
+      : []),
   ];
 
   // User profile menu items

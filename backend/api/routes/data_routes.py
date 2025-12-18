@@ -1,7 +1,7 @@
 """
-Data Routes - Raw transaction data endpoints
+Data Routes - Raw transaction data endpoints with tenant isolation
 """
-from fastapi import APIRouter, Query, HTTPException, UploadFile, File
+from fastapi import APIRouter, Query, HTTPException, UploadFile, File, Depends
 from fastapi.responses import StreamingResponse
 from typing import Optional
 from datetime import datetime
@@ -23,6 +23,8 @@ from utils.sanitizers import (
     sanitize_integer,
 )
 from utils.error_handler import format_error_response, log_error
+from api.deps.auth_deps import get_current_user
+from models.user import UserInDB
 
 router = APIRouter()
 
@@ -35,6 +37,7 @@ async def get_transactions_endpoint(
     date_to: Optional[str] = Query(None, description="End date filter (YYYY-MM-DD)"),
     sku: Optional[str] = Query(None, description="SKU filter (exact match)"),
     transaction_type: Optional[str] = Query(None, description="Transaction type filter (Shipment/Refund/Cancel)"),
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
     Get paginated transaction data with optional filters
@@ -89,6 +92,9 @@ async def get_transactions_endpoint(
         if transaction_type:
             validate_transaction_type(transaction_type)
         
+        # TENANT ISOLATION: Pass user's tenant_id
+        tenant_id = current_user.tenant_id or str(current_user.id)
+        
         result = get_transactions(
             page=page,
             limit=limit,
@@ -96,6 +102,7 @@ async def get_transactions_endpoint(
             date_to=date_to,
             sku=sku,
             transaction_type=transaction_type,
+            tenant_id=tenant_id,
         )
         return result
     except ValueError as e:
@@ -115,9 +122,11 @@ async def get_transactions_endpoint(
 
 
 @router.get("/skus")
-async def get_skus_endpoint():
+async def get_skus_endpoint(
+    current_user: UserInDB = Depends(get_current_user),
+):
     """
-    Get list of unique SKUs from sales table
+    Get list of unique SKUs from sales table (tenant-isolated).
     
     Returns:
         {
@@ -125,16 +134,20 @@ async def get_skus_endpoint():
         }
     """
     try:
-        result = get_unique_skus()
+        # TENANT ISOLATION: Pass user's tenant_id
+        tenant_id = current_user.tenant_id or str(current_user.id)
+        result = get_unique_skus(tenant_id=tenant_id)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/stats")
-async def get_stats_endpoint():
+async def get_stats_endpoint(
+    current_user: UserInDB = Depends(get_current_user),
+):
     """
-    Get data statistics: total records, date range, unique SKUs
+    Get data statistics: total records, date range, unique SKUs (tenant-isolated).
     
     Returns:
         {
@@ -144,8 +157,50 @@ async def get_stats_endpoint():
         }
     """
     try:
-        result = get_data_statistics()
+        # TENANT ISOLATION: Pass user's tenant_id
+        tenant_id = current_user.tenant_id or str(current_user.id)
+        result = get_data_statistics(tenant_id=tenant_id)
         return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/summary")
+async def get_data_summary_endpoint(
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """
+    Lightweight endpoint to check if user has any data (tenant-isolated).
+    
+    Used by frontend to determine whether to show empty states or actual content.
+    
+    Returns:
+        {
+            "has_data": true/false,
+            "row_count": 15507
+        }
+    """
+    try:
+        from core.database import table_exists, execute_query
+        from utils.tenant_filter import get_tenant_filter_sql
+        
+        # TENANT ISOLATION: Check data for this user only
+        tenant_id = current_user.tenant_id or str(current_user.id)
+        
+        if not table_exists('sales'):
+            return {
+                "has_data": False,
+                "row_count": 0
+            }
+        
+        tenant_filter = get_tenant_filter_sql(tenant_id)
+        count_result = execute_query(f"SELECT COUNT(*) as count FROM sales WHERE {tenant_filter}")
+        row_count = int(count_result.iloc[0]['count']) if not count_result.empty else 0
+        
+        return {
+            "has_data": row_count > 0,
+            "row_count": row_count
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -156,19 +211,23 @@ async def export_transactions_endpoint(
     date_to: Optional[str] = Query(None, description="End date filter (YYYY-MM-DD)"),
     sku: Optional[str] = Query(None, description="SKU filter (exact match)"),
     transaction_type: Optional[str] = Query(None, description="Transaction type filter"),
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
-    Export filtered transactions as CSV file
+    Export filtered transactions as CSV file (tenant-isolated).
     
     Parameters same as /transactions endpoint.
     Returns CSV file download.
     """
     try:
+        # TENANT ISOLATION: Pass user's tenant_id
+        tenant_id = current_user.tenant_id or str(current_user.id)
         csv_buffer = export_transactions_csv(
             date_from=date_from,
             date_to=date_to,
             sku=sku,
             transaction_type=transaction_type,
+            tenant_id=tenant_id,
         )
         
         # Generate filename with current date
@@ -187,10 +246,13 @@ async def export_transactions_endpoint(
 
 @router.post("/upload")
 async def upload_csv_endpoint(
-    file: UploadFile = File(..., description="CSV file to upload")
+    file: UploadFile = File(..., description="CSV file to upload"),
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
-    Upload CSV file to database
+    Upload CSV file to database with tenant isolation.
+    
+    Requires authentication. All uploaded data is scoped to the user's tenant_id.
     
     Returns:
         {
@@ -216,8 +278,15 @@ async def upload_csv_endpoint(
             detail="File too large. Maximum size is 100MB"
         )
     
-    # Process upload using existing upload service
-    result = process_csv_upload(file_content, file.filename)
+    # TENANT ISOLATION: Pass user's tenant_id to upload service
+    # All uploaded data will be tagged with this tenant_id
+    tenant_id = current_user.tenant_id
+    if not tenant_id:
+        # Fallback: use user ID as tenant_id
+        tenant_id = str(current_user.id)
+    
+    # Process upload using existing upload service with tenant isolation
+    result = process_csv_upload(file_content, file.filename, tenant_id=tenant_id)
     
     if not result.get('success'):
         raise HTTPException(
@@ -231,5 +300,6 @@ async def upload_csv_endpoint(
         "rows_inserted": result.get('rows_inserted', result.get('rows_uploaded', 0)),
         "filename": result.get('filename'),
         "ingestion_id": result.get('ingestion_id'),
+        "tenant_id": tenant_id,
     }
 

@@ -758,14 +758,9 @@ export const chatService = {
         requestBody.context = context;
       }
       
-      // Get user ID from localStorage (same as API key service)
-      const userId = localStorage.getItem('userId') || 'user-123';
-      
-      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody, {
-        headers: {
-          'X-User-ID': userId,
-        },
-      });
+      // JWT token is automatically attached by apiClient interceptor
+      // Backend extracts user_id from JWT token
+      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody);
       return response.data;
     } catch (error) {
       console.error('Error asking question:', error);
@@ -773,6 +768,32 @@ export const chatService = {
         console.error('Response:', error.response?.data);
       }
       return null;
+    }
+  },
+};
+
+// ============================================================================
+// DATA SUMMARY SERVICE - Check if user has data (for empty states)
+// ============================================================================
+
+export interface DataSummaryResponse {
+  has_data: boolean;
+  row_count: number;
+}
+
+export const dataService = {
+  /**
+   * Get lightweight data summary for current user (tenant-isolated)
+   * Used to determine whether to show empty states or actual content
+   */
+  async getSummary(): Promise<DataSummaryResponse> {
+    try {
+      const response = await apiClient.get<DataSummaryResponse>('/api/data/summary');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching data summary:', error);
+      // Return no data on error to show empty state
+      return { has_data: false, row_count: 0 };
     }
   },
 };

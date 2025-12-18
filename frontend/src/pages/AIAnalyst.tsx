@@ -31,8 +31,7 @@ import {
   message as antdMessage,
 } from 'antd';
 import EmptyState from '@/components/EmptyState';
-import { getDataStatistics } from '@/services/dataService';
-import { chatService, ChatResponse } from '@/services/api';
+import { chatService, ChatResponse, dataService } from '@/services/api';
 import { apiKeyService } from '@/services/apiKeyService';
 import {
   useChatStore,
@@ -188,16 +187,12 @@ const AIAnalyst: React.FC = () => {
     }
   }, [currentMessages.length, loading, isUserScrolledUp]);
 
-  // Check if data exists
+  // Check if data exists using the lightweight summary endpoint
   const checkDataExists = async () => {
     setCheckingData(true);
     try {
-      const stats = await getDataStatistics();
-      if (stats && stats.total_records > 0) {
-        setHasData(true);
-      } else {
-        setHasData(false);
-      }
+      const summary = await dataService.getSummary();
+      setHasData(summary.has_data);
     } catch (error) {
       console.error('Error checking data existence:', error);
       setHasData(false);
@@ -361,10 +356,10 @@ const AIAnalyst: React.FC = () => {
     };
     addMessage(userMessage, conversationId);
 
-    // Check if data exists before sending
+    // Check if data exists before sending using the lightweight summary endpoint
     try {
-      const stats = await getDataStatistics();
-      if (!stats || stats.total_records === 0) {
+      const summary = await dataService.getSummary();
+      if (!summary.has_data) {
         addErrorMessage(
           conversationId,
           "Please upload data first before asking questions. Click the 'Upload Data' button to get started.",

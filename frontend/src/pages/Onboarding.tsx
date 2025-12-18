@@ -8,10 +8,7 @@ const { Title, Text, Paragraph } = Typography;
 
 const Onboarding: React.FC = () => {
   const navigate = useNavigate();
-  const { markOnboarded, user } = useAuthStore();
-  
-  // Check if user is the owner
-  const isOwner = user?.email === 'adityadav7192@gmail.com';
+  const { markOnboarded } = useAuthStore();
 
   const handleUploadCSV = async () => {
     try {
@@ -25,21 +22,10 @@ const Onboarding: React.FC = () => {
   };
 
   const handleExploreSample = async () => {
-    // For non-owner users, show "coming soon" message
-    if (!isOwner) {
-      message.info('Sample data feature coming soon! Please upload your own CSV file to get started.');
-      return;
-    }
-    
-    // Owner can explore sample data (existing behavior)
-    try {
-      await markOnboarded();
-      navigate('/app/dashboard');
-    } catch (error) {
-      console.error('Failed to mark as onboarded:', error);
-      // Still navigate even if API call fails
-      navigate('/app/dashboard');
-    }
+    // Sample data feature is disabled for now
+    // Each user must upload their own data for tenant isolation
+    message.info('Sample data feature coming soon! Please upload your own CSV file to get started.');
+    return;
   };
 
   const handleSkip = async () => {
@@ -100,9 +86,10 @@ const Onboarding: React.FC = () => {
             icon={<DatabaseOutlined />}
             onClick={handleExploreSample}
             block
+            disabled
             style={{ height: '56px', fontSize: '16px' }}
           >
-            Explore with Sample Data
+            Explore with Sample Data (Coming Soon)
           </Button>
           <div style={{ textAlign: 'center' }}>
             <Button type="link" onClick={handleSkip} style={{ fontSize: '14px' }}>

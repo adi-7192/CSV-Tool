@@ -13,6 +13,8 @@ import LandingPage from '@/pages/public/LandingPage';
 import PricingPage from '@/pages/public/PricingPage';
 import LoginPage from '@/pages/public/LoginPage';
 import SignupPage from '@/pages/public/SignupPage';
+import ForgotPasswordPage from '@/pages/public/ForgotPasswordPage';
+import ResetPasswordPage from '@/pages/public/ResetPasswordPage';
 
 // App pages (protected)
 import AppLayout from '@/components/Layout/AppLayout';
@@ -74,6 +76,22 @@ function AppContent() {
             element={
               <PublicLayout>
                 <SignupPage />
+              </PublicLayout>
+            }
+          />
+          <Route
+            path="/forgot-password"
+            element={
+              <PublicLayout>
+                <ForgotPasswordPage />
+              </PublicLayout>
+            }
+          />
+          <Route
+            path="/reset-password"
+            element={
+              <PublicLayout>
+                <ResetPasswordPage />
               </PublicLayout>
             }
           />

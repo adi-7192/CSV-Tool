@@ -38,6 +38,25 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRES_IN: int = 86400  # 24 hours in seconds
 
+    # Password Reset
+    PASSWORD_RESET_TOKEN_EXPIRES_MINUTES: int = 15  # Token validity in minutes
+    PASSWORD_MIN_LENGTH: int = 8
+    
+    # Email/SMTP Configuration
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_FROM_NAME: str = "Datadost Analytics"
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+    
+    # Rate Limiting (requests per window)
+    RATE_LIMIT_FORGOT_PASSWORD_PER_IP: int = 5  # per 15 minutes
+    RATE_LIMIT_FORGOT_PASSWORD_PER_EMAIL: int = 3  # per 15 minutes
+    RATE_LIMIT_WINDOW_MINUTES: int = 15
+
     # Logging
     LOG_LEVEL: str = "INFO"
 

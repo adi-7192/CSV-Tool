@@ -1,14 +1,24 @@
 """
-Authentication API routes - Registration, login, and user management
+Authentication API routes - Registration, login, user management, and password reset
 """
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request, BackgroundTasks
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
-from services.auth_service import verify_password, create_access_token
-from services.user_service import create_user, get_user_by_email
+from services.auth_service import verify_password, create_access_token, hash_password
+from services.user_service import create_user, get_user_by_email, get_user_by_id
+from services.password_reset_service import (
+    create_password_reset_token,
+    validate_password_reset_token,
+    mark_token_as_used,
+    update_user_password,
+    validate_password_strength,
+)
+from services.email_service import send_password_reset_email, send_password_changed_email
 from models.user import UserCreate, UserResponse
 from api.deps.auth_deps import get_current_user
 from models.user import UserInDB
+from utils.rate_limiter import check_forgot_password_rate_limit
+from core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -39,6 +49,22 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Forgot password request"""
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    """Forgot password response - always returns success for security"""
+    message: str = "If an account with that email exists, a password reset link has been sent."
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset password request"""
+    token: str = Field(..., min_length=1, description="Password reset token")
+    new_password: str = Field(..., min_length=8, description="New password (min 8 characters)")
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -202,4 +228,158 @@ async def get_current_user_info(
         tenant_id=current_user.tenant_id,
         created_at=current_user.created_at
     )
+
+
+@router.post("/forgot-password", response_model=ForgotPasswordResponse)
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    http_request: Request,
+):
+    """
+    Request a password reset link.
+    
+    Security notes:
+    - Always returns 200 with generic message (prevents email enumeration)
+    - Rate limited per IP and per email
+    - Sends email only if user exists
+    - Token expires after 15 minutes
+    
+    Args:
+        request: ForgotPasswordRequest with email
+        background_tasks: FastAPI BackgroundTasks for async email sending
+        http_request: HTTP request for IP extraction
+        
+    Returns:
+        ForgotPasswordResponse with generic message
+    """
+    email = request.email.lower()
+    
+    # Get client IP (check for proxy headers)
+    forwarded_for = http_request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = http_request.client.host if http_request.client else "unknown"
+    
+    # Get user agent
+    user_agent = http_request.headers.get("User-Agent", "")[:500]  # Limit length
+    
+    # Check rate limits
+    is_allowed, error_message = check_forgot_password_rate_limit(client_ip, email)
+    if not is_allowed:
+        # Still return 200 with generic message to prevent enumeration
+        # But log the rate limit hit
+        logger.warning(f"Rate limit hit for forgot-password: IP={client_ip}, email={email[:20]}...")
+        return ForgotPasswordResponse()
+    
+    # Check if user exists
+    user = get_user_by_email(email)
+    
+    if user:
+        try:
+            # Create reset token
+            token = create_password_reset_token(
+                user_id=user.id,
+                request_ip=client_ip,
+                user_agent=user_agent
+            )
+            
+            # Send email in background (non-blocking)
+            background_tasks.add_task(
+                send_password_reset_email,
+                to_email=user.email,
+                reset_token=token,
+                expires_minutes=settings.PASSWORD_RESET_TOKEN_EXPIRES_MINUTES
+            )
+            
+            logger.info(f"Password reset requested for user: {email}")
+            
+        except Exception as e:
+            # Log error but don't expose to user
+            logger.error(f"Error creating password reset token: {e}", exc_info=True)
+    else:
+        # User doesn't exist - log but don't reveal
+        logger.info(f"Password reset requested for non-existent email: {email[:20]}...")
+    
+    # Always return success (prevents email enumeration)
+    return ForgotPasswordResponse()
+
+
+@router.post("/reset-password")
+async def reset_password(
+    request: ResetPasswordRequest,
+    background_tasks: BackgroundTasks,
+):
+    """
+    Reset password using a valid token.
+    
+    Args:
+        request: ResetPasswordRequest with token and new password
+        background_tasks: FastAPI BackgroundTasks for async email notification
+        
+    Returns:
+        Success message
+        
+    Raises:
+        HTTPException: 400 if token is invalid/expired or password doesn't meet requirements
+    """
+    # Validate password strength
+    is_valid, error_message = validate_password_strength(request.new_password)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_message
+        )
+    
+    # Validate token
+    token_valid, user_id, error_code = validate_password_reset_token(request.token)
+    
+    if not token_valid:
+        error_messages = {
+            "INVALID_TOKEN": "Invalid or expired password reset link. Please request a new one.",
+            "TOKEN_ALREADY_USED": "This password reset link has already been used. Please request a new one.",
+            "TOKEN_EXPIRED": "This password reset link has expired. Please request a new one.",
+        }
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=error_messages.get(error_code, "Invalid password reset link.")
+        )
+    
+    # Get user to verify they still exist
+    user = get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User account not found."
+        )
+    
+    try:
+        # Hash new password
+        new_password_hash = hash_password(request.new_password)
+        
+        # Update password and password_changed_at (invalidates old sessions)
+        update_user_password(user_id, new_password_hash)
+        
+        # Mark token as used
+        mark_token_as_used(request.token)
+        
+        # Send notification email in background
+        background_tasks.add_task(
+            send_password_changed_email,
+            to_email=user.email
+        )
+        
+        logger.info(f"Password reset successful for user: {user.email}")
+        
+        return {
+            "message": "Password has been reset successfully. You can now log in with your new password."
+        }
+        
+    except Exception as e:
+        logger.error(f"Error resetting password: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password. Please try again."
+        )
 

@@ -12,15 +12,11 @@ const LoginPage: React.FC = () => {
   // Redirect if already logged in
   useEffect(() => {
     if (user && !loading) {
-      if (user.role === 'admin') {
-        navigate('/admin/users');
+      // All roles follow the same redirect logic
+      if (!user.onboarded) {
+        navigate('/app/onboarding');
       } else {
-        // Check onboarded status
-        if (!user.onboarded) {
-          navigate('/app/onboarding');
-        } else {
-          navigate('/app/dashboard');
-        }
+        navigate('/app/dashboard');
       }
     }
   }, [user, loading, navigate]);
@@ -103,6 +99,19 @@ const LoginPage: React.FC = () => {
               autoComplete="current-password"
             />
           </Form.Item>
+
+          <div style={{ textAlign: 'right', marginTop: '-16px', marginBottom: '16px' }}>
+            <Link
+              to="/forgot-password"
+              style={{
+                color: '#6366F1',
+                fontSize: '14px',
+                fontWeight: '500',
+              }}
+            >
+              Forgot password?
+            </Link>
+          </div>
 
           <Form.Item>
             <Button

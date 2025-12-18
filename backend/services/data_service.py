@@ -1,5 +1,5 @@
 """
-Data Service - Handle raw transaction data queries
+Data Service - Handle raw transaction data queries with tenant isolation
 """
 import pandas as pd
 from typing import Dict, Any, Optional, Tuple
@@ -10,6 +10,7 @@ import logging
 import re
 
 from utils.error_handler import handle_service_error, log_error
+from utils.tenant_filter import get_tenant_filter_sql
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +120,19 @@ def get_transactions(
     date_to: Optional[str] = None,
     sku: Optional[str] = None,
     transaction_type: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Get paginated transaction data from sales table
+    Get paginated transaction data from sales table with tenant isolation.
     
     Args:
         page: Page number (1-indexed)
         limit: Number of rows per page
+        date_from: Start date filter
+        date_to: End date filter
+        sku: SKU filter
+        transaction_type: Transaction type filter
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         Dictionary with data, total count, page info
@@ -267,6 +274,10 @@ def get_transactions(
         # Build WHERE clause with filters
         where_conditions = []
         
+        # TENANT ISOLATION: Always filter by tenant_id first
+        if tenant_id:
+            where_conditions.append(get_tenant_filter_sql(tenant_id))
+        
         # Date filter
         if date_from and date_col:
             col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
@@ -371,9 +382,12 @@ def get_transactions(
         }
 
 
-def get_unique_skus() -> Dict[str, Any]:
+def get_unique_skus(tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get list of unique SKU values from sales table
+    Get list of unique SKU values from sales table with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         Dictionary with list of SKUs
@@ -400,11 +414,14 @@ def get_unique_skus() -> Dict[str, Any]:
                 "skus": [],
             }
         
-        # Query distinct SKUs
+        # Build tenant filter
+        tenant_filter = get_tenant_filter_sql(tenant_id) if tenant_id else '1=1'
+        
+        # Query distinct SKUs with tenant isolation
         sql = f"""
         SELECT DISTINCT "{sku_col}" as sku
         FROM sales
-        WHERE "{sku_col}" IS NOT NULL AND TRIM("{sku_col}") != ''
+        WHERE {tenant_filter} AND "{sku_col}" IS NOT NULL AND TRIM("{sku_col}") != ''
         ORDER BY "{sku_col}" ASC
         """
         
@@ -435,9 +452,12 @@ def get_unique_skus() -> Dict[str, Any]:
         }
 
 
-def get_data_statistics() -> Dict[str, Any]:
+def get_data_statistics(tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get data statistics: total records, date range, unique SKUs
+    Get data statistics: total records, date range, unique SKUs with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         Dictionary with statistics
@@ -469,20 +489,23 @@ def get_data_statistics() -> Dict[str, Any]:
                 sku_col = col
                 break
         
-        # Get total records
-        count_sql = "SELECT COUNT(*) as total FROM sales"
+        # Build tenant filter
+        tenant_filter = get_tenant_filter_sql(tenant_id) if tenant_id else '1=1'
+        
+        # Get total records (with tenant isolation)
+        count_sql = f"SELECT COUNT(*) as total FROM sales WHERE {tenant_filter}"
         count_df = execute_query(count_sql)
         total_records = int(count_df['total'].iloc[0]) if not count_df.empty else 0
         
-        # Get date range
+        # Get date range (with tenant isolation)
         date_start = None
         date_end = None
         if date_col:
             col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
             if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
-                range_sql = f"SELECT MIN(CAST(\"{date_col}\" AS DATE)) as min_date, MAX(CAST(\"{date_col}\" AS DATE)) as max_date FROM sales WHERE \"{date_col}\" IS NOT NULL"
+                range_sql = f"SELECT MIN(CAST(\"{date_col}\" AS DATE)) as min_date, MAX(CAST(\"{date_col}\" AS DATE)) as max_date FROM sales WHERE {tenant_filter} AND \"{date_col}\" IS NOT NULL"
             else:
-                range_sql = f"SELECT MIN(\"{date_col}\") as min_date, MAX(\"{date_col}\") as max_date FROM sales WHERE \"{date_col}\" IS NOT NULL"
+                range_sql = f"SELECT MIN(\"{date_col}\") as min_date, MAX(\"{date_col}\") as max_date FROM sales WHERE {tenant_filter} AND \"{date_col}\" IS NOT NULL"
             
             range_df = execute_query(range_sql)
             if not range_df.empty:
@@ -493,10 +516,10 @@ def get_data_statistics() -> Dict[str, Any]:
                 if max_date is not None:
                     date_end = str(max_date)
         
-        # Get unique SKUs count
+        # Get unique SKUs count (with tenant isolation)
         unique_skus = 0
         if sku_col:
-            sku_sql = f"SELECT COUNT(DISTINCT \"{sku_col}\") as count FROM sales WHERE \"{sku_col}\" IS NOT NULL AND TRIM(\"{sku_col}\") != ''"
+            sku_sql = f"SELECT COUNT(DISTINCT \"{sku_col}\") as count FROM sales WHERE {tenant_filter} AND \"{sku_col}\" IS NOT NULL AND TRIM(\"{sku_col}\") != ''"
             sku_df = execute_query(sku_sql)
             if not sku_df.empty:
                 unique_skus = int(sku_df['count'].iloc[0])
@@ -537,15 +560,17 @@ def export_transactions_csv(
     date_to: Optional[str] = None,
     sku: Optional[str] = None,
     transaction_type: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> BytesIO:
     """
-    Export filtered transactions to CSV
+    Export filtered transactions to CSV with tenant isolation.
     
     Args:
         date_from: Start date filter
         date_to: End date filter
         sku: SKU filter
         transaction_type: Transaction type filter
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         BytesIO object with CSV content
@@ -641,6 +666,10 @@ def export_transactions_csv(
         
         # Build WHERE clause with filters (same logic as get_transactions)
         where_conditions = []
+        
+        # TENANT ISOLATION: Always filter by tenant_id first
+        if tenant_id:
+            where_conditions.append(get_tenant_filter_sql(tenant_id))
         
         if date_from and date_col:
             col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]

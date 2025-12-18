@@ -5,12 +5,15 @@ import { ReloadOutlined, DownloadOutlined, InboxOutlined, CheckCircleOutlined } 
 import type { UploadProps } from 'antd';
 import dayjs, { Dayjs } from 'dayjs';
 import { getTransactions, getUniqueSKUs, getDataStatistics, downloadTransactionsCSV, uploadCSV, Transaction } from '@/services/dataService';
+import { dataService } from '@/services/api';
 import { formatCurrency } from '@/utils/formatters';
+import { useAuthStore } from '@/store/authStore';
 
 const { RangePicker } = DatePicker;
 const { Dragger } = Upload;
 
 const Workspace: React.FC = () => {
+  const { user, loading: authLoading } = useAuthStore();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +22,10 @@ const Workspace: React.FC = () => {
   // Note: totalPages is calculated but not currently used in UI
   const [, setTotalPages] = useState(0);
   const pageSize = 50;
+  
+  // Data availability state
+  const [hasData, setHasData] = useState<boolean | null>(null);
+  const [checkingData, setCheckingData] = useState(true);
 
   // Filter states
   const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
@@ -43,8 +50,33 @@ const Workspace: React.FC = () => {
     rowsInserted?: number;
   } | null>(null);
 
-  // Load SKU options on mount
+  // Check data availability on mount (only when authenticated)
   useEffect(() => {
+    if (authLoading || !user) {
+      return; // Wait for auth to be ready
+    }
+    
+    const checkDataAvailability = async () => {
+      setCheckingData(true);
+      try {
+        const summary = await dataService.getSummary();
+        setHasData(summary.has_data);
+      } catch (err) {
+        console.error('Error checking data availability:', err);
+        setHasData(false);
+      } finally {
+        setCheckingData(false);
+      }
+    };
+    checkDataAvailability();
+  }, [user, authLoading]);
+
+  // Load SKU options on mount (only when authenticated)
+  useEffect(() => {
+    if (authLoading || !user) {
+      return; // Wait for auth to be ready
+    }
+    
     const fetchSKUs = async () => {
       setLoadingSKUs(true);
       const skus = await getUniqueSKUs();
@@ -54,10 +86,14 @@ const Workspace: React.FC = () => {
       setLoadingSKUs(false);
     };
     fetchSKUs();
-  }, []);
+  }, [user, authLoading]);
 
-  // Load statistics on mount
+  // Load statistics on mount (only when authenticated)
   useEffect(() => {
+    if (authLoading || !user) {
+      return; // Wait for auth to be ready
+    }
+    
     const fetchStats = async () => {
       setLoadingStats(true);
       const stats = await getDataStatistics();
@@ -67,10 +103,14 @@ const Workspace: React.FC = () => {
       setLoadingStats(false);
     };
     fetchStats();
-  }, []);
+  }, [user, authLoading]);
 
-  // Fetch transactions when filters or page changes
+  // Fetch transactions when filters or page changes (only when authenticated)
   useEffect(() => {
+    if (authLoading || !user) {
+      return; // Wait for auth to be ready
+    }
+    
     const fetchData = async () => {
       setLoading(true);
       setError(null);
@@ -96,7 +136,7 @@ const Workspace: React.FC = () => {
     };
 
     fetchData();
-  }, [currentPage, dateRange, selectedSKU, selectedTransactionType]);
+  }, [currentPage, dateRange, selectedSKU, selectedTransactionType, user, authLoading]);
 
   // Handle page change
   const handlePageChange = (page: number) => {
@@ -156,54 +196,84 @@ const Workspace: React.FC = () => {
       setUploading(true);
       setUploadStatus(null);
       
-      const result = await uploadCSV(file);
-      
-      if (result?.success) {
-        setUploadStatus({
-          success: true,
-          message: result.message,
-          rowsInserted: result.rows_inserted,
-        });
-        message.success(`Successfully uploaded ${result.rows_inserted} rows`);
+      try {
+        const result = await uploadCSV(file);
         
-        // Refresh data after upload
-        const fetchData = async () => {
-          setLoading(true);
-          const result = await getTransactions(
-            currentPage,
-            pageSize,
-            dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
-            dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
-            selectedSKU,
-            selectedTransactionType
-          );
+        if (result?.success) {
+          setUploadStatus({
+            success: true,
+            message: result.message,
+            rowsInserted: result.rows_inserted,
+          });
+          message.success(`Successfully uploaded ${result.rows_inserted} rows`);
           
-          if (result) {
-            setTransactions(result.data);
-            setTotal(result.total);
-            setTotalPages(result.total_pages);
-          }
-          setLoading(false);
-        };
+          // Refresh data after upload
+          const fetchData = async () => {
+            setLoading(true);
+            const result = await getTransactions(
+              currentPage,
+              pageSize,
+              dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
+              dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
+              selectedSKU,
+              selectedTransactionType
+            );
+            
+            if (result) {
+              setTransactions(result.data);
+              setTotal(result.total);
+              setTotalPages(result.total_pages);
+            }
+            setLoading(false);
+          };
+          
+          // Refresh statistics
+          const fetchStats = async () => {
+            const stats = await getDataStatistics();
+            if (stats) {
+              setStatistics(stats);
+            }
+          };
+          
+          // Update hasData state
+          setHasData(true);
+          
+          await Promise.all([fetchData(), fetchStats()]);
+        } else {
+          const errorMsg = result?.message || 'Upload failed. Please try again.';
+          setUploadStatus({
+            success: false,
+            message: errorMsg,
+          });
+          message.error(errorMsg);
+        }
+      } catch (error: any) {
+        console.error('Upload error:', error);
+        let errorMessage = 'Upload failed. ';
         
-        // Refresh statistics
-        const fetchStats = async () => {
-          const stats = await getDataStatistics();
-          if (stats) {
-            setStatistics(stats);
-          }
-        };
+        if (error.code === 'ERR_NETWORK' || !error.response) {
+          errorMessage += 'Unable to connect to server. Please check if the backend is running.';
+        } else if (error.response?.status === 401) {
+          errorMessage += 'Authentication failed. Please log in again.';
+        } else if (error.response?.status === 413) {
+          errorMessage += 'File too large. Maximum size is 100MB.';
+        } else if (error.response?.status === 400) {
+          errorMessage += error.response?.data?.detail || 'Invalid file format.';
+        } else if (error.response?.status === 500) {
+          errorMessage += 'Server error. Please try again later.';
+        } else {
+          errorMessage += error.response?.data?.detail || error.message || 'Unknown error occurred.';
+        }
         
-        await Promise.all([fetchData(), fetchStats()]);
-      } else {
         setUploadStatus({
           success: false,
-          message: result?.message || 'Upload failed',
+          message: errorMessage,
         });
-        message.error(result?.message || 'Upload failed');
+        message.error(errorMessage);
+      } finally {
+        setUploading(false);
       }
       
-      setUploading(false);
       return false; // Prevent auto upload
     },
     showUploadList: false,
@@ -296,6 +366,100 @@ const Workspace: React.FC = () => {
       render: (quantity: number) => quantity.toLocaleString(),
     },
   ];
+
+  // Show loading state while checking auth or data availability
+  if (authLoading || checkingData) {
+    return (
+      <div style={{ padding: '24px', backgroundColor: '#FFFFFF', minHeight: '100vh' }}>
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
+          <Spin size="large" />
+        </div>
+      </div>
+    );
+  }
+  
+  // If not authenticated, show nothing (ProtectedRoute will handle redirect)
+  if (!user) {
+    return null;
+  }
+
+  // Show prominent empty state when no data exists
+  if (hasData === false) {
+    return (
+      <div style={{ padding: '24px', backgroundColor: '#FFFFFF', minHeight: '100vh' }}>
+        <div style={{ marginBottom: '24px' }}>
+          <h1
+            style={{
+              fontSize: '28px',
+              fontWeight: '700',
+              color: '#030712',
+              marginBottom: '8px',
+            }}
+          >
+            Data Workspace
+          </h1>
+          <p style={{ color: '#64748B', fontSize: '14px' }}>
+            Upload your CSV data to get started with analytics
+          </p>
+        </div>
+
+        {/* Prominent Empty State with Upload */}
+        <Card
+          style={{
+            marginBottom: '24px',
+            borderRadius: '12px',
+            border: '2px dashed #6366F1',
+            boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+          }}
+        >
+          <div style={{ textAlign: 'center', padding: '48px 24px' }}>
+            <div style={{ fontSize: '64px', marginBottom: '24px' }}>📊</div>
+            <h2 style={{ fontSize: '24px', fontWeight: '600', marginBottom: '12px', color: '#030712' }}>
+              No data yet
+            </h2>
+            <p style={{ fontSize: '16px', color: '#64748B', marginBottom: '32px', maxWidth: '500px', margin: '0 auto 32px' }}>
+              Upload a CSV file to generate your dashboard and chat insights. Your data is private and isolated to your account.
+            </p>
+            
+            <Dragger {...uploadProps} disabled={uploading} style={{ maxWidth: '500px', margin: '0 auto' }}>
+              <p className="ant-upload-drag-icon">
+                <InboxOutlined style={{ fontSize: '48px', color: '#6366F1' }} />
+              </p>
+              <p className="ant-upload-text" style={{ color: '#030712', fontWeight: '500' }}>
+                Click or drag CSV file to upload
+              </p>
+              <p className="ant-upload-hint" style={{ color: '#64748B' }}>
+                Support for CSV files up to 100MB
+              </p>
+            </Dragger>
+            
+            {uploading && (
+              <div style={{ marginTop: '16px', textAlign: 'center' }}>
+                <Spin /> <span style={{ marginLeft: '8px', color: '#64748B' }}>Uploading...</span>
+              </div>
+            )}
+            
+            {uploadStatus && (
+              <Alert
+                message={uploadStatus.success ? 'Upload Successful' : 'Upload Failed'}
+                description={
+                  uploadStatus.success
+                    ? `${uploadStatus.message}${uploadStatus.rowsInserted ? ` (${uploadStatus.rowsInserted.toLocaleString()} rows)` : ''}`
+                    : uploadStatus.message
+                }
+                type={uploadStatus.success ? 'success' : 'error'}
+                showIcon
+                icon={uploadStatus.success ? <CheckCircleOutlined /> : undefined}
+                closable
+                onClose={() => setUploadStatus(null)}
+                style={{ marginTop: '16px', maxWidth: '500px', margin: '16px auto 0' }}
+              />
+            )}
+          </div>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div style={{ padding: '24px', backgroundColor: '#FFFFFF', minHeight: '100vh' }}>

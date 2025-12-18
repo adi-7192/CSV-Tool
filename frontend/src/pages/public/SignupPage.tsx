@@ -13,15 +13,11 @@ const SignupPage: React.FC = () => {
   // Redirect if already logged in
   useEffect(() => {
     if (user && !loading) {
-      if (user.role === 'admin') {
-        navigate('/admin/users');
+      // All roles follow the same redirect logic
+      if (!user.onboarded) {
+        navigate('/app/onboarding');
       } else {
-        // New users always go to onboarding
-        if (!user.onboarded) {
-          navigate('/app/onboarding');
-        } else {
-          navigate('/app/dashboard');
-        }
+        navigate('/app/dashboard');
       }
     }
   }, [user, loading, navigate]);
