@@ -1,19 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { Table, Card, Pagination, Spin, Alert, DatePicker, Select, Button, Row, Col, Upload, Statistic, message, Modal, Collapse } from 'antd';
+import { useNavigate } from 'react-router-dom';
+import { Table, Card, Pagination, Spin, Alert, DatePicker, Select, Button, Row, Col, Upload, Statistic, message, Modal, Collapse, List, Tag, Space } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { ReloadOutlined, DownloadOutlined, InboxOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import { ReloadOutlined, DownloadOutlined, InboxOutlined, CheckCircleOutlined, CloseCircleOutlined, ClockCircleOutlined } from '@ant-design/icons';
 import type { UploadProps } from 'antd';
 import dayjs, { Dayjs } from 'dayjs';
-import { getTransactions, getUniqueSKUs, getDataStatistics, downloadTransactionsCSV, uploadCSV, Transaction, DuplicateUploadError, RequiredColumnsError } from '@/services/dataService';
+import { getTransactions, getUniqueSKUs, getDataStatistics, downloadTransactionsCSV, uploadCSV, uploadMultipleCSV, Transaction, DuplicateUploadError, RequiredColumnsError, BatchUploadResponse, BatchUploadResult } from '@/services/dataService';
 import ColumnMappingModal from '@/components/ColumnMappingModal';
+import BatchUploadProgress, { FileProgress } from '@/components/BatchUploadProgress';
+import UploadSuccessModal from '@/components/UploadSuccessModal';
 import { dataService } from '@/services/api';
 import { formatCurrency } from '@/utils/formatters';
 import { useAuthStore } from '@/store/authStore';
+import { useDataStore } from '@/store/dataStore';
 
 const { RangePicker } = DatePicker;
 const { Dragger } = Upload;
 
 const Workspace: React.FC = () => {
+  const navigate = useNavigate();
   const { user, loading: authLoading } = useAuthStore();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(false);
@@ -29,7 +34,7 @@ const Workspace: React.FC = () => {
   const [checkingData, setCheckingData] = useState(true);
 
   // Filter states
-  const [dateRange, setDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
+  const [dateRange, setLocalDateRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [selectedSKU, setSelectedSKU] = useState<string | undefined>(undefined);
   const [selectedTransactionType, setSelectedTransactionType] = useState<string | undefined>('all');
   const [skuOptions, setSkuOptions] = useState<string[]>([]);
@@ -57,6 +62,22 @@ const Workspace: React.FC = () => {
   const [detectedMapping, setDetectedMapping] = useState<Record<string, string>>({});
   const [csvColumns, setCsvColumns] = useState<string[]>([]);
   const [uploadRowErrors, setUploadRowErrors] = useState<Array<{row: number; column: string; reason: string}>>([]);
+  
+  // Batch upload state
+  const [isBatchUploading, setIsBatchUploading] = useState(false);
+  const [batchFiles, setBatchFiles] = useState<FileProgress[]>([]);
+  const [currentFileIndex, setCurrentFileIndex] = useState(0);
+  const [batchCancelled, setBatchCancelled] = useState(false);
+  const [batchSummaryVisible, setBatchSummaryVisible] = useState(false);
+  const [batchSummary, setBatchSummary] = useState<{successful: number; failed: number; totalRows: number} | null>(null);
+  const [pendingMappingFile, setPendingMappingFile] = useState<{file: File; index: number} | null>(null);
+  
+  // Upload success modal state
+  const [uploadSuccessVisible, setUploadSuccessVisible] = useState(false);
+  const [uploadSuccessData, setUploadSuccessData] = useState<{filesUploaded: number; totalRows: number} | null>(null);
+  
+  // Data store for date range (global date range for dashboard)
+  const { setDateRange: setGlobalDateRange } = useDataStore();
 
   // Check data availability on mount (only when authenticated)
   useEffect(() => {
@@ -153,7 +174,7 @@ const Workspace: React.FC = () => {
 
   // Handle filter changes (reset to page 1)
   const handleDateRangeChange = (dates: [Dayjs | null, Dayjs | null] | null) => {
-    setDateRange(dates);
+    setLocalDateRange(dates);
     setCurrentPage(1);
   };
 
@@ -174,7 +195,7 @@ const Workspace: React.FC = () => {
 
   // Clear all filters
   const handleClearFilters = () => {
-    setDateRange(null);
+    setLocalDateRange(null);
     setSelectedSKU(undefined);
     setSelectedTransactionType('all');
     setCurrentPage(1);
@@ -246,7 +267,19 @@ const Workspace: React.FC = () => {
           message: result.message,
           rowsInserted: result.rows_inserted,
         });
-        message.success(`Successfully uploaded ${result.rows_inserted} rows`);
+        
+        // Refresh statistics to get date range
+        const fetchStats = async () => {
+          const stats = await getDataStatistics();
+          if (stats) {
+            setStatistics(stats);
+            
+            // Auto-detect and set date range from uploaded data
+            if (stats.date_range.start && stats.date_range.end) {
+              setGlobalDateRange(stats.date_range.start, stats.date_range.end);
+            }
+          }
+        };
         
         // Refresh data after upload
         const fetchData = async () => {
@@ -268,18 +301,18 @@ const Workspace: React.FC = () => {
           setLoading(false);
         };
         
-        // Refresh statistics
-        const fetchStats = async () => {
-          const stats = await getDataStatistics();
-          if (stats) {
-            setStatistics(stats);
-          }
-        };
-        
         // Update hasData state
         setHasData(true);
         
-        await Promise.all([fetchData(), fetchStats()]);
+        // Show success modal immediately
+        setUploadSuccessData({
+          filesUploaded: 1,
+          totalRows: result.rows_inserted || 0,
+        });
+        setUploadSuccessVisible(true);
+        
+        // Refresh data in background (non-blocking)
+        Promise.all([fetchData(), fetchStats()]);
       } else {
         const errorMsg = (result && 'message' in result) ? result.message : 'Upload failed. Please try again.';
         setUploadStatus({
@@ -354,6 +387,12 @@ const Workspace: React.FC = () => {
 
   // Handle column mapping confirmation (when mapping modal is shown)
   const handleColumnMappingConfirm = async (_mapping: Record<string, string>) => {
+    // Check if this is a batch upload mapping or single file mapping
+    if (pendingMappingFile) {
+      await handleBatchColumnMappingConfirm(_mapping);
+      return;
+    }
+    
     if (!pendingFile) return;
     // Note: mapping parameter is reserved for future use when backend accepts custom mappings
     // For now, we re-upload with the same file and let backend auto-detect again
@@ -367,17 +406,352 @@ const Workspace: React.FC = () => {
     await handleFileUpload(pendingFile);
   };
 
-  // Upload props - auto-upload by default
+  // Process a single file in batch context
+  const processBatchFile = async (file: File, index: number, allFiles: File[]): Promise<{shouldPause: boolean; rowsInserted?: number; success?: boolean}> => {
+    setCurrentFileIndex(index);
+    
+    // Update status to processing
+    setBatchFiles((prev) => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], status: 'processing' };
+      return updated;
+    });
+    
+    try {
+      const result = await uploadCSV(file);
+      
+      if (result && 'error' in result && result.error === 'REQUIRED_COLUMNS_MISSING') {
+        // Pause batch for column mapping
+        const errorData = result as RequiredColumnsError;
+        setPendingMappingFile({ file, index });
+        
+        // Read CSV to get columns for mapping modal
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const text = e.target?.result as string;
+          const lines = text.split('\n');
+          if (lines.length > 0) {
+            const detectedCols = lines[0].split(',').map((col) => col.trim().replace(/"/g, ''));
+            setCsvColumns(detectedCols);
+            setDetectedMapping(errorData.detected_mapping || {});
+            setRequiredColumnsError(errorData);
+            setColumnMappingModalVisible(true);
+          }
+        };
+        reader.readAsText(file);
+        
+        return { shouldPause: true }; // Signal to pause batch
+      }
+      
+      if (result && 'error' in result && result.error === 'DUPLICATE_UPLOAD') {
+        // Mark as skipped (don't count as success or failure)
+        setBatchFiles((prev) => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            status: 'skipped',
+            result: {
+              message: result.message || 'File already uploaded',
+              error: 'DUPLICATE_UPLOAD',
+            },
+          };
+          return updated;
+        });
+        return { shouldPause: false, success: false };
+      }
+      
+      if (result && 'success' in result && result.success) {
+        // Success
+        const rowsInserted = result.rows_inserted || 0;
+        
+        setBatchFiles((prev) => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            status: 'success',
+            result: {
+              rows_inserted: rowsInserted,
+              message: result.message || 'Upload successful',
+            },
+          };
+          return updated;
+        });
+        return { shouldPause: false, rowsInserted, success: true };
+      } else {
+        // Failed
+        setBatchFiles((prev) => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            status: 'error',
+            result: {
+              message: (result && 'message' in result) ? result.message : 'Upload failed',
+              error: 'PROCESSING_ERROR',
+            },
+          };
+          return updated;
+        });
+        return { shouldPause: false, success: false };
+      }
+    } catch (error: any) {
+      // Error occurred
+      setBatchFiles((prev) => {
+        const updated = [...prev];
+        updated[index] = {
+          ...updated[index],
+          status: 'error',
+          result: {
+            message: error.message || 'Upload failed',
+            error: 'EXCEPTION',
+          },
+        };
+        return updated;
+      });
+      return { shouldPause: false, success: false };
+    }
+  };
+
+  // Handle batch file upload
+  const handleBatchUpload = async (files: File[], startIndex: number = 0) => {
+    if (files.length === 0) return;
+    
+    // If single file, use existing single upload flow
+    if (files.length === 1 && startIndex === 0) {
+      await handleFileUpload(files[0]);
+      return;
+    }
+    
+    // Initialize batch upload state (only on first call)
+    if (startIndex === 0) {
+      const fileProgress: FileProgress[] = files.map((file) => ({
+        file,
+        status: 'pending' as const,
+      }));
+      
+      setBatchFiles(fileProgress);
+      setIsBatchUploading(true);
+      setBatchCancelled(false);
+      setCurrentFileIndex(0);
+      setBatchSummary(null);
+      setUploadSuccessVisible(false); // Reset success modal
+    }
+    
+    // Process files sequentially and track results
+    let successfulCount = 0;
+    let failedCount = 0;
+    let totalRowsCount = 0;
+    
+    for (let i = startIndex; i < files.length; i++) {
+      if (batchCancelled) {
+        // Mark remaining files as skipped
+        for (let j = i; j < files.length; j++) {
+          setBatchFiles((prev) => {
+            const updated = [...prev];
+            updated[j] = { ...updated[j], status: 'skipped' };
+            return updated;
+          });
+        }
+        break;
+      }
+      
+      const file = files[i];
+      const result = await processBatchFile(file, i, files);
+      
+      // If column mapping needed, pause and return
+      if (result.shouldPause) {
+        return; // Will resume from handleBatchColumnMappingConfirm
+      }
+      
+      // Track results directly from the processBatchFile return value
+      if (result.success && result.rowsInserted !== undefined) {
+        successfulCount++;
+        totalRowsCount += result.rowsInserted;
+      }
+      // Note: We don't track failures here because skipped files also return success: false
+      // We'll count failures from the final state
+    }
+    
+    // Wait a tiny bit for all state updates to complete, then calculate final counts from state
+    // Use a promise to ensure we read the state after React has processed all updates
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        // Read current batchFiles state to get accurate final counts
+        // We need to use a callback approach since we can't directly read state
+        setBatchFiles((prev) => {
+          const finalSuccessful = prev.filter((f) => f.status === 'success').length;
+          const finalFailed = prev.filter((f) => f.status === 'error').length;
+          const finalTotalRows = prev.reduce((sum, f) => sum + (f.result?.rows_inserted || 0), 0);
+          
+          // Update our local counters with the accurate final counts
+          successfulCount = finalSuccessful;
+          totalRowsCount = finalTotalRows;
+          failedCount = finalFailed;
+          
+          resolve();
+          return prev;
+        });
+      }, 50);
+    });
+    
+    // Now show the modal with the accurate counts
+    setIsBatchUploading(false);
+    
+    if (successfulCount > 0) {
+      setHasData(true);
+      
+      // Show success modal immediately with correct counts
+      setUploadSuccessData({
+        filesUploaded: successfulCount,
+        totalRows: totalRowsCount,
+      });
+      setUploadSuccessVisible(true);
+      
+      // Also show batch summary for detailed view (non-blocking)
+      setBatchSummary({
+        successful: successfulCount,
+        failed: failedCount,
+        totalRows: totalRowsCount,
+      });
+      setBatchSummaryVisible(true);
+      
+      // Refresh data in background (non-blocking)
+      const fetchData = async () => {
+        setLoading(true);
+        const result = await getTransactions(
+          currentPage,
+          pageSize,
+          dateRange && dateRange[0] ? dateRange[0].format('YYYY-MM-DD') : undefined,
+          dateRange && dateRange[1] ? dateRange[1].format('YYYY-MM-DD') : undefined,
+          selectedSKU,
+          selectedTransactionType
+        );
+        
+        if (result) {
+          setTransactions(result.data);
+          setTotal(result.total);
+          setTotalPages(result.total_pages);
+        }
+        setLoading(false);
+      };
+      
+      const fetchStats = async () => {
+        const stats = await getDataStatistics();
+        if (stats) {
+          setStatistics(stats);
+          
+          // Auto-detect and set date range from uploaded data
+          if (stats.date_range.start && stats.date_range.end) {
+            setGlobalDateRange(stats.date_range.start, stats.date_range.end);
+          }
+        }
+      };
+      
+      Promise.all([fetchData(), fetchStats()]);
+    } else {
+      // No successful uploads - just show summary
+      setBatchSummary({
+        successful: successfulCount,
+        failed: failedCount,
+        totalRows: totalRowsCount,
+      });
+      setBatchSummaryVisible(true);
+    }
+  };
+
+  // Handle column mapping confirmation during batch upload
+  const handleBatchColumnMappingConfirm = async (mapping: Record<string, string>) => {
+    if (!pendingMappingFile) return;
+    
+    setColumnMappingModalVisible(false);
+    setRequiredColumnsError(null);
+    
+    const { file, index } = pendingMappingFile;
+    setPendingMappingFile(null);
+    
+    // Note: For now, we re-upload with auto-detection
+    // TODO: In future, pass custom mapping to backend
+    
+    try {
+      const result = await uploadCSV(file);
+      
+      if (result && 'success' in result && result.success) {
+        const rowsInserted = result.rows_inserted || 0;
+        setBatchFiles((prev) => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            status: 'success',
+            result: {
+              rows_inserted: rowsInserted,
+              message: result.message || 'Upload successful',
+            },
+          };
+          return updated;
+        });
+      } else {
+        setBatchFiles((prev) => {
+          const updated = [...prev];
+          updated[index] = {
+            ...updated[index],
+            status: 'error',
+            result: {
+              message: (result && 'message' in result) ? result.message : 'Upload failed',
+              error: 'PROCESSING_ERROR',
+            },
+          };
+          return updated;
+        });
+      }
+      
+      // Resume batch processing from next file
+      const allFiles = batchFiles.map((fp) => fp.file);
+      await handleBatchUpload(allFiles, index + 1);
+    } catch (error: any) {
+      setBatchFiles((prev) => {
+        const updated = [...prev];
+        updated[index] = {
+          ...updated[index],
+          status: 'error',
+          result: {
+            message: error.message || 'Upload failed',
+            error: 'EXCEPTION',
+          },
+        };
+        return updated;
+      });
+      
+      // Still resume batch processing from next file
+      const allFiles = batchFiles.map((fp) => fp.file);
+      await handleBatchUpload(allFiles, index + 1);
+    }
+  };
+
+  // Upload props - support both single and multiple files
   const uploadProps: UploadProps = {
     name: 'file',
-    multiple: false,
+    multiple: true, // Enable multiple file selection
     accept: '.csv',
-    customRequest: async ({ file, onSuccess, onError }) => {
-      try {
-        await handleFileUpload(file as File);
-        onSuccess?.(file);
-      } catch (error) {
-        onError?.(error as Error);
+    beforeUpload: () => {
+      // Prevent default upload (we handle it manually via onChange)
+      return false;
+    },
+    onChange: (info) => {
+      // When files are selected, process them
+      const fileList = info.fileList;
+      
+      // Get all files that are ready (not in error state)
+      const readyFiles = fileList
+        .filter((f) => f.status !== 'error' && f.originFileObj)
+        .map((f) => f.originFileObj as File);
+      
+      if (readyFiles.length === 0) return;
+      
+      // If only one file, use single upload flow
+      if (readyFiles.length === 1) {
+        handleFileUpload(readyFiles[0]);
+      } else {
+        // Multiple files - use batch upload
+        handleBatchUpload(readyFiles);
       }
     },
     showUploadList: false,
@@ -719,10 +1093,10 @@ const Workspace: React.FC = () => {
             <InboxOutlined style={{ fontSize: '48px', color: '#6366F1' }} />
           </p>
           <p className="ant-upload-text" style={{ color: '#030712', fontWeight: '500' }}>
-            Click or drag CSV file to this area to upload
+            Click or drag CSV file(s) to this area to upload
           </p>
           <p className="ant-upload-hint" style={{ color: '#64748B' }}>
-            Support for CSV files. Column mapping is automatic.
+            Support for CSV files. You can upload multiple files at once. Column mapping is automatic.
           </p>
         </Dragger>
         
@@ -779,13 +1153,26 @@ const Workspace: React.FC = () => {
           ]}
         />
         
-        {uploading && (
+        {uploading && !isBatchUploading && (
           <div style={{ marginTop: '16px', textAlign: 'center' }}>
             <Spin /> <span style={{ marginLeft: '8px', color: '#64748B' }}>Uploading...</span>
           </div>
         )}
         
-        {uploadStatus && (
+        {isBatchUploading && batchFiles.length > 0 && (
+          <BatchUploadProgress
+            files={batchFiles}
+            currentIndex={currentFileIndex}
+            onCancel={() => {
+              setBatchCancelled(true);
+              setIsBatchUploading(false);
+              message.info('Batch upload cancelled');
+            }}
+            totalRowsInserted={batchFiles.reduce((sum, f) => sum + (f.result?.rows_inserted || 0), 0)}
+          />
+        )}
+        
+        {uploadStatus && !isBatchUploading && (
           <Alert
             message={uploadStatus.success ? 'Upload Successful' : 'Upload Failed'}
             description={
@@ -934,6 +1321,10 @@ const Workspace: React.FC = () => {
               Date Range
             </div>
             <RangePicker
+              disabledDate={(current) => {
+                // Disable future dates
+                return current && current > dayjs().endOf('day');
+              }}
               value={dateRange}
               onChange={handleDateRangeChange}
               format="MMM D, YYYY"
@@ -1127,6 +1518,132 @@ const Workspace: React.FC = () => {
         </div>
       </Modal>
 
+      {/* Batch Upload Summary Modal - Show briefly, then auto-close to show success modal */}
+      <Modal
+        title="Batch Upload Complete"
+        open={batchSummaryVisible && !uploadSuccessVisible}
+        onCancel={() => {
+          setBatchSummaryVisible(false);
+          setBatchFiles([]);
+          setBatchSummary(null);
+        }}
+        footer={[
+          <Button
+            key="close"
+            type="primary"
+            onClick={() => {
+              setBatchSummaryVisible(false);
+              setBatchFiles([]);
+              setBatchSummary(null);
+            }}
+          >
+            Close
+          </Button>,
+        ]}
+        width={600}
+        closable={true}
+      >
+        {batchSummary && (
+          <div>
+            <div style={{ marginBottom: '24px' }}>
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Statistic
+                    title="Total Files"
+                    value={batchFiles.length}
+                    prefix={<CheckCircleOutlined />}
+                  />
+                </Col>
+                <Col span={8}>
+                  <Statistic
+                    title="Successful"
+                    value={batchSummary.successful}
+                    valueStyle={{ color: '#16A34A' }}
+                    prefix={<CheckCircleOutlined />}
+                  />
+                </Col>
+                <Col span={8}>
+                  <Statistic
+                    title="Failed"
+                    value={batchSummary.failed}
+                    valueStyle={{ color: '#DC2626' }}
+                    prefix={<CloseCircleOutlined />}
+                  />
+                </Col>
+              </Row>
+              {batchSummary.totalRows > 0 && (
+                <div style={{ marginTop: '16px', textAlign: 'center' }}>
+                  <Text strong style={{ fontSize: '18px', color: '#2563EB' }}>
+                    {batchSummary.totalRows.toLocaleString()} total rows inserted
+                  </Text>
+                </div>
+              )}
+            </div>
+            
+            <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+              <List
+                size="small"
+                dataSource={batchFiles}
+                renderItem={(item) => (
+                  <List.Item>
+                    <List.Item.Meta
+                      avatar={
+                        item.status === 'success' ? (
+                          <CheckCircleOutlined style={{ color: '#16A34A', fontSize: '20px' }} />
+                        ) : item.status === 'error' ? (
+                          <CloseCircleOutlined style={{ color: '#DC2626', fontSize: '20px' }} />
+                        ) : (
+                          <ClockCircleOutlined style={{ color: '#64748B', fontSize: '20px' }} />
+                        )
+                      }
+                      title={
+                        <Space>
+                          <Text strong>{item.file.name}</Text>
+                          {item.status === 'success' && item.result?.rows_inserted && (
+                            <Tag color="success">{item.result.rows_inserted.toLocaleString()} rows</Tag>
+                          )}
+                          {item.status === 'error' && (
+                            <Tag color="error">Failed</Tag>
+                          )}
+                          {item.status === 'skipped' && (
+                            <Tag color="default">Skipped</Tag>
+                          )}
+                        </Space>
+                      }
+                      description={
+                        item.result?.message || item.result?.error || (
+                          item.status === 'pending' ? 'Pending' : 'Processing...'
+                        )
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Upload Success Modal */}
+      {uploadSuccessData && (
+        <UploadSuccessModal
+          visible={uploadSuccessVisible}
+          filesUploaded={uploadSuccessData.filesUploaded}
+          totalRows={uploadSuccessData.totalRows}
+          onViewDashboard={() => {
+            setUploadSuccessVisible(false);
+            navigate('/app/dashboard');
+          }}
+          onViewFiles={() => {
+            setUploadSuccessVisible(false);
+            navigate('/app/data-management');
+          }}
+          onClose={() => {
+            setUploadSuccessVisible(false);
+          }}
+        />
+      )}
+
       {/* Column Mapping Modal */}
       <ColumnMappingModal
         open={columnMappingModalVisible}
@@ -1136,6 +1653,7 @@ const Workspace: React.FC = () => {
         onCancel={() => {
           setColumnMappingModalVisible(false);
           setPendingFile(null);
+          setPendingMappingFile(null);
         }}
       />
     </div>

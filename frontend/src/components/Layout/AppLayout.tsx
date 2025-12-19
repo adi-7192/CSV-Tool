@@ -411,15 +411,31 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
 
           <div className="header-right">
             {(location.pathname === '/app/dashboard' || location.pathname === '/dashboard') && (
-              <RangePicker
-                value={dateRangeValue}
-                onChange={handleDateRangeChange}
-                format="MMM DD, YYYY"
-                placeholder={['Start Date', 'End Date']}
-                className="header-date-picker"
-                allowClear={true}
-                inputReadOnly={true}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <RangePicker
+                  value={dateRangeValue}
+                  onChange={handleDateRangeChange}
+                  format="MMM DD, YYYY"
+                  placeholder={['Start Date', 'End Date']}
+                  className="header-date-picker"
+                  allowClear={true}
+                  inputReadOnly={true}
+                  disabledDate={(current) => {
+                    // Disable future dates
+                    return current && current > dayjs().endOf('day');
+                  }}
+                />
+                {(!dateRangeValue || !dateRangeValue[0] || !dateRangeValue[1]) && (
+                  <span style={{ 
+                    fontSize: '12px', 
+                    color: '#64748B',
+                    fontStyle: 'italic',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    Please select the correct dates from here
+                  </span>
+                )}
+              </div>
             )}
             <Badge count={0} showZero={false}>
               <Button

@@ -3,7 +3,7 @@ Data Routes - Raw transaction data endpoints with tenant isolation
 """
 from fastapi import APIRouter, Query, HTTPException, UploadFile, File, Depends, Body
 from fastapi.responses import StreamingResponse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from pydantic import BaseModel
 from services.data_service import get_transactions, get_unique_skus, get_data_statistics, export_transactions_csv
@@ -394,6 +394,128 @@ async def upload_csv_endpoint(
         "filename": result.get('filename'),
         "ingestion_id": result.get('ingestion_id'),
         "tenant_id": tenant_id,
+    }
+
+
+@router.post("/upload/multiple")
+async def upload_multiple_csv_endpoint(
+    files: List[UploadFile] = File(..., description="Multiple CSV files to upload"),
+    current_user: UserInDB = Depends(get_current_user),
+):
+    """
+    Upload multiple CSV files to database with tenant isolation.
+    
+    Processes files sequentially. Each file is processed independently.
+    If one file fails, others continue processing.
+    
+    Requires authentication. All uploaded data is scoped to the user's tenant_id.
+    
+    Returns:
+        {
+            "results": [
+                {
+                    "filename": "file1.csv",
+                    "success": true,
+                    "rows_inserted": 1500,
+                    "ingestion_id": "uuid",
+                    "message": "Upload successful"
+                },
+                ...
+            ],
+            "total_files": 5,
+            "successful": 4,
+            "failed": 1
+        }
+    """
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id
+    if not tenant_id:
+        tenant_id = str(current_user.id)
+    
+    results = []
+    successful = 0
+    failed = 0
+    
+    # Process files sequentially
+    for file in files:
+        file_result = {
+            "filename": file.filename or "unknown.csv",
+            "success": False,
+            "rows_inserted": 0,
+            "ingestion_id": None,
+            "message": "",
+            "error": None,
+        }
+        
+        try:
+            # Validate file type
+            if not file.filename or not file.filename.endswith('.csv'):
+                file_result["error"] = "Only CSV files are supported"
+                file_result["message"] = "Invalid file type"
+                results.append(file_result)
+                failed += 1
+                continue
+            
+            # Validate file size (100MB max)
+            file_content = await file.read()
+            
+            if len(file_content) > 100 * 1024 * 1024:  # 100MB
+                file_result["error"] = "File too large. Maximum size is 100MB"
+                file_result["message"] = "File size validation failed"
+                results.append(file_result)
+                failed += 1
+                continue
+            
+            # Process upload using existing upload service with tenant isolation
+            result = process_csv_upload(file_content, file.filename, tenant_id=tenant_id)
+            
+            if result.get('success'):
+                file_result["success"] = True
+                file_result["rows_inserted"] = result.get('rows_inserted', result.get('rows_uploaded', 0))
+                file_result["ingestion_id"] = result.get('ingestion_id')
+                file_result["message"] = f"Successfully uploaded {file_result['rows_inserted']} rows"
+                successful += 1
+            else:
+                # Handle different error types
+                error_type = result.get('error')
+                
+                if error_type == 'DUPLICATE_UPLOAD':
+                    file_result["error"] = "DUPLICATE_UPLOAD"
+                    file_result["message"] = result.get('message', 'This file has already been uploaded')
+                    file_result["existing_ingestion_id"] = result.get('existing_ingestion_id')
+                    file_result["existing_filename"] = result.get('existing_filename')
+                    file_result["existing_uploaded_at"] = result.get('existing_uploaded_at')
+                    file_result["existing_rows"] = result.get('existing_rows', 0)
+                elif error_type == 'REQUIRED_COLUMNS_MISSING':
+                    file_result["error"] = "REQUIRED_COLUMNS_MISSING"
+                    file_result["message"] = result.get('message', 'Required columns are missing')
+                    file_result["missing_columns"] = result.get('missing_columns', [])
+                    file_result["expected_schema"] = result.get('expected_schema', {})
+                    file_result["csv_columns"] = result.get('csv_columns', [])
+                    file_result["detected_mapping"] = result.get('detected_mapping', {})
+                else:
+                    file_result["error"] = error_type or "PROCESSING_ERROR"
+                    file_result["message"] = result.get('message', 'Upload processing failed')
+                
+                failed += 1
+            
+            results.append(file_result)
+        
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error processing file {file.filename}: {e}", exc_info=True)
+            
+            file_result["error"] = "EXCEPTION"
+            file_result["message"] = f"Error processing file: {str(e)}"
+            results.append(file_result)
+            failed += 1
+    
+    return {
+        "results": results,
+        "total_files": len(files),
+        "successful": successful,
+        "failed": failed,
     }
 
 

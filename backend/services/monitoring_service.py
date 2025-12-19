@@ -65,15 +65,20 @@ def log_system_event(
                 logger.warning(f"Failed to serialize meta to JSON: {e}")
                 meta_json = json.dumps({"error": "Failed to serialize metadata"})
         
-        # Insert event
+        # Insert event - manually generate ID (DuckDB doesn't auto-increment INTEGER PRIMARY KEY)
+        # Get max ID and increment
+        result = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM system_events").fetchone()
+        next_id = result[0] if result else 1
+        
         insert_sql = """
         INSERT INTO system_events (
-            created_at, level, category, message, endpoint, method,
+            id, created_at, level, category, message, endpoint, method,
             status_code, duration_ms, tenant_id, user_id, request_id, meta
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         
         conn.execute(insert_sql, [
+            next_id,
             datetime.now(),
             level,
             category,

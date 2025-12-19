@@ -36,11 +36,11 @@ const Onboarding: React.FC = () => {
   const handleUploadCSV = async () => {
     try {
       await markOnboarded();
-      navigate('/app/data-management');
+      navigate('/app/workspace');
     } catch (error) {
       console.error('Failed to mark as onboarded:', error);
       // Still navigate even if API call fails
-      navigate('/app/data-management');
+      navigate('/app/workspace');
     }
   };
 

@@ -168,7 +168,7 @@ const TopBar: React.FC = () => {
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: '12px',
+          gap: '8px',
         }}
       >
         <RangePicker
@@ -182,7 +182,21 @@ const TopBar: React.FC = () => {
             backgroundColor: '#FFFFFF',
           }}
           allowClear={false}
+          disabledDate={(current) => {
+            // Disable future dates
+            return current && current > dayjs().endOf('day');
+          }}
         />
+        {(!dateRangeValue || !dateRangeValue[0] || !dateRangeValue[1]) && (
+          <span style={{ 
+            fontSize: '12px', 
+            color: '#64748B',
+            fontStyle: 'italic',
+            whiteSpace: 'nowrap'
+          }}>
+            Please select the correct dates from here
+          </span>
+        )}
       </div>
 
       {/* Profile Menu (Right) */}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
-import { Row, Col, Button, Alert, Skeleton, Card, Table, Modal, Select } from 'antd';
+import { Row, Col, Button, Alert, Skeleton, Card, Table, Modal, Select, Typography } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
@@ -22,6 +22,8 @@ import {
 } from '@/services/api';
 import { formatCurrency } from '@/utils/formatters';
 import './Dashboard.css';
+
+const { Title, Paragraph } = Typography;
 
 // ============================================================================
 // ERROR BOUNDARY COMPONENT
@@ -111,7 +113,7 @@ const DashboardEmptyState: React.FC<{
         No data yet
       </h2>
       <p style={{ fontSize: '16px', color: '#64748B', marginBottom: '32px', maxWidth: '500px' }}>
-        Upload a CSV file to generate your dashboard and chat insights.
+        Upload a CSV file in Data Workspace to generate your dashboard and chat insights.
       </p>
       <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
         <Button 
@@ -120,7 +122,7 @@ const DashboardEmptyState: React.FC<{
           onClick={onUploadClick}
           style={{ height: '44px', fontSize: '16px', fontWeight: '600' }}
         >
-          Go to Data Management
+          Go to Data Workspace
         </Button>
       </div>
     </div>
@@ -435,12 +437,54 @@ const Dashboard: React.FC = () => {
           {/* Empty State - Show when no data */}
           {!dataLoading && hasData === false && !error && (
             <DashboardEmptyState
-              onUploadClick={() => navigate('/app/data-management')}
+              onUploadClick={() => navigate('/app/workspace')}
             />
           )}
 
+          {/* Date Selection Prompt - Show when has data but no date range */}
+          {!dataLoading && hasData === true && (!dateRange.start || !dateRange.end) && (
+            <Card
+              style={{
+                marginBottom: '24px',
+                textAlign: 'center',
+                border: '2px dashed #6366F1',
+                backgroundColor: '#F0F4FF',
+              }}
+            >
+              <div style={{ padding: '32px' }}>
+                <div style={{ fontSize: '48px', marginBottom: '16px' }}>📅</div>
+                <Title level={4} style={{ marginBottom: '8px', color: '#030712' }}>
+                  Select Date Range
+                </Title>
+                <Paragraph style={{ color: '#64748B', marginBottom: '24px', fontSize: '16px' }}>
+                  Choose a date range to view your analytics data. The date range selector is available in the top bar.
+                </Paragraph>
+                <Button
+                  type="primary"
+                  size="large"
+                  onClick={() => {
+                    // Focus on the date picker in the top bar
+                    const datePicker = document.querySelector('.header-date-picker, .ant-picker');
+                    if (datePicker) {
+                      (datePicker as HTMLElement).click();
+                    }
+                  }}
+                  style={{
+                    height: '44px',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    paddingLeft: '24px',
+                    paddingRight: '24px',
+                  }}
+                >
+                  Select Dates
+                </Button>
+              </div>
+            </Card>
+          )}
+
           {/* Main Content - Show when has data */}
-          {!dataLoading && hasData === true && (
+          {!dataLoading && hasData === true && dateRange.start && dateRange.end && (
             <div className="dashboard-main-layout">
             {/* KPI Row with Minimized Insights Panel - Side by Side */}
             <Row gutter={16} style={{ marginBottom: '24px' }}>

@@ -1,0 +1,19 @@
+{
+  "timestamp": "20251218_222422",
+  "created_at": "2025-12-18T22:24:22.491333",
+  "git_sha": "27b02e3e",
+  "app_version": "2.0.0",
+  "components": {
+    "duckdb": {
+      "status": "error",
+      "error": "IO Error: Could not set lock on file \"/Users/adi7192/Documents/Nisarg Project/data/analytics.duckdb\": Conflicting lock is held in /opt/homebrew/Cellar/python@3.12/3.12.12/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python (PID 72384) by user adi7192. See also https://duckdb.org/docs/connect/concurrency"
+    },
+    "chromadb": {
+      "status": "success",
+      "path": "/Users/adi7192/Documents/Nisarg Project/backend/data/chromadb",
+      "backup_path": "/Users/adi7192/Documents/Nisarg Project/backend/backups/backup_20251218_222422/chromadb",
+      "size_bytes": 467108,
+      "size_mb": 0.45
+    }
+  }
+}

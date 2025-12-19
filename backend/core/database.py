@@ -264,9 +264,10 @@ def init_database():
             pass
         
         # Create system_events table for monitoring/observability
+        # DuckDB INTEGER PRIMARY KEY doesn't auto-increment, so we'll use manual ID generation
         conn.execute("""
             CREATE TABLE IF NOT EXISTS system_events (
-                id INTEGER PRIMARY KEY,
+                id BIGINT PRIMARY KEY,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 level VARCHAR NOT NULL,
                 category VARCHAR,

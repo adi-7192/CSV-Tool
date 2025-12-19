@@ -8,7 +8,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Button, Modal, Input, Select, message, Skeleton, Row, Col, Space } from 'antd';
 import {
-  CloudUploadOutlined,
   DeleteOutlined,
   ReloadOutlined,
   InboxOutlined,
@@ -322,7 +321,7 @@ const DataManagement: React.FC = () => {
             margin: 0,
           }}
         >
-          Manage your uploaded data files, view metadata, and organize your analytics data
+          View and manage your uploaded data files. To upload new files, go to Data Workspace.
         </p>
       </div>
 
@@ -413,13 +412,6 @@ const DataManagement: React.FC = () => {
             >
               Refresh
             </Button>
-            <Button
-              type="primary"
-              icon={<CloudUploadOutlined />}
-              onClick={handleUploadNew}
-            >
-              Upload New File
-            </Button>
             {uploads.length > 0 && (
               <Button
                 danger
@@ -449,12 +441,12 @@ const DataManagement: React.FC = () => {
           description={
             searchQuery
               ? 'Try adjusting your search query'
-              : 'Upload your first CSV file to get started with analytics'
+              : 'Go to Data Workspace to upload your CSV files'
           }
           action={
             !searchQuery
               ? {
-                text: 'Upload File',
+                text: 'Go to Data Workspace',
                 onClick: handleUploadNew,
               }
               : undefined

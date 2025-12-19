@@ -279,6 +279,60 @@ export const uploadCSV = async (file: File): Promise<UploadResponse | DuplicateU
   }
 };
 
+export interface BatchUploadResult {
+  filename: string;
+  success: boolean;
+  rows_inserted: number;
+  ingestion_id?: string;
+  message: string;
+  error?: string;
+  existing_ingestion_id?: string;
+  existing_filename?: string;
+  existing_uploaded_at?: string;
+  existing_rows?: number;
+  missing_columns?: string[];
+  expected_schema?: Record<string, any>;
+  csv_columns?: string[];
+  detected_mapping?: Record<string, string>;
+}
+
+export interface BatchUploadResponse {
+  results: BatchUploadResult[];
+  total_files: number;
+  successful: number;
+  failed: number;
+}
+
+/**
+ * Upload multiple CSV files in a batch
+ * @param files - Array of File objects to upload
+ * @returns Batch upload response with per-file results
+ */
+export const uploadMultipleCSV = async (files: File[]): Promise<BatchUploadResponse | null> => {
+  try {
+    const formData = new FormData();
+    
+    // Append all files to FormData
+    files.forEach((file) => {
+      formData.append('files', file);
+    });
+    
+    const response = await apiClient.post<BatchUploadResponse>('/api/data/upload/multiple', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error('Error uploading multiple CSVs:', error);
+    if (error instanceof AxiosError) {
+      console.error('Response:', error.response?.data);
+    }
+    return null;
+  }
+};
+
 /**
  * Get data date range from statistics
  * @returns Date range response with has_data flag and start/end dates
