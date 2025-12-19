@@ -11,6 +11,8 @@ export interface User {
   tenant_id?: string;
   created_at?: string;
   name?: string;
+  is_active?: boolean;
+  last_login_at?: string;
 }
 
 interface AuthState {
@@ -50,7 +52,7 @@ export const useAuthStore = create<AuthStore>()(
 
           // Backend returns access_token, not token
           const { access_token, user } = response.data;
-          
+
           set({
             token: access_token,
             user,
@@ -83,7 +85,7 @@ export const useAuthStore = create<AuthStore>()(
 
           // Backend returns access_token, not token
           const { access_token, user } = response.data;
-          
+
           set({
             token: access_token,
             user,
@@ -125,7 +127,7 @@ export const useAuthStore = create<AuthStore>()(
           });
 
           const user = response.data;
-          
+
           set({
             token,
             user,
@@ -161,7 +163,7 @@ export const useAuthStore = create<AuthStore>()(
           });
 
           const user = response.data;
-          
+
           set({
             token,
             user,
@@ -184,11 +186,11 @@ export const useAuthStore = create<AuthStore>()(
         try {
           const response = await apiClient.post('/api/users/onboarded');
           const updatedUser = response.data;
-          
+
           set((state) => ({
             user: updatedUser ? { ...state.user, ...updatedUser } : state.user,
           }));
-          
+
           return updatedUser;
         } catch (error: any) {
           console.error('Failed to mark user as onboarded:', error);

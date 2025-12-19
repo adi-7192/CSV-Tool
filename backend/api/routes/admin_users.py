@@ -213,28 +213,6 @@ async def deactivate_user(
         from core.database import get_connection
         conn = get_connection()
         
-        # Ensure is_active column exists (migration safety check)
-        try:
-            # Try to check if column exists by querying it
-            conn.execute("SELECT is_active FROM users WHERE id = ? LIMIT 1", [user_id]).fetchdf()
-        except Exception as e:
-            # Column doesn't exist, add it
-            logger.warning(f"is_active column not found, attempting to add it: {e}")
-            try:
-                conn.execute("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
-                logger.info("✅ Added 'is_active' column to users table (migration)")
-                # Set all existing users to active by default
-                try:
-                    conn.execute("UPDATE users SET is_active = TRUE WHERE is_active IS NULL")
-                except:
-                    pass  # Ignore if update fails
-            except Exception as e2:
-                logger.error(f"❌ Could not add is_active column: {e2}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Database schema error: is_active column missing. Please run: python backend/scripts/fix_is_active_column.py"
-                )
-        
         # Now update the user
         conn.execute(
             "UPDATE users SET is_active = FALSE WHERE id = ?",
@@ -281,28 +259,6 @@ async def activate_user(
     try:
         from core.database import get_connection
         conn = get_connection()
-        
-        # Ensure is_active column exists (migration safety check)
-        try:
-            # Try to check if column exists by querying it
-            conn.execute("SELECT is_active FROM users WHERE id = ? LIMIT 1", [user_id]).fetchdf()
-        except Exception as e:
-            # Column doesn't exist, add it
-            logger.warning(f"is_active column not found, attempting to add it: {e}")
-            try:
-                conn.execute("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
-                logger.info("✅ Added 'is_active' column to users table (migration)")
-                # Set all existing users to active by default
-                try:
-                    conn.execute("UPDATE users SET is_active = TRUE WHERE is_active IS NULL")
-                except:
-                    pass  # Ignore if update fails
-            except Exception as e2:
-                logger.error(f"❌ Could not add is_active column: {e2}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Database schema error: is_active column missing. Please run: python backend/scripts/fix_is_active_column.py"
-                )
         
         # Now update the user
         conn.execute(

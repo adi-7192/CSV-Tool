@@ -77,6 +77,146 @@ def get_connection() -> duckdb.DuckDBPyConnection:
     return _thread_local.connection
 
 
+
+def run_migrations(conn):
+    """
+    Run database migrations (schema updates)
+    """
+    # 1. Ingestion Log Schema
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ingestion_log (
+            ingestion_id VARCHAR PRIMARY KEY,
+            filename VARCHAR NOT NULL,
+            uploaded_at TIMESTAMP NOT NULL,
+            rows_raw INTEGER,
+            rows_cleaned INTEGER,
+            rows_inserted INTEGER,
+            date_range_start DATE,
+            date_range_end DATE,
+            validation_status VARCHAR,
+            validation_issues JSON,
+            processing_time_seconds FLOAT,
+            file_hash VARCHAR,
+            file_size INTEGER,
+            tenant_id VARCHAR
+        )
+    """)
+    
+    # 2. Users Schema
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            email VARCHAR NOT NULL UNIQUE,
+            password_hash VARCHAR NOT NULL,
+            role VARCHAR NOT NULL DEFAULT 'user',
+            plan VARCHAR NOT NULL DEFAULT 'free',
+            onboarded BOOLEAN NOT NULL DEFAULT FALSE,
+            tenant_id VARCHAR,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            last_login_at TIMESTAMP,
+            password_changed_at TIMESTAMP,
+            token_version INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # 3. User API Keys Schema
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_api_keys (
+            id VARCHAR PRIMARY KEY,
+            user_id VARCHAR NOT NULL,
+            provider VARCHAR NOT NULL,
+            encrypted_key VARCHAR NOT NULL,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, provider)
+        )
+    """)
+    
+    # 4. Password Reset Tokens Schema
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id VARCHAR PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            token_hash VARCHAR NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            request_ip VARCHAR,
+            user_agent VARCHAR
+        )
+    """)
+    
+    # 5. System Events Schema
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_events (
+            id BIGINT PRIMARY KEY,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            level VARCHAR NOT NULL,
+            category VARCHAR,
+            message VARCHAR,
+            endpoint VARCHAR,
+            method VARCHAR,
+            status_code INTEGER,
+            duration_ms INTEGER,
+            tenant_id VARCHAR,
+            user_id VARCHAR,
+            request_id VARCHAR,
+            meta VARCHAR
+        )
+    """)
+
+    # 6. Apply Column Migrations (Idempotent)
+    migrations = [
+        # Table, Column, Definition
+        ('ingestion_log', 'file_hash', 'VARCHAR'),
+        ('ingestion_log', 'file_size', 'INTEGER'),
+        ('ingestion_log', 'tenant_id', 'VARCHAR'),
+        ('users', 'plan', "VARCHAR DEFAULT 'free'"),
+        ('users', 'onboarded', "BOOLEAN DEFAULT FALSE"),
+        ('users', 'is_active', "BOOLEAN DEFAULT TRUE"),
+        ('users', 'last_login_at', 'TIMESTAMP'),
+        ('users', 'password_changed_at', 'TIMESTAMP'),
+        ('users', 'token_version', 'INTEGER NOT NULL DEFAULT 0'),
+        ('sales', 'tenant_id', 'VARCHAR'), # Tenant Isolation
+        ('user_api_keys', 'enabled', 'BOOLEAN DEFAULT TRUE'),
+    ]
+    
+    for table, col, definition in migrations:
+        try:
+            # Check if table exists first
+            tables = conn.execute("SHOW TABLES").fetchdf()
+            if table in tables['name'].values:
+                # Try to add column, ignore if exists
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+                    logger.info(f"✅ Applied migration: Added '{col}' to {table}")
+                except Exception:
+                    pass # Column likely exists
+        except Exception as e:
+            logger.warning(f"Migration check failed for {table}.{col}: {e}")
+
+    # 7. Create Indexes
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+        "CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens(token_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_system_events_level ON system_events(level)",
+        "CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)",
+        "CREATE INDEX IF NOT EXISTS idx_system_events_endpoint ON system_events(endpoint)",
+        "CREATE INDEX IF NOT EXISTS idx_system_events_tenant_id ON system_events(tenant_id)",
+        "CREATE INDEX IF NOT EXISTS idx_system_events_request_id ON system_events(request_id)",
+    ]
+    
+    for idx_sql in indexes:
+        try:
+            conn.execute(idx_sql)
+        except Exception:
+            pass
+
+
 def init_database():
     """
     Initialize database - create tables if they don't exist
@@ -86,220 +226,20 @@ def init_database():
     try:
         conn = get_connection()
         
-        # Create sales table if it doesn't exist (it should exist from Phase 1)
-        # Just verify it exists
+        # Verify basic connectivity/tables
         try:
-            tables = conn.execute("SHOW TABLES").fetchdf()
-            if 'sales' not in tables['name'].values:
-                logger.warning("Sales table doesn't exist - will be created on first upload")
-            else:
-                logger.info("✅ Sales table found - database ready")
+            conn.execute("SHOW TABLES")
         except Exception:
-            logger.warning("Could not check tables - will be created on first upload")
+             logger.warning("Could not check tables - database might be new")
         
-        # Create ingestion_log table if it doesn't exist (from Phase 1)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ingestion_log (
-                ingestion_id VARCHAR PRIMARY KEY,
-                filename VARCHAR NOT NULL,
-                uploaded_at TIMESTAMP NOT NULL,
-                rows_raw INTEGER,
-                rows_cleaned INTEGER,
-                rows_inserted INTEGER,
-                date_range_start DATE,
-                date_range_end DATE,
-                validation_status VARCHAR,
-                validation_issues JSON,
-                processing_time_seconds FLOAT,
-                file_hash VARCHAR,
-                file_size INTEGER,
-                tenant_id VARCHAR
-            )
-        """)
-        
-        # Add file_hash, file_size, and tenant_id columns if they don't exist (migration)
-        try:
-            conn.execute("ALTER TABLE ingestion_log ADD COLUMN file_hash VARCHAR")
-            logger.info("✅ Added 'file_hash' column to ingestion_log table")
-        except Exception:
-            pass
-        
-        try:
-            conn.execute("ALTER TABLE ingestion_log ADD COLUMN file_size INTEGER")
-            logger.info("✅ Added 'file_size' column to ingestion_log table")
-        except Exception:
-            pass
-        
-        try:
-            conn.execute("ALTER TABLE ingestion_log ADD COLUMN tenant_id VARCHAR")
-            logger.info("✅ Added 'tenant_id' column to ingestion_log table")
-        except Exception:
-            pass
-        
-        # Create users table if it doesn't exist
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY,
-                email VARCHAR NOT NULL UNIQUE,
-                password_hash VARCHAR NOT NULL,
-                role VARCHAR NOT NULL DEFAULT 'user',
-                plan VARCHAR NOT NULL DEFAULT 'free',
-                onboarded BOOLEAN NOT NULL DEFAULT FALSE,
-                tenant_id VARCHAR,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                last_login_at TIMESTAMP,
-                password_changed_at TIMESTAMP,
-                token_version INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Add plan and onboarded columns if they don't exist (migration for existing databases)
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN plan VARCHAR DEFAULT 'free'")
-            logger.info("✅ Added 'plan' column to users table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN onboarded BOOLEAN DEFAULT FALSE")
-            logger.info("✅ Added 'onboarded' column to users table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        # Add is_active column if it doesn't exist (migration)
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
-            logger.info("✅ Added 'is_active' column to users table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        # Add last_login_at column if it doesn't exist (migration)
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP")
-            logger.info("✅ Added 'last_login_at' column to users table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        # Create index on email for faster lookups
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-        except Exception:
-            # Index might already exist
-            pass
-        
-        # Create user_api_keys table if it doesn't exist
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_api_keys (
-                id VARCHAR PRIMARY KEY,
-                user_id VARCHAR NOT NULL,
-                provider VARCHAR NOT NULL,
-                encrypted_key VARCHAR NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, provider)
-            )
-        """)
-        
-        # TENANT ISOLATION: Add tenant_id column to sales table if it doesn't exist
-        # This enables strict data isolation between users
-        if table_exists('sales'):
-            try:
-                conn.execute("ALTER TABLE sales ADD COLUMN tenant_id VARCHAR")
-                logger.info("✅ Added 'tenant_id' column to sales table for tenant isolation")
-            except Exception:
-                # Column already exists, ignore
-                pass
-        
-        # Add enabled column if it doesn't exist (migration for existing databases)
-        try:
-            conn.execute("ALTER TABLE user_api_keys ADD COLUMN enabled BOOLEAN DEFAULT TRUE")
-            logger.info("✅ Added 'enabled' column to user_api_keys table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        # Create password_reset_tokens table for secure password reset flow
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS password_reset_tokens (
-                id VARCHAR PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                token_hash VARCHAR NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                used_at TIMESTAMP,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                request_ip VARCHAR,
-                user_agent VARCHAR
-            )
-        """)
-        
-        # Create indexes for efficient token lookup
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_hash ON password_reset_tokens(token_hash)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id ON password_reset_tokens(user_id)")
-        except Exception:
-            # Indexes might already exist
-            pass
-        
-        # Add password_changed_at column to users table for session invalidation
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TIMESTAMP")
-            logger.info("✅ Added 'password_changed_at' column to users table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        # Add token_version column to users table for session invalidation
-        # When password changes, token_version is incremented, invalidating all existing JWTs
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
-            logger.info("✅ Added 'token_version' column to users table")
-        except Exception:
-            # Column already exists, ignore
-            pass
-        
-        # Create system_events table for monitoring/observability
-        # DuckDB INTEGER PRIMARY KEY doesn't auto-increment, so we'll use manual ID generation
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS system_events (
-                id BIGINT PRIMARY KEY,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                level VARCHAR NOT NULL,
-                category VARCHAR,
-                message VARCHAR,
-                endpoint VARCHAR,
-                method VARCHAR,
-                status_code INTEGER,
-                duration_ms INTEGER,
-                tenant_id VARCHAR,
-                user_id VARCHAR,
-                request_id VARCHAR,
-                meta VARCHAR
-            )
-        """)
-        
-        # Create indexes for efficient querying
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_level ON system_events(level)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_endpoint ON system_events(endpoint)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_tenant_id ON system_events(tenant_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_request_id ON system_events(request_id)")
-        except Exception:
-            # Indexes might already exist
-            pass
+        run_migrations(conn)
         
         logger.info("✅ Database initialization complete")
         
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
         raise
+
 
 
 def execute_query(sql: str, params: Dict[str, Any] = None) -> pd.DataFrame:

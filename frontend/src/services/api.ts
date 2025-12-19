@@ -33,7 +33,7 @@ apiClient.interceptors.response.use(
     if (error.response?.status === 401) {
       // Clear auth state
       localStorage.removeItem('auth_token');
-      
+
       // Only redirect if not already on login page
       if (window.location.pathname !== '/login' && window.location.pathname !== '/signup') {
         window.location.href = '/login';
@@ -273,7 +273,7 @@ export const insightsService = {
     try {
       // First, get metrics to generate insights
       const metrics = await metricsService.getMetrics(startDate, endDate);
-      
+
       if (!metrics) {
         return { insights: [] };
       }
@@ -459,15 +459,15 @@ export const moversDeclinersService = {
         end_date: endDate,
         limit,
       };
-      
+
       console.log('\n' + '='.repeat(80));
       console.log('🔍 API SERVICE DEBUG: MOVERS & DECLINERS');
       console.log('='.repeat(80));
       console.log(`[API] Fetching movers & decliners: ${url}`);
       console.log('[API] Request params:', params);
-      
+
       const response = await apiClient.get<MoversDeclinersResponse>(url, { params });
-      
+
       console.log('[API] Response status:', response.status);
       console.log('[API] Full response data:', JSON.stringify(response.data, null, 2));
       console.log('[API] Response structure:', {
@@ -476,16 +476,16 @@ export const moversDeclinersService = {
         moversCount: response.data?.movers?.length || 0,
         declinersCount: response.data?.decliners?.length || 0,
       });
-      
+
       if (response.data?.movers && response.data.movers.length > 0) {
         console.log('[API] Sample movers from response:', response.data.movers.slice(0, 3));
       }
       if (response.data?.decliners && response.data.decliners.length > 0) {
         console.log('[API] Sample decliners from response:', response.data.decliners.slice(0, 3));
       }
-      
+
       console.log('='.repeat(80) + '\n');
-      
+
       return response.data;
     } catch (error) {
       console.error('[API] ❌ Error fetching movers & decliners:', error);
@@ -736,7 +736,7 @@ export interface User {
   tenant_id: string | null;
   created_at: string;
   is_active?: boolean;
-  last_login_at?: string | null;
+  last_login_at?: string;
 }
 
 export interface TenantUsage {
@@ -767,7 +767,7 @@ export const adminService = {
   deleteTenant: async (tenantId: string, deleteUser: boolean = false): Promise<{ success: boolean; deleted_rows: number; users_deleted: number; message: string }> => {
     const response = await apiClient.delete<{ success: boolean; deleted_rows: number; users_deleted: number; message: string }>(
       `/api/admin/tenants/${tenantId}`,
-      { 
+      {
         data: { confirm: 'DELETE', delete_user: deleteUser },
         headers: { 'Content-Type': 'application/json' }
       }
@@ -800,7 +800,7 @@ export const chatService = {
       if (context) {
         requestBody.context = context;
       }
-      
+
       // JWT token is automatically attached by apiClient interceptor
       // Backend extracts user_id from JWT token
       const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody);

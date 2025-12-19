@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Table, Tag, Button, Space, Alert, Spin, Modal, message } from 'antd';
+import { Card, Table, Button, Space, Alert, Modal, message } from 'antd';
 import { DatabaseOutlined, ReloadOutlined, DeleteOutlined } from '@ant-design/icons';
 import { adminService, TenantUsage } from '@/services/api';
 import dayjs from 'dayjs';
@@ -22,7 +22,7 @@ const AdminTenantsPage: React.FC = () => {
     } catch (err: any) {
       const status = err?.response?.status;
       const detail = err?.response?.data?.detail || 'Failed to load tenants';
-      
+
       if (status === 401 || status === 403) {
         setError(status === 401
           ? 'Not authenticated. Please log in again.'
