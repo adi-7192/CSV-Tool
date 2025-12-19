@@ -212,6 +212,16 @@ def get_rate_limiter() -> RateLimiter:
     Get or create the global rate limiter instance.
     
     Returns RedisRateLimiter if Redis is available, otherwise RateLimiter (in-memory).
+    
+    In production mode with REQUIRE_REDIS_RATE_LIMITING=True:
+    - Raises RuntimeError if Redis is required but unavailable
+    - This ensures production deployments fail fast if Redis is misconfigured
+    
+    Returns:
+        RateLimiter instance (RedisRateLimiter or RateLimiter)
+        
+    Raises:
+        RuntimeError: If REQUIRE_REDIS_RATE_LIMITING is True but Redis is unavailable
     """
     global _rate_limiter, _redis_rate_limiter, _in_memory_limiter
     
@@ -224,12 +234,44 @@ def get_rate_limiter() -> RateLimiter:
         if _redis_rate_limiter is None:
             _redis_rate_limiter = RedisRateLimiter(redis_url=settings.REDIS_URL)
         
-        # Use Redis if available, otherwise fallback to in-memory
+        # Use Redis if available
         if _redis_rate_limiter.redis_available:
             _rate_limiter = _redis_rate_limiter
             return _rate_limiter
+        
+        # Redis URL is set but connection failed
+        if settings.REQUIRE_REDIS_RATE_LIMITING:
+            error_msg = (
+                f"Redis rate limiting is required (REQUIRE_REDIS_RATE_LIMITING=True) "
+                f"but Redis is unavailable at {settings.REDIS_URL}. "
+                f"Please ensure Redis is running and accessible."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        else:
+            logger.warning(
+                f"Redis URL configured ({settings.REDIS_URL}) but connection failed. "
+                f"Falling back to in-memory rate limiter. "
+                f"Set REQUIRE_REDIS_RATE_LIMITING=True to enforce Redis in production."
+            )
+    elif settings.REQUIRE_REDIS_RATE_LIMITING:
+        # Redis is required but URL is not configured
+        error_msg = (
+            "Redis rate limiting is required (REQUIRE_REDIS_RATE_LIMITING=True) "
+            "but REDIS_URL is not configured. "
+            "Please set REDIS_URL environment variable."
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
     
-    # Use in-memory limiter
+    # Use in-memory limiter (development mode or Redis not required)
+    if settings.REQUIRE_REDIS_RATE_LIMITING:
+        # This shouldn't happen, but log a warning if it does
+        logger.warning(
+            "REQUIRE_REDIS_RATE_LIMITING is True but using in-memory limiter. "
+            "This may indicate a configuration issue."
+        )
+    
     _rate_limiter = _in_memory_limiter
     return _rate_limiter
 
@@ -237,7 +279,7 @@ def get_rate_limiter() -> RateLimiter:
 def check_forgot_password_rate_limit(
     ip_address: str,
     email: str
-) -> Tuple[bool, str]:
+) -> Tuple[bool, Optional[str]]:
     """
     Check rate limits for forgot-password endpoint.
     
@@ -249,8 +291,16 @@ def check_forgot_password_rate_limit(
         
     Returns:
         Tuple of (is_allowed: bool, error_message: str or None)
+        
+    Raises:
+        RuntimeError: If Redis is required but unavailable (in production)
     """
-    limiter = get_rate_limiter()
+    try:
+        limiter = get_rate_limiter()
+    except RuntimeError as e:
+        # Redis is required but unavailable - return 503 error
+        logger.error(f"Rate limiting unavailable: {e}")
+        return False, "Rate limiting service unavailable. Please try again later."
     
     # Check IP rate limit
     ip_key = f"forgot_password:ip:{ip_address}"

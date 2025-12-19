@@ -164,12 +164,19 @@ const ResetPasswordPage: React.FC = () => {
       
       if (err.response?.status === 400) {
         const detail = err.response?.data?.detail;
-        if (detail === 'INVALID_OR_EXPIRED_TOKEN') {
-          setError('This password reset link is invalid or has expired. Please request a new one.');
-        } else if (detail === 'TOKEN_ALREADY_USED') {
-          setError('This password reset link has already been used. Please request a new one if needed.');
-        } else if (typeof detail === 'string' && detail.includes('password')) {
-          setError(detail);
+        // Match backend error messages
+        if (typeof detail === 'string') {
+          if (detail.includes('Invalid or expired password reset link') || detail.includes('INVALID_TOKEN')) {
+            setError('This password reset link is invalid or has expired. Please request a new one.');
+          } else if (detail.includes('already been used') || detail.includes('TOKEN_ALREADY_USED')) {
+            setError('This password reset link has already been used. Please request a new one.');
+          } else if (detail.includes('expired') || detail.includes('TOKEN_EXPIRED')) {
+            setError('This password reset link has expired. Please request a new one.');
+          } else if (detail.includes('password')) {
+            setError(detail);
+          } else {
+            setError(detail || 'Invalid password reset link. Please request a new one.');
+          }
         } else {
           setError('Invalid password reset link. Please request a new one.');
         }

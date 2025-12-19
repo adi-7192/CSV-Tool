@@ -287,9 +287,11 @@ const Dashboard: React.FC = () => {
     checkDataAvailability();
   }, [dateRange.start, dateRange.end]);
 
-  // Fetch all data when date range changes
+  // Fetch all data when date range changes - only if user has data
   useEffect(() => {
-    if (hasData !== false) {
+    // Only fetch data if we've confirmed the user has data (hasData === true)
+    // Don't fetch if hasData is null (still checking) or false (no data)
+    if (hasData === true) {
       fetchChartData(dateRange.start, dateRange.end);
       fetchSKUPerformance(dateRange.start, dateRange.end);
       fetchInsights(dateRange.start, dateRange.end);
@@ -298,14 +300,16 @@ const Dashboard: React.FC = () => {
     }
   }, [dateRange.start, dateRange.end, hasData]);
 
-  // Handle retry on error
+  // Handle retry on error - only retry if user has data
   const handleRetry = () => {
-    fetchMetrics(dateRange.start, dateRange.end);
-    fetchChartData(dateRange.start, dateRange.end);
-    fetchSKUPerformance(dateRange.start, dateRange.end);
-    fetchInsights(dateRange.start, dateRange.end);
-    fetchRegionRevenue(dateRange.start, dateRange.end);
-    fetchMoversDecliners(dateRange.start, dateRange.end);
+    if (hasData === true) {
+      fetchMetrics(dateRange.start, dateRange.end);
+      fetchChartData(dateRange.start, dateRange.end);
+      fetchSKUPerformance(dateRange.start, dateRange.end);
+      fetchInsights(dateRange.start, dateRange.end);
+      fetchRegionRevenue(dateRange.start, dateRange.end);
+      fetchMoversDecliners(dateRange.start, dateRange.end);
+    }
   };
 
   // Handle region bar click
@@ -403,8 +407,8 @@ const Dashboard: React.FC = () => {
     <ErrorBoundary>
       <div className="dashboard">
         <div className="dashboard-container">
-          {/* Error Alert */}
-          {error && (
+          {/* Error Alert - Only show if user has data (don't show errors for users with no data) */}
+          {error && hasData === true && (
             <Alert
               message="Error Loading Data"
               description={error}

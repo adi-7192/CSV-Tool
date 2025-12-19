@@ -301,34 +301,65 @@ export const useDataStore = create<DataStore>((set) => ({
           console.log('[DataStore] Sample decliners:', response.decliners.slice(0, 3));
         }
         
+        // Store response even if arrays are empty (no error - just no data)
         set({
           moversDecliners: {
             movers: response.movers || [],
             decliners: response.decliners || [],
-            label: response.label,
-            granularity: response.granularity,
+            label: response.label || 'No data',
+            granularity: response.granularity || 'day',
           },
           moversDeclinersLoading: false,
+          error: null, // Clear any previous errors
         });
         
         console.log('[DataStore] ✅ Successfully stored movers & decliners');
       } else {
-        console.warn('[DataStore] ⚠️  API Response is null or undefined');
+        // Null response - treat as empty data, not an error
+        console.warn('[DataStore] ⚠️  API Response is null or undefined - treating as empty data');
         set({
-          moversDecliners: null,
+          moversDecliners: {
+            movers: [],
+            decliners: [],
+            label: 'No data',
+            granularity: 'day',
+          },
           moversDeclinersLoading: false,
-          error: 'Failed to fetch movers and decliners',
+          error: null, // Don't set error for empty data
         });
       }
       console.log('='.repeat(80) + '\n');
-    } catch (error) {
+    } catch (error: any) {
       console.error('[DataStore] ❌ Error fetching movers & decliners:', error);
-      const errorMessage =
-        error instanceof Error ? error.message : 'Unknown error occurred';
-      set({
-        error: errorMessage,
-        moversDeclinersLoading: false,
-      });
+      
+      // Check if it's a 404 or "no data" type error - treat as empty data, not error
+      const status = error?.response?.status;
+      const isNoDataError = status === 404 || 
+                           error?.message?.toLowerCase().includes('no data') ||
+                           error?.response?.data?.detail?.toLowerCase().includes('no data');
+      
+      if (isNoDataError) {
+        // Treat as empty data, not an error
+        console.log('[DataStore] No data available - treating as empty result');
+        set({
+          moversDecliners: {
+            movers: [],
+            decliners: [],
+            label: 'No data',
+            granularity: 'day',
+          },
+          moversDeclinersLoading: false,
+          error: null, // Don't set error for no data
+        });
+      } else {
+        // Real error - set error state
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error occurred';
+        set({
+          error: errorMessage,
+          moversDeclinersLoading: false,
+        });
+      }
     }
   },
 

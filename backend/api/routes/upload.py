@@ -99,23 +99,57 @@ async def get_upload_history(
         conn = get_connection()
         tenant_filter = get_tenant_filter_sql(tenant_id)
         
-        sql = f"""
-        SELECT
-            ingestion_id,
-            filename,
-            uploaded_at,
-            rows_inserted,
-            date_range_start,
-            date_range_end,
-            validation_status,
-            file_size,
-            file_hash,
-            processing_time_seconds
-        FROM ingestion_log
-        WHERE {tenant_filter}
-        ORDER BY uploaded_at DESC
-        LIMIT 100
-        """
+        # Get uploads from ingestion_log, but only show entries that have associated sales data
+        # This filters out orphaned ingestion_log entries where sales data was already deleted
+        if table_exists('sales'):
+            # Build tenant filter conditions for both tables
+            safe_tenant_id = tenant_id.replace("'", "''")
+            ingestion_tenant_condition = f'il.tenant_id = \'{safe_tenant_id}\''
+            sales_tenant_condition = f's.tenant_id = \'{safe_tenant_id}\''
+            
+            sql = f"""
+            SELECT DISTINCT
+                il.ingestion_id,
+                il.filename,
+                il.uploaded_at,
+                il.rows_inserted,
+                il.date_range_start,
+                il.date_range_end,
+                il.validation_status,
+                il.file_size,
+                il.file_hash,
+                il.processing_time_seconds
+            FROM ingestion_log il
+            WHERE {ingestion_tenant_condition}
+            AND EXISTS (
+                SELECT 1
+                FROM sales s
+                WHERE s.ingestion_id = il.ingestion_id
+                AND {sales_tenant_condition}
+                LIMIT 1
+            )
+            ORDER BY il.uploaded_at DESC
+            LIMIT 100
+            """
+        else:
+            # If sales table doesn't exist, fall back to showing all ingestion_log entries
+            sql = f"""
+            SELECT
+                ingestion_id,
+                filename,
+                uploaded_at,
+                rows_inserted,
+                date_range_start,
+                date_range_end,
+                validation_status,
+                file_size,
+                file_hash,
+                processing_time_seconds
+            FROM ingestion_log
+            WHERE {tenant_filter}
+            ORDER BY uploaded_at DESC
+            LIMIT 100
+            """
         
         result_df = conn.execute(sql).fetchdf()
         
@@ -251,23 +285,8 @@ async def delete_file(
         conn = get_connection()
         tenant_filter = get_tenant_filter_sql(tenant_id)
         
-        # Get file info - verify it belongs to this tenant
-        # First check if any sales rows exist for this ingestion_id AND tenant_id
-        if table_exists('sales'):
-            verify_sql = f"""
-            SELECT COUNT(*) as count
-            FROM sales
-            WHERE ingestion_id = ? AND {tenant_filter}
-            LIMIT 1
-            """
-            verify_df = conn.execute(verify_sql, [ingestion_id]).fetchdf()
-            if verify_df.empty or verify_df.iloc[0]['count'] == 0:
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"File with ingestion_id {ingestion_id} not found or does not belong to your account"
-                )
-        
         # Get file info from ingestion_log - verify it belongs to this tenant
+        # Check ingestion_log FIRST (not sales), because ingestion_log entry might exist even if sales data was already deleted
         sql = f"""
         SELECT ingestion_id, filename
         FROM ingestion_log
@@ -286,6 +305,7 @@ async def delete_file(
         filename = result_df.iloc[0]['filename']
         
         # Count rows to be deleted (TENANT ISOLATED)
+        # Note: Sales rows might already be deleted, so we check but don't require them to exist
         deleted_rows = 0
         if table_exists('sales'):
             count_sql = f"""
@@ -298,21 +318,21 @@ async def delete_file(
                 deleted_rows = int(count_df.iloc[0]['count'])
         
         # Delete rows from sales table (TENANT ISOLATED)
-        if table_exists('sales') and deleted_rows > 0:
+        # Delete even if count is 0 (in case of race conditions or partial deletions)
+        if table_exists('sales'):
             delete_sql = f"""
             DELETE FROM sales
             WHERE ingestion_id = ? AND {tenant_filter}
             """
             conn.execute(delete_sql, [ingestion_id])
         
-        # Delete from ingestion_log (tenant-isolated)
-        # Since we already verified the ingestion belongs to this tenant, we can safely delete it
-        if deleted_rows > 0 or table_exists('ingestion_log'):
-            delete_log_sql = f"""
-            DELETE FROM ingestion_log
-            WHERE ingestion_id = ? AND {tenant_filter}
-            """
-            conn.execute(delete_log_sql, [ingestion_id])
+        # Always delete from ingestion_log (tenant-isolated)
+        # This ensures the entry is removed even if sales data was already deleted
+        delete_log_sql = f"""
+        DELETE FROM ingestion_log
+        WHERE ingestion_id = ? AND {tenant_filter}
+        """
+        conn.execute(delete_log_sql, [ingestion_id])
         
         return {
             'success': True,

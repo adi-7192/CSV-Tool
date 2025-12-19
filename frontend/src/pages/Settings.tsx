@@ -24,8 +24,10 @@ import {
   DeleteOutlined,
   CheckCircleOutlined,
   ExclamationCircleOutlined,
+  LockOutlined,
 } from '@ant-design/icons';
 import { apiKeyService, APIKeyInfo } from '@/services/apiKeyService';
+import { usersService } from '@/services/api';
 import { useAuthStore } from '@/store/authStore';
 import { COLORS, SPACING, BORDER_RADIUS, SHADOWS } from '@/styles/designTokens';
 import { CheckCircleOutlined as CheckIcon, RocketOutlined } from '@ant-design/icons';
@@ -57,6 +59,14 @@ const Settings: React.FC = () => {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Change password state
+  const [changePasswordVisible, setChangePasswordVisible] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
 
   // Fetch API keys on mount
   useEffect(() => {
@@ -562,6 +572,39 @@ const Settings: React.FC = () => {
         </Space>
       </Card>
 
+      {/* Security Section */}
+      <Card
+        style={{
+          marginBottom: SPACING.lg,
+          borderRadius: BORDER_RADIUS.md,
+          boxShadow: SHADOWS.card,
+        }}
+      >
+        <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          <div>
+            <Title level={3} style={{ marginBottom: SPACING.xs }}>
+              <LockOutlined style={{ marginRight: SPACING.xs, color: COLORS.primary }} />
+              Security
+            </Title>
+            <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+              Manage your account security and password
+            </Paragraph>
+          </div>
+
+          <div>
+            <Button
+              type="primary"
+              onClick={() => setChangePasswordVisible(true)}
+              style={{
+                borderRadius: BORDER_RADIUS.md,
+              }}
+            >
+              Change Password
+            </Button>
+          </div>
+        </Space>
+      </Card>
+
       {/* API Keys Section */}
       <Card
         style={{
@@ -748,6 +791,168 @@ const Settings: React.FC = () => {
             message="This action cannot be undone"
             description="You will need to add your API key again if you want to use this provider in the future."
             type="warning"
+            showIcon
+            style={{ borderRadius: BORDER_RADIUS.md }}
+          />
+        </Space>
+      </Modal>
+
+      {/* Change Password Modal */}
+      <Modal
+        title={
+          <Space>
+            <LockOutlined />
+            <span>Change Password</span>
+          </Space>
+        }
+        open={changePasswordVisible}
+        onCancel={() => {
+          setChangePasswordVisible(false);
+          setCurrentPassword('');
+          setNewPassword('');
+          setConfirmPassword('');
+          setPasswordError(null);
+        }}
+        footer={[
+          <Button
+            key="cancel"
+            onClick={() => {
+              setChangePasswordVisible(false);
+              setCurrentPassword('');
+              setNewPassword('');
+              setConfirmPassword('');
+              setPasswordError(null);
+            }}
+            disabled={changingPassword}
+            style={{ borderRadius: BORDER_RADIUS.md }}
+          >
+            Cancel
+          </Button>,
+          <Button
+            key="change"
+            type="primary"
+            icon={changingPassword ? <Spin size="small" /> : <CheckCircleOutlined />}
+            onClick={async () => {
+              setPasswordError(null);
+
+              // Validation
+              if (!currentPassword) {
+                setPasswordError('Please enter your current password');
+                return;
+              }
+
+              if (!newPassword) {
+                setPasswordError('Please enter a new password');
+                return;
+              }
+
+              if (newPassword.length < 8) {
+                setPasswordError('New password must be at least 8 characters long');
+                return;
+              }
+
+              if (newPassword !== confirmPassword) {
+                setPasswordError('New passwords do not match');
+                return;
+              }
+
+              if (currentPassword === newPassword) {
+                setPasswordError('New password must be different from current password');
+                return;
+              }
+
+              setChangingPassword(true);
+              try {
+                await usersService.changePassword(currentPassword, newPassword);
+                message.success('Password changed successfully. Please log in again.');
+                setChangePasswordVisible(false);
+                setCurrentPassword('');
+                setNewPassword('');
+                setConfirmPassword('');
+                
+                // Logout user after password change (sessions are invalidated)
+                setTimeout(() => {
+                  window.location.href = '/login';
+                }, 2000);
+              } catch (error: any) {
+                const errorMessage = error.response?.data?.detail || error.message || 'Failed to change password';
+                setPasswordError(errorMessage);
+                message.error(errorMessage);
+              } finally {
+                setChangingPassword(false);
+              }
+            }}
+            loading={changingPassword}
+            style={{ borderRadius: BORDER_RADIUS.md }}
+          >
+            Change Password
+          </Button>,
+        ]}
+        style={{ borderRadius: BORDER_RADIUS.md }}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <div>
+            <Text strong style={{ display: 'block', marginBottom: SPACING.xs }}>
+              Current Password
+            </Text>
+            <Password
+              placeholder="Enter your current password"
+              value={currentPassword}
+              onChange={(e) => {
+                setCurrentPassword(e.target.value);
+                setPasswordError(null);
+              }}
+              disabled={changingPassword}
+              style={{ width: '100%', borderRadius: BORDER_RADIUS.md }}
+            />
+          </div>
+
+          <div>
+            <Text strong style={{ display: 'block', marginBottom: SPACING.xs }}>
+              New Password
+            </Text>
+            <Password
+              placeholder="Enter your new password (min 8 characters)"
+              value={newPassword}
+              onChange={(e) => {
+                setNewPassword(e.target.value);
+                setPasswordError(null);
+              }}
+              disabled={changingPassword}
+              style={{ width: '100%', borderRadius: BORDER_RADIUS.md }}
+            />
+          </div>
+
+          <div>
+            <Text strong style={{ display: 'block', marginBottom: SPACING.xs }}>
+              Confirm New Password
+            </Text>
+            <Password
+              placeholder="Confirm your new password"
+              value={confirmPassword}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value);
+                setPasswordError(null);
+              }}
+              disabled={changingPassword}
+              style={{ width: '100%', borderRadius: BORDER_RADIUS.md }}
+            />
+          </div>
+
+          {passwordError && (
+            <Alert
+              message="Error"
+              description={passwordError}
+              type="error"
+              showIcon
+              style={{ borderRadius: BORDER_RADIUS.md }}
+            />
+          )}
+
+          <Alert
+            message="Security Note"
+            description="After changing your password, all active sessions will be invalidated and you'll need to log in again."
+            type="info"
             showIcon
             style={{ borderRadius: BORDER_RADIUS.md }}
           />

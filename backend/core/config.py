@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # API Settings
     API_PREFIX: str = "/api"
     DEBUG: bool = False
+    ENV: str = "development"  # "development" or "production"
 
     # Database (relative to project root)
     DATABASE_PATH: str = "../data/analytics.duckdb"
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "../data/raw"
 
     # Frontend
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "http://localhost:5173"  # Default to Vite dev server port
 
     # API Key Encryption
     API_KEY_ENCRYPTION_KEY: Optional[str] = None
@@ -45,12 +46,24 @@ class Settings(BaseSettings):
     # Email/SMTP Configuration
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
-    SMTP_USER: str = ""
+    SMTP_USERNAME: str = ""  # Primary field name
     SMTP_PASSWORD: str = ""
-    SMTP_FROM_EMAIL: str = ""
+    SMTP_FROM: str = ""  # Primary field name
     SMTP_FROM_NAME: str = "Datadost Analytics"
     SMTP_USE_TLS: bool = True
     SMTP_USE_SSL: bool = False
+    
+    # Backward compatibility: support both old and new env var names
+    SMTP_USER: str = ""  # Legacy name (will be set from env if present)
+    SMTP_FROM_EMAIL: str = ""  # Legacy name (will be set from env if present)
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # If legacy env vars are set but new ones aren't, use legacy values
+        if not self.SMTP_USERNAME and self.SMTP_USER:
+            self.SMTP_USERNAME = self.SMTP_USER
+        if not self.SMTP_FROM and self.SMTP_FROM_EMAIL:
+            self.SMTP_FROM = self.SMTP_FROM_EMAIL
     
     # Rate Limiting (requests per window)
     RATE_LIMIT_FORGOT_PASSWORD_PER_IP: int = 5  # per 15 minutes
@@ -59,9 +72,31 @@ class Settings(BaseSettings):
     
     # Redis (optional - for distributed rate limiting)
     REDIS_URL: Optional[str] = None  # e.g., "redis://localhost:6379/0"
+    REQUIRE_REDIS_RATE_LIMITING: bool = False  # Require Redis for rate limiting (auto-set based on ENV)
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # If legacy env vars are set but new ones aren't, use legacy values
+        if not self.SMTP_USERNAME and self.SMTP_USER:
+            self.SMTP_USERNAME = self.SMTP_USER
+        if not self.SMTP_FROM and self.SMTP_FROM_EMAIL:
+            self.SMTP_FROM = self.SMTP_FROM_EMAIL
+        
+        # Auto-set REQUIRE_REDIS_RATE_LIMITING based on ENV if not explicitly set
+        if "REQUIRE_REDIS_RATE_LIMITING" not in kwargs:
+            if self.ENV.lower() == "production":
+                self.REQUIRE_REDIS_RATE_LIMITING = True
+            else:
+                self.REQUIRE_REDIS_RATE_LIMITING = False
 
     # Logging
     LOG_LEVEL: str = "INFO"
+    
+    # Monitoring/Observability
+    MONITORING_ENABLED: bool = True
+    MONITORING_LOG_ALL_REQUESTS: bool = False  # If False, only log slow requests and errors
+    MONITORING_SLOW_MS: int = 1000  # Threshold in milliseconds for slow requests
+    MONITORING_RETENTION_DAYS: int = 7  # Days to keep events before cleanup
 
     class Config:
         env_file = "../.env"  # Look for .env in project root

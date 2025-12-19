@@ -714,6 +714,13 @@ export const usersService = {
     const response = await apiClient.post('/api/users/onboarded');
     return response.data;
   },
+  changePassword: async (currentPassword: string, newPassword: string): Promise<{ success: boolean; message: string }> => {
+    const response = await apiClient.post<{ success: boolean; message: string }>('/api/auth/change-password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+    return response.data;
+  },
 };
 
 // ============================================================================
@@ -728,11 +735,47 @@ export interface User {
   onboarded: boolean;
   tenant_id: string | null;
   created_at: string;
+  is_active?: boolean;
+  last_login_at?: string | null;
+}
+
+export interface TenantUsage {
+  tenant_id: string;
+  user_email: string;
+  file_count: number;
+  row_count: number;
+  last_upload_at: string | null;
 }
 
 export const adminService = {
   getUsers: async (): Promise<User[]> => {
     const response = await apiClient.get<User[]>('/api/admin/users');
+    return response.data;
+  },
+  activateUser: async (userId: number): Promise<{ success: boolean; message: string }> => {
+    const response = await apiClient.patch<{ success: boolean; message: string }>(`/api/admin/users/${userId}/activate`);
+    return response.data;
+  },
+  deactivateUser: async (userId: number): Promise<{ success: boolean; message: string }> => {
+    const response = await apiClient.patch<{ success: boolean; message: string }>(`/api/admin/users/${userId}/deactivate`);
+    return response.data;
+  },
+  getTenantsUsage: async (): Promise<TenantUsage[]> => {
+    const response = await apiClient.get<TenantUsage[]>('/api/admin/tenants/usage');
+    return response.data;
+  },
+  deleteTenant: async (tenantId: string, deleteUser: boolean = false): Promise<{ success: boolean; deleted_rows: number; users_deleted: number; message: string }> => {
+    const response = await apiClient.delete<{ success: boolean; deleted_rows: number; users_deleted: number; message: string }>(
+      `/api/admin/tenants/${tenantId}`,
+      { 
+        data: { confirm: 'DELETE', delete_user: deleteUser },
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    return response.data;
+  },
+  getStatsSummary: async (): Promise<{ total_users: number; active_users: number; total_records: number; api_calls_30d: number }> => {
+    const response = await apiClient.get<{ total_users: number; active_users: number; total_records: number; api_calls_30d: number }>('/api/admin/stats/summary');
     return response.data;
   },
 };
@@ -794,6 +837,114 @@ export const dataService = {
       console.error('Error fetching data summary:', error);
       // Return no data on error to show empty state
       return { has_data: false, row_count: 0 };
+    }
+  },
+};
+
+// ============================================================================
+// ADMIN MONITORING SERVICE
+// ============================================================================
+
+export interface MonitoringEvent {
+  id: number;
+  created_at: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  category: string;
+  message: string;
+  endpoint: string | null;
+  method: string | null;
+  status_code: number | null;
+  duration_ms: number | null;
+  tenant_id: string | null;
+  user_id: string | null;
+  request_id: string | null;
+  meta: any;
+}
+
+export interface MonitoringEventsResponse {
+  events: MonitoringEvent[];
+  total: number;
+  limit: number;
+}
+
+export interface MonitoringSummaryResponse {
+  counts_by_level: {
+    INFO?: number;
+    WARN?: number;
+    ERROR?: number;
+  };
+  top_error_endpoints: Array<{
+    endpoint: string;
+    method: string;
+    error_count: number;
+  }>;
+  top_slow_endpoints: Array<{
+    endpoint: string;
+    method: string;
+    avg_duration_ms: number;
+    request_count: number;
+  }>;
+}
+
+export interface MonitoringHealthResponse {
+  db_ok: boolean;
+  redis_ok: boolean | null;
+  app_version: string;
+  uptime_seconds: number | null;
+}
+
+export const adminMonitoring = {
+  /**
+   * Get monitoring events with filtering
+   */
+  async getEvents(params?: {
+    level?: string;
+    category?: string;
+    endpoint?: string;
+    tenant_id?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<MonitoringEventsResponse> {
+    try {
+      const response = await apiClient.get<MonitoringEventsResponse>(
+        '/api/admin/monitoring/events',
+        { params }
+      );
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching monitoring events:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get monitoring summary statistics
+   */
+  async getSummary(): Promise<MonitoringSummaryResponse> {
+    try {
+      const response = await apiClient.get<MonitoringSummaryResponse>(
+        '/api/admin/monitoring/summary'
+      );
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching monitoring summary:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get system health status
+   */
+  async getHealth(): Promise<MonitoringHealthResponse> {
+    try {
+      const response = await apiClient.get<MonitoringHealthResponse>(
+        '/api/admin/monitoring/health'
+      );
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching monitoring health:', error);
+      throw error;
     }
   },
 };

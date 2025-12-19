@@ -59,9 +59,10 @@ LOG_LEVEL=INFO
 
 - `GET /` - Root endpoint
 - `GET /api/health` - Basic health check
-- `GET /api/health/detailed` - Detailed health (DB + Ollama)
+- `GET /api/health/detailed` - Detailed health (DB + ChromaDB + Ollama)
 - `GET /api/docs` - Interactive API documentation (Swagger)
 - `GET /api/redoc` - Alternative API documentation (ReDoc)
+- `POST /api/admin/backups/create` - Create backup (admin only)
 
 ## Development
 
@@ -76,6 +77,33 @@ pytest tests/
 cd backend
 uvicorn main:app --reload
 ```
+
+## Backup & Restore
+
+See [Backup and Monitoring Guide](docs/BACKUP_AND_MONITORING.md) for complete documentation.
+
+**Quick backup:**
+```bash
+python scripts/backup.py
+```
+
+**Restore (⚠️ stop server first):**
+```bash
+python scripts/restore.py backups/backup_YYYYMMDD_HHMMSS --confirm
+```
+
+## Monitoring & Logging
+
+**Structured logging:**
+- All requests include `request_id`, `user_id`, `tenant_id`
+- Logs stored in `backend/logs/`
+- Configurable via `LOG_LEVEL` env var
+
+**Health checks:**
+- Basic: `GET /api/health`
+- Detailed: `GET /api/health/detailed` (includes DB, ChromaDB, Ollama status)
+
+See [Backup and Monitoring Guide](docs/BACKUP_AND_MONITORING.md) for details.
 
 ## Docker
 

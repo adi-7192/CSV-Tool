@@ -1,14 +1,37 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Typography, Space, message } from 'antd';
+import { Card, Button, Typography, Space, message, Spin } from 'antd';
 import { UploadOutlined, DatabaseOutlined, CheckCircleOutlined } from '@ant-design/icons';
 import { useAuthStore } from '@/store/authStore';
+import { dataService } from '@/services/api';
 
 const { Title, Text, Paragraph } = Typography;
 
 const Onboarding: React.FC = () => {
   const navigate = useNavigate();
   const { markOnboarded } = useAuthStore();
+  const [checkingData, setCheckingData] = useState(true);
+
+  // Check if user already has data - if so, redirect to dashboard
+  useEffect(() => {
+    const checkData = async () => {
+      try {
+        const summary = await dataService.getSummary();
+        if (summary.has_data && summary.row_count > 0) {
+          // User has data → redirect to dashboard
+          navigate('/app/dashboard', { replace: true });
+          return;
+        }
+      } catch (error) {
+        console.error('Failed to check data:', error);
+        // If check fails, show onboarding (user might not have data)
+      } finally {
+        setCheckingData(false);
+      }
+    };
+
+    checkData();
+  }, [navigate]);
 
   const handleUploadCSV = async () => {
     try {
@@ -38,6 +61,22 @@ const Onboarding: React.FC = () => {
       navigate('/app/dashboard');
     }
   };
+
+  // Show loading while checking data
+  if (checkingData) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '60vh',
+        }}
+      >
+        <Spin size="large" />
+      </div>
+    );
+  }
 
   return (
     <div

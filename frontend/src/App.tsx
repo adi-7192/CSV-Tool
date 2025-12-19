@@ -24,7 +24,9 @@ import Workspace from '@/pages/Workspace';
 import AIAnalyst from '@/pages/AIAnalyst';
 import DataManagement from '@/pages/DataManagement';
 import Settings from '@/pages/Settings';
+import Profile from '@/pages/Profile';
 import Onboarding from '@/pages/Onboarding';
+import DataAwareRedirect from '@/components/DataAwareRedirect';
 
 // Admin pages
 import AdminLayout from '@/layouts/AdminLayout';
@@ -33,6 +35,7 @@ import AdminUsersPage from '@/pages/admin/AdminUsersPage';
 import AdminTenantsPage from '@/pages/admin/AdminTenantsPage';
 import AdminUsagePage from '@/pages/admin/AdminUsagePage';
 import AdminSystemPage from '@/pages/admin/AdminSystemPage';
+import AdminMonitoringPage from '@/pages/admin/AdminMonitoringPage';
 
 dayjs.locale('en');
 
@@ -108,8 +111,9 @@ function AppContent() {
                     <Route path="workspace" element={<Workspace />} />
                     <Route path="analyst" element={<AIAnalyst />} />
                     <Route path="data-management" element={<DataManagement />} />
+                    <Route path="profile" element={<Profile />} />
                     <Route path="settings" element={<Settings />} />
-                    <Route path="" element={<Navigate to="/app/dashboard" replace />} />
+                    <Route path="" element={<DataAwareRedirect />} />
                   </Routes>
                 </AppLayout>
               </ProtectedRoute>
@@ -128,6 +132,7 @@ function AppContent() {
                     <Route path="tenants" element={<AdminTenantsPage />} />
                     <Route path="usage" element={<AdminUsagePage />} />
                     <Route path="system" element={<AdminSystemPage />} />
+                    <Route path="monitoring" element={<AdminMonitoringPage />} />
                   </Routes>
                 </AdminLayout>
               </AdminRoute>

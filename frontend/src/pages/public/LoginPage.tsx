@@ -1,24 +1,43 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Form, Input, Button, Card, Alert } from 'antd';
 import { MailOutlined, LockOutlined } from '@ant-design/icons';
 import { useAuthStore } from '@/store/authStore';
+import { dataService } from '@/services/api';
 
 const LoginPage: React.FC = () => {
   const navigate = useNavigate();
   const { login, loading, error, clearError, user } = useAuthStore();
   const [form] = Form.useForm();
+  const [checkingData, setCheckingData] = useState(false);
 
   // Redirect if already logged in
   useEffect(() => {
-    if (user && !loading) {
-      // All roles follow the same redirect logic
-      if (!user.onboarded) {
-        navigate('/app/onboarding');
-      } else {
-        navigate('/app/dashboard');
+    const checkDataAndRedirect = async () => {
+      if (user && !loading) {
+        setCheckingData(true);
+        try {
+          // Check if user has data in the database
+          const dataSummary = await dataService.getSummary();
+          
+          if (dataSummary.has_data && dataSummary.row_count > 0) {
+            // User has data → go directly to dashboard
+            navigate('/app/dashboard');
+          } else {
+            // User has no data → show onboarding
+            navigate('/app/onboarding');
+          }
+        } catch (err) {
+          // If check fails, default to onboarding (safer)
+          console.error('Failed to check user data:', err);
+          navigate('/app/onboarding');
+        } finally {
+          setCheckingData(false);
+        }
       }
-    }
+    };
+
+    checkDataAndRedirect();
   }, [user, loading, navigate]);
 
   const handleSubmit = async (values: { email: string; password: string }) => {

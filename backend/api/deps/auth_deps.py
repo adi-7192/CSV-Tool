@@ -59,6 +59,14 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    # Check if user is active
+    if not user.is_active:
+        logger.warning(f"Inactive user {user_id} attempted to access protected endpoint")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated. Please contact support.",
+        )
+    
     # SESSION INVALIDATION: Validate token version
     # If password was changed after token was issued, token_version will be incremented
     # and this token will be rejected, forcing user to login again

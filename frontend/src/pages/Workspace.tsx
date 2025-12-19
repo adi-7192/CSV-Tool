@@ -56,6 +56,7 @@ const Workspace: React.FC = () => {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [detectedMapping, setDetectedMapping] = useState<Record<string, string>>({});
   const [csvColumns, setCsvColumns] = useState<string[]>([]);
+  const [uploadRowErrors, setUploadRowErrors] = useState<Array<{row: number; column: string; reason: string}>>([]);
 
   // Check data availability on mount (only when authenticated)
   useEffect(() => {
@@ -198,10 +199,17 @@ const Workspace: React.FC = () => {
   const handleFileUpload = async (file: File) => {
     setUploading(true);
     setUploadStatus(null);
+    setUploadRowErrors([]); // Clear previous row errors
     setPendingFile(file);
     
     try {
       const result = await uploadCSV(file);
+      
+      // Extract row_errors from response if present (both success and error cases)
+      const rowErrors = (result && 'row_errors' in result && Array.isArray(result.row_errors)) 
+        ? result.row_errors.slice(0, 20) // Limit to 20 as per backend
+        : [];
+      setUploadRowErrors(rowErrors);
       
       // Handle duplicate upload
       if (result && 'error' in result && result.error === 'DUPLICATE_UPLOAD') {
@@ -284,6 +292,13 @@ const Workspace: React.FC = () => {
       console.error('Upload error:', error);
       let errorMessage = 'Upload failed. ';
       
+      // Extract row_errors from error response if present
+      const responseData = error.response?.data;
+      const rowErrors = (responseData && 'row_errors' in responseData && Array.isArray(responseData.row_errors))
+        ? responseData.row_errors.slice(0, 20) // Limit to 20 as per backend
+        : [];
+      setUploadRowErrors(rowErrors);
+      
       if (error.code === 'ERR_NETWORK' || !error.response) {
         errorMessage += 'Unable to connect to server. Please check if the backend is running.';
       } else if (error.response?.status === 401) {
@@ -292,7 +307,6 @@ const Workspace: React.FC = () => {
         errorMessage += 'File too large. Maximum size is 100MB.';
       } else if (error.response?.status === 400) {
         // Check if it's a mapping error
-        const responseData = error.response?.data;
         if (responseData?.error === 'REQUIRED_COLUMNS_MISSING') {
           // Handle mapping error - show modal
           const errorData: RequiredColumnsError = {
@@ -595,9 +609,62 @@ const Workspace: React.FC = () => {
                 showIcon
                 icon={uploadStatus.success ? <CheckCircleOutlined /> : undefined}
                 closable
-                onClose={() => setUploadStatus(null)}
+                onClose={() => {
+                  setUploadStatus(null);
+                  setUploadRowErrors([]);
+                }}
                 style={{ marginTop: '16px', maxWidth: '500px', margin: '16px auto 0' }}
               />
+            )}
+            
+            {/* Row-level errors display */}
+            {uploadRowErrors.length > 0 && (
+              <Card
+                style={{
+                  marginTop: '16px',
+                  maxWidth: '500px',
+                  margin: '16px auto 0',
+                  border: '1px solid #FEE2E2',
+                  backgroundColor: '#FEF2F2',
+                }}
+              >
+                <div style={{ marginBottom: '12px' }}>
+                  <h4 style={{ margin: 0, color: '#991B1B', fontSize: '16px', fontWeight: '600' }}>
+                    Row-level issues found
+                  </h4>
+                  <p style={{ margin: '4px 0 0 0', color: '#7F1D1D', fontSize: '13px' }}>
+                    Fix these rows and re-upload.
+                  </p>
+                </div>
+                <Table
+                  dataSource={uploadRowErrors.map((err, idx) => ({ ...err, key: idx }))}
+                  columns={[
+                    {
+                      title: 'Row',
+                      dataIndex: 'row',
+                      key: 'row',
+                      width: 80,
+                      render: (row: number) => <strong>{row}</strong>,
+                    },
+                    {
+                      title: 'Column',
+                      dataIndex: 'column',
+                      key: 'column',
+                      width: 120,
+                    },
+                    {
+                      title: 'Reason',
+                      dataIndex: 'reason',
+                      key: 'reason',
+                      ellipsis: true,
+                    },
+                  ]}
+                  pagination={false}
+                  size="small"
+                  scroll={{ y: 200 }}
+                  style={{ fontSize: '13px' }}
+                />
+              </Card>
             )}
           </div>
         </Card>
@@ -730,9 +797,60 @@ const Workspace: React.FC = () => {
             showIcon
             icon={uploadStatus.success ? <CheckCircleOutlined /> : undefined}
             closable
-            onClose={() => setUploadStatus(null)}
+            onClose={() => {
+              setUploadStatus(null);
+              setUploadRowErrors([]);
+            }}
             style={{ marginTop: '16px' }}
           />
+        )}
+        
+        {/* Row-level errors display */}
+        {uploadRowErrors.length > 0 && (
+          <Card
+            style={{
+              marginTop: '16px',
+              border: '1px solid #FEE2E2',
+              backgroundColor: '#FEF2F2',
+            }}
+          >
+            <div style={{ marginBottom: '12px' }}>
+              <h4 style={{ margin: 0, color: '#991B1B', fontSize: '16px', fontWeight: '600' }}>
+                Row-level issues found
+              </h4>
+              <p style={{ margin: '4px 0 0 0', color: '#7F1D1D', fontSize: '13px' }}>
+                Fix these rows and re-upload.
+              </p>
+            </div>
+            <Table
+              dataSource={uploadRowErrors.map((err, idx) => ({ ...err, key: idx }))}
+              columns={[
+                {
+                  title: 'Row',
+                  dataIndex: 'row',
+                  key: 'row',
+                  width: 80,
+                  render: (row: number) => <strong>{row}</strong>,
+                },
+                {
+                  title: 'Column',
+                  dataIndex: 'column',
+                  key: 'column',
+                  width: 120,
+                },
+                {
+                  title: 'Reason',
+                  dataIndex: 'reason',
+                  key: 'reason',
+                  ellipsis: true,
+                },
+              ]}
+              pagination={false}
+              size="small"
+              scroll={{ y: 200 }}
+              style={{ fontSize: '13px' }}
+            />
+          </Card>
         )}
       </Card>
 

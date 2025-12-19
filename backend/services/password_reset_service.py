@@ -231,14 +231,49 @@ def update_user_password(user_id: int, new_password_hash: str) -> bool:
     except ImportError:
         now = datetime.utcnow()
     
-    conn.execute(
-        """
-        UPDATE users
-        SET password_hash = ?, password_changed_at = ?, token_version = token_version + 1
-        WHERE id = ?
-        """,
-        [new_password_hash, now, user_id]
-    )
+    # Update password, password_changed_at, and increment token_version
+    # Note: password_changed_at and token_version should exist due to migrations,
+    # but we handle gracefully if they don't (for backward compatibility)
+    try:
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?, password_changed_at = ?, token_version = token_version + 1
+            WHERE id = ?
+            """,
+            [new_password_hash, now, user_id]
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+        # If password_changed_at or token_version columns don't exist, try without them
+        if "password_changed_at" in error_str or "token_version" in error_str:
+            logger.warning(f"Some columns not found, trying simpler update: {e}")
+            # Try with just password_hash and token_version
+            try:
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET password_hash = ?, token_version = token_version + 1
+                    WHERE id = ?
+                    """,
+                    [new_password_hash, user_id]
+                )
+            except Exception as e2:
+                # If token_version also doesn't exist, just update password_hash
+                if "token_version" in str(e2).lower():
+                    logger.warning(f"token_version column not found, updating only password_hash: {e2}")
+                    conn.execute(
+                        """
+                        UPDATE users
+                        SET password_hash = ?
+                        WHERE id = ?
+                        """,
+                        [new_password_hash, user_id]
+                    )
+                else:
+                    raise
+        else:
+            raise
     
     logger.info(f"Password updated for user {user_id}")
     return True

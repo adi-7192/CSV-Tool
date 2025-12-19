@@ -461,9 +461,30 @@ async def reset_tenant_data(
                 conn.execute(delete_sql)
         
         # 2. Delete ingestion logs for this tenant (tenant-isolated)
+        # Always delete ingestion_log entries, even if sales data was already deleted
         if table_exists('ingestion_log'):
             delete_log_sql = f"DELETE FROM ingestion_log WHERE {tenant_filter}"
             conn.execute(delete_log_sql)
+            
+            # Also clean up any orphaned ingestion_log entries for this tenant
+            # (in case some were missed in previous deletions)
+            if table_exists('sales'):
+                cleanup_sql = f"""
+                DELETE FROM ingestion_log
+                WHERE {tenant_filter}
+                AND ingestion_id NOT IN (
+                    SELECT DISTINCT ingestion_id 
+                    FROM sales 
+                    WHERE ingestion_id IS NOT NULL AND {tenant_filter}
+                )
+                """
+                try:
+                    conn.execute(cleanup_sql)
+                except Exception as e:
+                    # If cleanup fails, log but don't fail the operation
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Failed to cleanup orphaned ingestion_log entries: {e}")
         
         # 3. Delete tenant's ChromaDB collection
         try:

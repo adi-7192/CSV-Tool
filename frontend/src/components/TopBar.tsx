@@ -34,6 +34,14 @@ const TopBar: React.FC = () => {
   // Profile menu items
   const profileMenuItems: MenuProps['items'] = [
     {
+      key: 'profile',
+      icon: <UserOutlined />,
+      label: 'Profile',
+      onClick: () => {
+        navigate('/app/profile');
+      },
+    },
+    {
       key: 'settings',
       icon: <SettingOutlined />,
       label: 'Settings',

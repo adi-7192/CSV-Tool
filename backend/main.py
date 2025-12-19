@@ -7,10 +7,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from api.routes import health, upload, metrics, charts, chat, verification, data_status, data_routes, file_routes, user_api_keys, auth, users, admin_users
+from api.routes import health, upload, metrics, charts, chat, verification, data_status, data_routes, file_routes, user_api_keys, auth, users, admin_users, admin_monitoring, admin_stats
 from core.config import settings
 from core.database import init_database
 from utils.logger import setup_logger, app_logger
+from utils.monitoring_middleware import MonitoringMiddleware
+from services.monitoring_service import cleanup_old_events
+import logging
+
+# Configure logging level from settings
+log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+logging.basicConfig(level=log_level)
 
 # Initialize logging
 logger = setup_logger('main')
@@ -21,12 +28,64 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
     logger.info("🚀 Starting Analytics API...")
+    logger.info(f"Environment: {settings.ENV}")
     logger.info(f"Database path: {settings.DATABASE_PATH}")
     logger.info(f"Ollama URL: {settings.OLLAMA_URL}")
     logger.info(f"Debug mode: {settings.DEBUG}")
     
+    # Validate email configuration in production
+    if settings.ENV.lower() == "production":
+        from services.email_service import validate_email_config
+        is_valid, error_msg = validate_email_config()
+        if not is_valid:
+            logger.error(f"❌ Email configuration validation failed: {error_msg}")
+            logger.error("Application will start but email sending will fail.")
+            logger.error("Set ENV=development to allow dry-run mode, or configure SMTP settings.")
+        else:
+            logger.info("✅ Email configuration validated")
+    else:
+        logger.info("ℹ️  Development mode: Email will use dry-run (log to console)")
+    
+    # Validate Redis rate limiting in production
+    if settings.REQUIRE_REDIS_RATE_LIMITING:
+        try:
+            from utils.rate_limiter import get_rate_limiter
+            limiter = get_rate_limiter()
+            if hasattr(limiter, 'redis_available') and limiter.redis_available:
+                logger.info("✅ Redis rate limiting validated and connected")
+            else:
+                logger.error("❌ Redis rate limiting is required but Redis is unavailable")
+                logger.error("Application will fail rate limit checks. Please configure Redis.")
+        except RuntimeError as e:
+            logger.error(f"❌ Redis rate limiting validation failed: {e}")
+            logger.error("Application will start but rate-limited endpoints will return 503.")
+            logger.error("Set REQUIRE_REDIS_RATE_LIMITING=false to allow in-memory fallback.")
+    else:
+        # Check if Redis is available but not required
+        if settings.REDIS_URL:
+            try:
+                from utils.rate_limiter import get_rate_limiter
+                limiter = get_rate_limiter()
+                if hasattr(limiter, 'redis_available') and limiter.redis_available:
+                    logger.info("ℹ️  Redis available (optional mode): Using Redis for rate limiting")
+                else:
+                    logger.info("ℹ️  Redis URL configured but unavailable: Using in-memory rate limiting")
+            except Exception:
+                logger.info("ℹ️  Redis URL configured but connection failed: Using in-memory rate limiting")
+        else:
+            logger.info("ℹ️  Development mode: Using in-memory rate limiting (Redis optional)")
+    
     init_database()  # Initialize database connections, create tables if needed
     logger.info("✅ Database initialized")
+    
+    # Cleanup old monitoring events on startup
+    if settings.MONITORING_ENABLED:
+        try:
+            deleted_count = cleanup_old_events()
+            if deleted_count > 0:
+                logger.info(f"✅ Cleaned up {deleted_count} old monitoring events")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup old monitoring events: {e}")
     
     yield
     
@@ -59,6 +118,10 @@ cors_origins = [
 if settings.FRONTEND_URL:
     cors_origins.append(settings.FRONTEND_URL)
 
+# Monitoring middleware (add first to capture all requests and log to system_events)
+if settings.MONITORING_ENABLED:
+    app.add_middleware(MonitoringMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -87,6 +150,8 @@ app.include_router(user_api_keys.router, prefix="/api/user/api-key", tags=["User
 
 # Admin routes (require admin role)
 app.include_router(admin_users.router, prefix="/api/admin", tags=["Admin"])
+app.include_router(admin_monitoring.router, prefix="/api/admin", tags=["Admin"])
+app.include_router(admin_stats.router, prefix="/api/admin", tags=["Admin"])
 
 
 # Root endpoint

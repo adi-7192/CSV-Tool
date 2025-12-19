@@ -23,12 +23,14 @@ async def health_check():
 @router.get("/detailed")
 async def detailed_health():
     """
-    Detailed health check - verifies database and Ollama connections
+    Detailed health check - verifies database, ChromaDB, Ollama, and Redis connections
     """
     health_status = {
         "api": "healthy",
         "database": "unknown",
+        "chromadb": "unknown",
         "ollama": "unknown",
+        "redis": "unknown",
     }
 
     # Check database
@@ -39,6 +41,20 @@ async def detailed_health():
     except Exception as e:
         health_status["database"] = f"error: {str(e)}"
 
+    # Check ChromaDB
+    try:
+        from services.embedding_service import get_chroma_client, is_chromadb_available
+        if is_chromadb_available():
+            client = get_chroma_client()
+            # Try to list collections as a connectivity test
+            collections = client.list_collections()
+            health_status["chromadb"] = "connected"
+            health_status["chromadb_collections"] = len(collections)
+        else:
+            health_status["chromadb"] = "unavailable"
+    except Exception as e:
+        health_status["chromadb"] = f"error: {str(e)}"
+
     # Check Ollama
     try:
         ollama_status = check_ollama_connection()
@@ -46,11 +62,32 @@ async def detailed_health():
     except Exception as e:
         health_status["ollama"] = f"error: {str(e)}"
 
-    # Overall status
-    all_healthy = (
-        health_status["database"] == "connected" and
-        health_status["ollama"] == "connected"
-    )
+    # Check Redis (for rate limiting)
+    try:
+        from utils.rate_limiter import get_rate_limiter, RedisRateLimiter
+        
+        limiter = get_rate_limiter()
+        if isinstance(limiter, RedisRateLimiter) and limiter.redis_available:
+            # Test connection with ping
+            limiter.redis_client.ping()
+            health_status["redis"] = "connected"
+        else:
+            if settings.REQUIRE_REDIS_RATE_LIMITING:
+                health_status["redis"] = "required_but_unavailable"
+            else:
+                health_status["redis"] = "not_configured"
+    except RuntimeError as e:
+        # Redis is required but unavailable
+        health_status["redis"] = f"required_but_unavailable: {str(e)}"
+    except Exception as e:
+        health_status["redis"] = f"error: {str(e)}"
+
+    # Overall status (database is critical, Redis is critical if required)
+    all_healthy = health_status["database"] == "connected"
+    
+    # If Redis is required but unavailable, mark as unhealthy
+    if settings.REQUIRE_REDIS_RATE_LIMITING and health_status["redis"] != "connected":
+        all_healthy = False
 
     if not all_healthy:
         raise HTTPException(status_code=503, detail=health_status)

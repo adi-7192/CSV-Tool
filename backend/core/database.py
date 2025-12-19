@@ -146,6 +146,10 @@ def init_database():
                 plan VARCHAR NOT NULL DEFAULT 'free',
                 onboarded BOOLEAN NOT NULL DEFAULT FALSE,
                 tenant_id VARCHAR,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                last_login_at TIMESTAMP,
+                password_changed_at TIMESTAMP,
+                token_version INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -161,6 +165,22 @@ def init_database():
         try:
             conn.execute("ALTER TABLE users ADD COLUMN onboarded BOOLEAN DEFAULT FALSE")
             logger.info("✅ Added 'onboarded' column to users table")
+        except Exception:
+            # Column already exists, ignore
+            pass
+        
+        # Add is_active column if it doesn't exist (migration)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT TRUE")
+            logger.info("✅ Added 'is_active' column to users table")
+        except Exception:
+            # Column already exists, ignore
+            pass
+        
+        # Add last_login_at column if it doesn't exist (migration)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN last_login_at TIMESTAMP")
+            logger.info("✅ Added 'last_login_at' column to users table")
         except Exception:
             # Column already exists, ignore
             pass
@@ -241,6 +261,37 @@ def init_database():
             logger.info("✅ Added 'token_version' column to users table")
         except Exception:
             # Column already exists, ignore
+            pass
+        
+        # Create system_events table for monitoring/observability
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS system_events (
+                id INTEGER PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                level VARCHAR NOT NULL,
+                category VARCHAR,
+                message VARCHAR,
+                endpoint VARCHAR,
+                method VARCHAR,
+                status_code INTEGER,
+                duration_ms INTEGER,
+                tenant_id VARCHAR,
+                user_id VARCHAR,
+                request_id VARCHAR,
+                meta VARCHAR
+            )
+        """)
+        
+        # Create indexes for efficient querying
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_created_at ON system_events(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_level ON system_events(level)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_category ON system_events(category)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_endpoint ON system_events(endpoint)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_tenant_id ON system_events(tenant_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_system_events_request_id ON system_events(request_id)")
+        except Exception:
+            # Indexes might already exist
             pass
         
         logger.info("✅ Database initialization complete")

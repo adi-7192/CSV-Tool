@@ -517,6 +517,85 @@ def test_user_a_cannot_export_user_b_data(
     assert export_a.text != export_b.text
 
 
+def test_user_a_cannot_export_user_b_data_parquet(
+    isolated_test_db,
+    isolated_test_chromadb,
+    test_user_a,
+    test_user_b,
+    sample_csv_data_user_a,
+    sample_csv_data_user_b,
+    tmp_path,
+):
+    """Test that User A cannot export User B's data via Parquet export endpoint"""
+    client = TestClient(app)
+    
+    # Login both users
+    token_a = get_auth_token(client, test_user_a.email, "password123")
+    token_b = get_auth_token(client, test_user_b.email, "password123")
+    
+    # Upload data for both users
+    csv_path_a = tmp_path / "user_a_data.csv"
+    sample_csv_data_user_a.to_csv(csv_path_a, index=False)
+    
+    with open(csv_path_a, 'rb') as f:
+        upload_a = client.post(
+            "/api/data/upload",
+            files={"file": ("user_a_data.csv", f, "text/csv")},
+            headers={"Authorization": f"Bearer {token_a}"}
+        )
+        assert upload_a.status_code == 200
+    
+    csv_path_b = tmp_path / "user_b_data.csv"
+    sample_csv_data_user_b.to_csv(csv_path_b, index=False)
+    
+    with open(csv_path_b, 'rb') as f:
+        upload_b = client.post(
+            "/api/data/upload",
+            files={"file": ("user_b_data.csv", f, "text/csv")},
+            headers={"Authorization": f"Bearer {token_b}"}
+        )
+        assert upload_b.status_code == 200
+    
+    # User A exports their data as Parquet (should only get User A's data)
+    export_a = client.get(
+        "/api/data/export?format=parquet",
+        headers={"Authorization": f"Bearer {token_a}"}
+    )
+    assert export_a.status_code == 200
+    
+    # Verify Parquet response headers
+    content_type = export_a.headers.get("content-type", "")
+    content_disposition = export_a.headers.get("content-disposition", "")
+    assert "application/octet-stream" in content_type or "parquet" in content_type.lower()
+    assert ".parquet" in content_disposition.lower()
+    
+    # User B exports their data as Parquet (should only get User B's data)
+    export_b = client.get(
+        "/api/data/export?format=parquet",
+        headers={"Authorization": f"Bearer {token_b}"}
+    )
+    assert export_b.status_code == 200
+    
+    # Verify Parquet response headers for User B
+    content_type_b = export_b.headers.get("content-type", "")
+    content_disposition_b = export_b.headers.get("content-disposition", "")
+    assert "application/octet-stream" in content_type_b or "parquet" in content_type_b.lower()
+    assert ".parquet" in content_disposition_b.lower()
+    
+    # Verify exports are different (different tenant data)
+    # Parquet files are binary, so compare the raw bytes
+    assert len(export_a.content) > 0, "User A export should not be empty"
+    assert len(export_b.content) > 0, "User B export should not be empty"
+    assert export_a.content != export_b.content, "Exports should differ (different tenant data)"
+    
+    # Verify Parquet file signature (magic bytes: "PAR1" at start and end)
+    # Parquet files start with "PAR1" and end with "PAR1"
+    assert export_a.content[:4] == b"PAR1", "User A export should be valid Parquet format"
+    assert export_b.content[:4] == b"PAR1", "User B export should be valid Parquet format"
+    assert export_a.content[-4:] == b"PAR1", "User A export should have Parquet footer"
+    assert export_b.content[-4:] == b"PAR1", "User B export should have Parquet footer"
+
+
 def test_user_a_cannot_delete_user_b_ingestion(
     isolated_test_db,
     isolated_test_chromadb,

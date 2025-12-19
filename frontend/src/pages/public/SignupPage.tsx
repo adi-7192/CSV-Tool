@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { Form, Input, Button, Card, Alert } from 'antd';
 import { MailOutlined, LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useAuthStore } from '@/store/authStore';
+import { dataService } from '@/services/api';
 
 const SignupPage: React.FC = () => {
   const navigate = useNavigate();
@@ -12,14 +13,28 @@ const SignupPage: React.FC = () => {
 
   // Redirect if already logged in
   useEffect(() => {
-    if (user && !loading) {
-      // All roles follow the same redirect logic
-      if (!user.onboarded) {
-        navigate('/app/onboarding');
-      } else {
-        navigate('/app/dashboard');
+    const checkDataAndRedirect = async () => {
+      if (user && !loading) {
+        try {
+          // Check if user has data in the database
+          const dataSummary = await dataService.getSummary();
+          
+          if (dataSummary.has_data && dataSummary.row_count > 0) {
+            // User has data → go directly to dashboard
+            navigate('/app/dashboard');
+          } else {
+            // User has no data → show onboarding
+            navigate('/app/onboarding');
+          }
+        } catch (err) {
+          // If check fails, default to onboarding (new users won't have data)
+          console.error('Failed to check user data:', err);
+          navigate('/app/onboarding');
+        }
       }
-    }
+    };
+
+    checkDataAndRedirect();
   }, [user, loading, navigate]);
 
   const handleSubmit = async (values: { email: string; password: string; name?: string }) => {
