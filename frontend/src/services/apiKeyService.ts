@@ -35,7 +35,7 @@ class APIKeyService {
    * Get API key for a provider
    * Note: User ID is extracted from JWT token by backend, but we keep it for backward compatibility
    */
-  async getAPIKey(provider: 'openai' | 'anthropic' | 'gemini', userId: string): Promise<APIKeyInfo | null> {
+  async getAPIKey(provider: 'openai' | 'anthropic' | 'gemini', _userId: string): Promise<APIKeyInfo | null> {
     try {
       // JWT token is automatically attached by apiClient interceptor
       const response = await apiClient.get<APIKeyResponse>(
@@ -62,7 +62,7 @@ class APIKeyService {
   async createAPIKey(
     provider: 'openai' | 'anthropic' | 'gemini',
     apiKey: string,
-    userId: string
+    _userId: string
   ): Promise<APIKeyInfo> {
     // 15 second timeout should be plenty - validation takes ~1-2 seconds
     const timeout = 15000;
@@ -90,7 +90,7 @@ class APIKeyService {
    * Delete API key
    * Note: User ID is extracted from JWT token by backend
    */
-  async deleteAPIKey(provider: 'openai' | 'anthropic' | 'gemini', userId: string): Promise<void> {
+  async deleteAPIKey(provider: 'openai' | 'anthropic' | 'gemini', _userId: string): Promise<void> {
     // JWT token is automatically attached by apiClient interceptor
     await apiClient.delete(`/api/user/api-key?provider=${provider}`);
   }
@@ -102,7 +102,7 @@ class APIKeyService {
   async updateEnabledStatus(
     provider: 'openai' | 'anthropic' | 'gemini',
     enabled: boolean,
-    userId: string
+    _userId: string
   ): Promise<APIKeyInfo> {
     // JWT token is automatically attached by apiClient interceptor
     const response = await apiClient.patch<APIKeyResponse>(

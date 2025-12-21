@@ -1,15 +1,20 @@
 """
-Data Service - Handle raw transaction data queries
+Data Service - Handle raw transaction data queries with tenant isolation
 """
 import pandas as pd
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Generator
 from datetime import datetime
 from io import BytesIO
-from core.database import execute_query, table_exists
+from core.database import execute_query, table_exists, get_connection
 import logging
 import re
+import tempfile
+import os
+from pathlib import Path
+from fastapi import HTTPException
 
 from utils.error_handler import handle_service_error, log_error
+from utils.tenant_filter import get_tenant_filter_sql
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +124,19 @@ def get_transactions(
     date_to: Optional[str] = None,
     sku: Optional[str] = None,
     transaction_type: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Get paginated transaction data from sales table
+    Get paginated transaction data from sales table with tenant isolation.
     
     Args:
         page: Page number (1-indexed)
         limit: Number of rows per page
+        date_from: Start date filter
+        date_to: End date filter
+        sku: SKU filter
+        transaction_type: Transaction type filter
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         Dictionary with data, total count, page info
@@ -267,6 +278,10 @@ def get_transactions(
         # Build WHERE clause with filters
         where_conditions = []
         
+        # TENANT ISOLATION: Always filter by tenant_id first
+        if tenant_id:
+            where_conditions.append(get_tenant_filter_sql(tenant_id))
+        
         # Date filter
         if date_from and date_col:
             col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
@@ -371,9 +386,12 @@ def get_transactions(
         }
 
 
-def get_unique_skus() -> Dict[str, Any]:
+def get_unique_skus(tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get list of unique SKU values from sales table
+    Get list of unique SKU values from sales table with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         Dictionary with list of SKUs
@@ -400,11 +418,14 @@ def get_unique_skus() -> Dict[str, Any]:
                 "skus": [],
             }
         
-        # Query distinct SKUs
+        # Build tenant filter
+        tenant_filter = get_tenant_filter_sql(tenant_id) if tenant_id else '1=1'
+        
+        # Query distinct SKUs with tenant isolation
         sql = f"""
         SELECT DISTINCT "{sku_col}" as sku
         FROM sales
-        WHERE "{sku_col}" IS NOT NULL AND TRIM("{sku_col}") != ''
+        WHERE {tenant_filter} AND "{sku_col}" IS NOT NULL AND TRIM("{sku_col}") != ''
         ORDER BY "{sku_col}" ASC
         """
         
@@ -435,9 +456,12 @@ def get_unique_skus() -> Dict[str, Any]:
         }
 
 
-def get_data_statistics() -> Dict[str, Any]:
+def get_data_statistics(tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """
-    Get data statistics: total records, date range, unique SKUs
+    Get data statistics: total records, date range, unique SKUs with tenant isolation.
+    
+    Args:
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         Dictionary with statistics
@@ -469,20 +493,23 @@ def get_data_statistics() -> Dict[str, Any]:
                 sku_col = col
                 break
         
-        # Get total records
-        count_sql = "SELECT COUNT(*) as total FROM sales"
+        # Build tenant filter
+        tenant_filter = get_tenant_filter_sql(tenant_id) if tenant_id else '1=1'
+        
+        # Get total records (with tenant isolation)
+        count_sql = f"SELECT COUNT(*) as total FROM sales WHERE {tenant_filter}"
         count_df = execute_query(count_sql)
         total_records = int(count_df['total'].iloc[0]) if not count_df.empty else 0
         
-        # Get date range
+        # Get date range (with tenant isolation)
         date_start = None
         date_end = None
         if date_col:
             col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
             if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
-                range_sql = f"SELECT MIN(CAST(\"{date_col}\" AS DATE)) as min_date, MAX(CAST(\"{date_col}\" AS DATE)) as max_date FROM sales WHERE \"{date_col}\" IS NOT NULL"
+                range_sql = f"SELECT MIN(CAST(\"{date_col}\" AS DATE)) as min_date, MAX(CAST(\"{date_col}\" AS DATE)) as max_date FROM sales WHERE {tenant_filter} AND \"{date_col}\" IS NOT NULL"
             else:
-                range_sql = f"SELECT MIN(\"{date_col}\") as min_date, MAX(\"{date_col}\") as max_date FROM sales WHERE \"{date_col}\" IS NOT NULL"
+                range_sql = f"SELECT MIN(\"{date_col}\") as min_date, MAX(\"{date_col}\") as max_date FROM sales WHERE {tenant_filter} AND \"{date_col}\" IS NOT NULL"
             
             range_df = execute_query(range_sql)
             if not range_df.empty:
@@ -493,10 +520,10 @@ def get_data_statistics() -> Dict[str, Any]:
                 if max_date is not None:
                     date_end = str(max_date)
         
-        # Get unique SKUs count
+        # Get unique SKUs count (with tenant isolation)
         unique_skus = 0
         if sku_col:
-            sku_sql = f"SELECT COUNT(DISTINCT \"{sku_col}\") as count FROM sales WHERE \"{sku_col}\" IS NOT NULL AND TRIM(\"{sku_col}\") != ''"
+            sku_sql = f"SELECT COUNT(DISTINCT \"{sku_col}\") as count FROM sales WHERE {tenant_filter} AND \"{sku_col}\" IS NOT NULL AND TRIM(\"{sku_col}\") != ''"
             sku_df = execute_query(sku_sql)
             if not sku_df.empty:
                 unique_skus = int(sku_df['count'].iloc[0])
@@ -537,15 +564,17 @@ def export_transactions_csv(
     date_to: Optional[str] = None,
     sku: Optional[str] = None,
     transaction_type: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> BytesIO:
     """
-    Export filtered transactions to CSV
+    Export filtered transactions to CSV with tenant isolation.
     
     Args:
         date_from: Start date filter
         date_to: End date filter
         sku: SKU filter
         transaction_type: Transaction type filter
+        tenant_id: User's tenant ID for data isolation
     
     Returns:
         BytesIO object with CSV content
@@ -642,6 +671,10 @@ def export_transactions_csv(
         # Build WHERE clause with filters (same logic as get_transactions)
         where_conditions = []
         
+        # TENANT ISOLATION: Always filter by tenant_id first
+        if tenant_id:
+            where_conditions.append(get_tenant_filter_sql(tenant_id))
+        
         if date_from and date_col:
             col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
             if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
@@ -690,3 +723,293 @@ def export_transactions_csv(
         df.to_csv(buffer, index=False)
         buffer.seek(0)
         return buffer
+
+
+def export_transactions_parquet(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    sku: Optional[str] = None,
+    transaction_type: Optional[str] = None,
+    ingestion_id: Optional[str] = None,
+    source_file: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> str:
+    """
+    Export filtered transactions to Parquet file with tenant isolation.
+    
+    Uses DuckDB COPY command to write Parquet file efficiently.
+    Returns path to temporary Parquet file (caller must clean up).
+    
+    Args:
+        date_from: Start date filter
+        date_to: End date filter
+        sku: SKU filter
+        transaction_type: Transaction type filter
+        ingestion_id: Filter by ingestion ID
+        source_file: Filter by source file name
+        tenant_id: User's tenant ID for data isolation
+    
+    Returns:
+        Path to temporary Parquet file
+    """
+    from core.database import get_connection, table_exists
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    if not table_exists('sales'):
+        raise HTTPException(status_code=404, detail="No data available for export")
+    
+    try:
+        conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id) if tenant_id else '1=1'
+        
+        # Detect column names dynamically
+        column_info = execute_query("DESCRIBE sales")
+        
+        # Detect date column
+        date_col = None
+        date_columns = ['order_date', 'Invoice Date', 'invoice_date', 'Order Date']
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        # Detect SKU column
+        sku_col = None
+        sku_columns = ['sku', 'Sku', 'SKU']
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        # Detect transaction type column
+        txn_col = None
+        txn_columns = ['transaction_type', 'Transaction Type']
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        # Build WHERE clause
+        where_conditions = [tenant_filter]
+        
+        if date_from and date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                where_conditions.append(f'CAST("{date_col}" AS DATE) >= \'{date_from}\'')
+            else:
+                where_conditions.append(f'"{date_col}" >= \'{date_from}\'')
+        
+        if date_to and date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                where_conditions.append(f'CAST("{date_col}" AS DATE) <= \'{date_to}\'')
+            else:
+                where_conditions.append(f'"{date_col}" <= \'{date_to}\'')
+        
+        if sku and sku_col:
+            where_conditions.append(f'"{sku_col}" = \'{sku}\'')
+        
+        if transaction_type and txn_col:
+            where_conditions.append(f'"{txn_col}" = \'{transaction_type}\'')
+        
+        if ingestion_id:
+            where_conditions.append(f"ingestion_id = '{ingestion_id}'")
+        
+        if source_file:
+            where_conditions.append(f"source_file = '{source_file}'")
+        
+        where_clause = ' AND '.join(where_conditions)
+        
+        # Create temporary Parquet file
+        temp_dir = Path(tempfile.gettempdir())
+        parquet_path = temp_dir / f"export_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+        
+        # Use DuckDB COPY to export to Parquet
+        copy_sql = f"""
+        COPY (
+            SELECT *
+            FROM sales
+            WHERE {where_clause}
+        ) TO '{parquet_path}' (FORMAT PARQUET)
+        """
+        
+        conn.execute(copy_sql)
+        
+        return str(parquet_path)
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error exporting transactions to Parquet: {e}", exc_info=True)
+        raise
+
+
+def export_transactions_csv_streaming(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    sku: Optional[str] = None,
+    transaction_type: Optional[str] = None,
+    ingestion_id: Optional[str] = None,
+    source_file: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    max_rows: int = 100000,
+    require_filters: bool = False,
+) -> Generator[bytes, None, None]:
+    """
+    Stream filtered transactions as CSV with tenant isolation.
+    
+    Uses generator to stream CSV rows without loading all data into memory.
+    Enforces max rows limit if no filters provided.
+    
+    Args:
+        date_from: Start date filter
+        date_to: End date filter
+        sku: SKU filter
+        transaction_type: Transaction type filter
+        ingestion_id: Filter by ingestion ID
+        source_file: Filter by source file name
+        tenant_id: User's tenant ID for data isolation
+        max_rows: Maximum rows to export without filters
+        require_filters: If True, require filters for large exports
+    
+    Yields:
+        CSV data as bytes (chunked)
+    """
+    from core.database import get_connection, table_exists, execute_query
+    from utils.tenant_filter import get_tenant_filter_sql
+    from fastapi import HTTPException
+    
+    if not table_exists('sales'):
+        # Return empty CSV header
+        yield b'order_id,sku,transaction_type,amount,date,quantity\n'
+        return
+    
+    try:
+        tenant_filter = get_tenant_filter_sql(tenant_id) if tenant_id else '1=1'
+        
+        # Detect column names dynamically (same logic as export_transactions_csv)
+        column_info = execute_query("DESCRIBE sales")
+        
+        # Detect date column
+        date_col = None
+        date_columns = ['order_date', 'Invoice Date', 'invoice_date', 'Order Date']
+        for col in date_columns:
+            if col in column_info['column_name'].values:
+                date_col = col
+                break
+        
+        # Detect SKU column
+        sku_col = None
+        sku_columns = ['sku', 'Sku', 'SKU']
+        for col in sku_columns:
+            if col in column_info['column_name'].values:
+                sku_col = col
+                break
+        
+        # Detect transaction type column
+        txn_col = None
+        txn_columns = ['transaction_type', 'Transaction Type']
+        for col in txn_columns:
+            if col in column_info['column_name'].values:
+                txn_col = col
+                break
+        
+        # Build WHERE clause (same logic as export_transactions_csv)
+        where_conditions = [tenant_filter]
+        
+        if date_from and date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                where_conditions.append(f'CAST("{date_col}" AS DATE) >= \'{date_from}\'')
+            else:
+                where_conditions.append(f'"{date_col}" >= \'{date_from}\'')
+        
+        if date_to and date_col:
+            col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
+            if 'VARCHAR' in str(col_type).upper() or 'TEXT' in str(col_type).upper():
+                where_conditions.append(f'CAST("{date_col}" AS DATE) <= \'{date_to}\'')
+            else:
+                where_conditions.append(f'"{date_col}" <= \'{date_to}\'')
+        
+        if sku and sku_col:
+            where_conditions.append(f'"{sku_col}" = \'{sku}\'')
+        
+        if transaction_type and txn_col:
+            where_conditions.append(f'"{txn_col}" = \'{transaction_type}\'')
+        
+        if ingestion_id:
+            where_conditions.append(f"ingestion_id = '{ingestion_id}'")
+        
+        if source_file:
+            where_conditions.append(f"source_file = '{source_file}'")
+        
+        where_clause = ' AND '.join(where_conditions)
+        
+        # Check row count if require_filters is True
+        if require_filters:
+            count_sql = f"SELECT COUNT(*) as count FROM sales WHERE {where_clause}"
+            count_df = execute_query(count_sql)
+            row_count = int(count_df.iloc[0]['count']) if not count_df.empty else 0
+            
+            if row_count > max_rows:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Export would return {row_count:,} rows. Please add filters (date range, SKU, etc.) to limit the export. Maximum {max_rows:,} rows allowed without filters."
+                )
+        
+        # Stream CSV using DuckDB COPY
+        import io
+        import csv
+        
+        # Get column names
+        column_info = execute_query("DESCRIBE sales")
+        all_columns = column_info['column_name'].tolist()
+        
+        # Build SELECT with all columns
+        select_cols = [f'"{col}"' for col in all_columns]
+        select_clause = ', '.join(select_cols)
+        
+        # Query data in chunks
+        chunk_size = 10000
+        offset = 0
+        
+        # Yield CSV header
+        header = ','.join(all_columns) + '\n'
+        yield header.encode('utf-8')
+        
+        while True:
+            # Use date_col if available, otherwise use first column for ordering
+            order_by_col = f'"{date_col}"' if date_col else all_columns[0] if all_columns else '1'
+            
+            sql = f"""
+            SELECT {select_clause}
+            FROM sales
+            WHERE {where_clause}
+            ORDER BY {order_by_col} DESC
+            LIMIT {chunk_size} OFFSET {offset}
+            """
+            
+            df = execute_query(sql)
+            
+            if df.empty:
+                break
+            
+            # Convert chunk to CSV
+            csv_buffer = io.StringIO()
+            df.to_csv(csv_buffer, index=False, header=False)
+            csv_content = csv_buffer.getvalue()
+            
+            yield csv_content.encode('utf-8')
+            
+            if len(df) < chunk_size:
+                break
+            
+            offset += chunk_size
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error streaming CSV export: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error exporting data: {str(e)}")

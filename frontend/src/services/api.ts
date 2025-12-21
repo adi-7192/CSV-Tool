@@ -33,7 +33,7 @@ apiClient.interceptors.response.use(
     if (error.response?.status === 401) {
       // Clear auth state
       localStorage.removeItem('auth_token');
-      
+
       // Only redirect if not already on login page
       if (window.location.pathname !== '/login' && window.location.pathname !== '/signup') {
         window.location.href = '/login';
@@ -273,7 +273,7 @@ export const insightsService = {
     try {
       // First, get metrics to generate insights
       const metrics = await metricsService.getMetrics(startDate, endDate);
-      
+
       if (!metrics) {
         return { insights: [] };
       }
@@ -459,15 +459,15 @@ export const moversDeclinersService = {
         end_date: endDate,
         limit,
       };
-      
+
       console.log('\n' + '='.repeat(80));
       console.log('🔍 API SERVICE DEBUG: MOVERS & DECLINERS');
       console.log('='.repeat(80));
       console.log(`[API] Fetching movers & decliners: ${url}`);
       console.log('[API] Request params:', params);
-      
+
       const response = await apiClient.get<MoversDeclinersResponse>(url, { params });
-      
+
       console.log('[API] Response status:', response.status);
       console.log('[API] Full response data:', JSON.stringify(response.data, null, 2));
       console.log('[API] Response structure:', {
@@ -476,16 +476,16 @@ export const moversDeclinersService = {
         moversCount: response.data?.movers?.length || 0,
         declinersCount: response.data?.decliners?.length || 0,
       });
-      
+
       if (response.data?.movers && response.data.movers.length > 0) {
         console.log('[API] Sample movers from response:', response.data.movers.slice(0, 3));
       }
       if (response.data?.decliners && response.data.decliners.length > 0) {
         console.log('[API] Sample decliners from response:', response.data.decliners.slice(0, 3));
       }
-      
+
       console.log('='.repeat(80) + '\n');
-      
+
       return response.data;
     } catch (error) {
       console.error('[API] ❌ Error fetching movers & decliners:', error);
@@ -714,6 +714,13 @@ export const usersService = {
     const response = await apiClient.post('/api/users/onboarded');
     return response.data;
   },
+  changePassword: async (currentPassword: string, newPassword: string): Promise<{ success: boolean; message: string }> => {
+    const response = await apiClient.post<{ success: boolean; message: string }>('/api/auth/change-password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+    return response.data;
+  },
 };
 
 // ============================================================================
@@ -728,11 +735,47 @@ export interface User {
   onboarded: boolean;
   tenant_id: string | null;
   created_at: string;
+  is_active?: boolean;
+  last_login_at?: string;
+}
+
+export interface TenantUsage {
+  tenant_id: string;
+  user_email: string;
+  file_count: number;
+  row_count: number;
+  last_upload_at: string | null;
 }
 
 export const adminService = {
   getUsers: async (): Promise<User[]> => {
     const response = await apiClient.get<User[]>('/api/admin/users');
+    return response.data;
+  },
+  activateUser: async (userId: number): Promise<{ success: boolean; message: string }> => {
+    const response = await apiClient.patch<{ success: boolean; message: string }>(`/api/admin/users/${userId}/activate`);
+    return response.data;
+  },
+  deactivateUser: async (userId: number): Promise<{ success: boolean; message: string }> => {
+    const response = await apiClient.patch<{ success: boolean; message: string }>(`/api/admin/users/${userId}/deactivate`);
+    return response.data;
+  },
+  getTenantsUsage: async (): Promise<TenantUsage[]> => {
+    const response = await apiClient.get<TenantUsage[]>('/api/admin/tenants/usage');
+    return response.data;
+  },
+  deleteTenant: async (tenantId: string, deleteUser: boolean = false): Promise<{ success: boolean; deleted_rows: number; users_deleted: number; message: string }> => {
+    const response = await apiClient.delete<{ success: boolean; deleted_rows: number; users_deleted: number; message: string }>(
+      `/api/admin/tenants/${tenantId}`,
+      {
+        data: { confirm: 'DELETE', delete_user: deleteUser },
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+    return response.data;
+  },
+  getStatsSummary: async (): Promise<{ total_users: number; active_users: number; total_records: number; api_calls_30d: number }> => {
+    const response = await apiClient.get<{ total_users: number; active_users: number; total_records: number; api_calls_30d: number }>('/api/admin/stats/summary');
     return response.data;
   },
 };
@@ -757,15 +800,10 @@ export const chatService = {
       if (context) {
         requestBody.context = context;
       }
-      
-      // Get user ID from localStorage (same as API key service)
-      const userId = localStorage.getItem('userId') || 'user-123';
-      
-      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody, {
-        headers: {
-          'X-User-ID': userId,
-        },
-      });
+
+      // JWT token is automatically attached by apiClient interceptor
+      // Backend extracts user_id from JWT token
+      const response = await apiClient.post<ChatResponse>('/api/chat/ask', requestBody);
       return response.data;
     } catch (error) {
       console.error('Error asking question:', error);
@@ -773,6 +811,140 @@ export const chatService = {
         console.error('Response:', error.response?.data);
       }
       return null;
+    }
+  },
+};
+
+// ============================================================================
+// DATA SUMMARY SERVICE - Check if user has data (for empty states)
+// ============================================================================
+
+export interface DataSummaryResponse {
+  has_data: boolean;
+  row_count: number;
+}
+
+export const dataService = {
+  /**
+   * Get lightweight data summary for current user (tenant-isolated)
+   * Used to determine whether to show empty states or actual content
+   */
+  async getSummary(): Promise<DataSummaryResponse> {
+    try {
+      const response = await apiClient.get<DataSummaryResponse>('/api/data/summary');
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching data summary:', error);
+      // Return no data on error to show empty state
+      return { has_data: false, row_count: 0 };
+    }
+  },
+};
+
+// ============================================================================
+// ADMIN MONITORING SERVICE
+// ============================================================================
+
+export interface MonitoringEvent {
+  id: number;
+  created_at: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  category: string;
+  message: string;
+  endpoint: string | null;
+  method: string | null;
+  status_code: number | null;
+  duration_ms: number | null;
+  tenant_id: string | null;
+  user_id: string | null;
+  request_id: string | null;
+  meta: any;
+}
+
+export interface MonitoringEventsResponse {
+  events: MonitoringEvent[];
+  total: number;
+  limit: number;
+}
+
+export interface MonitoringSummaryResponse {
+  counts_by_level: {
+    INFO?: number;
+    WARN?: number;
+    ERROR?: number;
+  };
+  top_error_endpoints: Array<{
+    endpoint: string;
+    method: string;
+    error_count: number;
+  }>;
+  top_slow_endpoints: Array<{
+    endpoint: string;
+    method: string;
+    avg_duration_ms: number;
+    request_count: number;
+  }>;
+}
+
+export interface MonitoringHealthResponse {
+  db_ok: boolean;
+  redis_ok: boolean | null;
+  app_version: string;
+  uptime_seconds: number | null;
+}
+
+export const adminMonitoring = {
+  /**
+   * Get monitoring events with filtering
+   */
+  async getEvents(params?: {
+    level?: string;
+    category?: string;
+    endpoint?: string;
+    tenant_id?: string;
+    from?: string;
+    to?: string;
+    limit?: number;
+  }): Promise<MonitoringEventsResponse> {
+    try {
+      const response = await apiClient.get<MonitoringEventsResponse>(
+        '/api/admin/monitoring/events',
+        { params }
+      );
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching monitoring events:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get monitoring summary statistics
+   */
+  async getSummary(): Promise<MonitoringSummaryResponse> {
+    try {
+      const response = await apiClient.get<MonitoringSummaryResponse>(
+        '/api/admin/monitoring/summary'
+      );
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching monitoring summary:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get system health status
+   */
+  async getHealth(): Promise<MonitoringHealthResponse> {
+    try {
+      const response = await apiClient.get<MonitoringHealthResponse>(
+        '/api/admin/monitoring/health'
+      );
+      return response.data;
+    } catch (error) {
+      console.error('Error fetching monitoring health:', error);
+      throw error;
     }
   },
 };

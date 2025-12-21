@@ -19,12 +19,14 @@ import {
   LogoutOutlined,
   BellOutlined,
   HomeOutlined,
+  CrownOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import dayjs, { Dayjs } from 'dayjs';
 import { useDataStore } from '@/store/dataStore';
 import { useAuthStore } from '@/store/authStore';
 import { getDataDateRange } from '@/services/dataService';
+import { dataService } from '@/services/api';
 import { COLORS, SPACING } from '@/styles/design-tokens';
 import './AppLayout.css';
 
@@ -44,6 +46,27 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+
+  // Check if user has data and redirect from onboarding to dashboard if they do
+  useEffect(() => {
+    const checkDataAndRedirect = async () => {
+      // Only check if we're on the onboarding page
+      if (location.pathname === '/app/onboarding') {
+        try {
+          const dataSummary = await dataService.getSummary();
+          if (dataSummary.has_data && dataSummary.row_count > 0) {
+            // User has data but is on onboarding page → redirect to dashboard
+            navigate('/app/dashboard', { replace: true });
+          }
+        } catch (err) {
+          // If check fails, stay on onboarding (user might not have data)
+          console.error('Failed to check user data:', err);
+        }
+      }
+    };
+
+    checkDataAndRedirect();
+  }, [location.pathname, navigate]);
 
   // Load date range from API
   useEffect(() => {
@@ -188,6 +211,23 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
         if (isMobile) setMobileDrawerOpen(false);
       },
     },
+    // Admin link - only visible to admin users
+    ...(user?.role === 'admin'
+      ? [
+          {
+            type: 'divider' as const,
+          },
+          {
+            key: '/admin/users',
+            icon: <CrownOutlined />,
+            label: 'Admin Panel',
+            onClick: () => {
+              navigate('/admin/users');
+              if (isMobile) setMobileDrawerOpen(false);
+            },
+          },
+        ]
+      : []),
   ];
 
   // User profile menu items
@@ -197,8 +237,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
       icon: <UserOutlined />,
       label: 'Profile',
       onClick: () => {
-        // TODO: Navigate to profile page
-        console.log('Profile clicked');
+        navigate('/app/profile');
       },
     },
     {
@@ -372,15 +411,31 @@ const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
 
           <div className="header-right">
             {(location.pathname === '/app/dashboard' || location.pathname === '/dashboard') && (
-              <RangePicker
-                value={dateRangeValue}
-                onChange={handleDateRangeChange}
-                format="MMM DD, YYYY"
-                placeholder={['Start Date', 'End Date']}
-                className="header-date-picker"
-                allowClear={true}
-                inputReadOnly={true}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <RangePicker
+                  value={dateRangeValue}
+                  onChange={handleDateRangeChange}
+                  format="MMM DD, YYYY"
+                  placeholder={['Start Date', 'End Date']}
+                  className="header-date-picker"
+                  allowClear={true}
+                  inputReadOnly={true}
+                  disabledDate={(current) => {
+                    // Disable future dates
+                    return current && current > dayjs().endOf('day');
+                  }}
+                />
+                {(!dateRangeValue || !dateRangeValue[0] || !dateRangeValue[1]) && (
+                  <span style={{ 
+                    fontSize: '12px', 
+                    color: '#64748B',
+                    fontStyle: 'italic',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    Please select the correct dates from here
+                  </span>
+                )}
+              </div>
             )}
             <Badge count={0} showZero={false}>
               <Button

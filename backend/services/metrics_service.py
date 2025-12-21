@@ -374,9 +374,12 @@ def calculate_metrics(
     end_date: Optional[str] = None,
     transaction_type: Optional[str] = None,
     source_file: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Calculate core business metrics (KPIs) using transaction-aware logic
+    Calculate core business metrics (KPIs) using transaction-aware logic with tenant isolation.
+    
+    TENANT ISOLATION: All queries are filtered by tenant_id to ensure users only see their own data.
     
     Net Revenue Calculation:
         net_revenue = gross_revenue - refund_amount - cancellation_amount - free_replacement_cost
@@ -392,6 +395,7 @@ def calculate_metrics(
         end_date: End date filter (YYYY-MM-DD)
         transaction_type: Optional transaction type filter
         source_file: Optional source file filter
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
     
     Returns:
         Dictionary with accurate KPI values accounting for all transaction types:
@@ -417,7 +421,8 @@ def calculate_metrics(
             'start_date': start_date,
             'end_date': end_date,
             'transaction_type': transaction_type,
-            'source_file': source_file
+            'source_file': source_file,
+            'tenant_id': tenant_id
         }
     )
     
@@ -443,6 +448,12 @@ def calculate_metrics(
         }
     
     try:
+        # TENANT ISOLATION: Build tenant filter
+        tenant_filter = ""
+        if tenant_id:
+            safe_tenant_id = tenant_id.replace("'", "''")
+            tenant_filter = f"AND tenant_id = '{safe_tenant_id}'"
+        
         # Build date filter
         date_filter = ""
         if start_date and end_date:
@@ -492,7 +503,7 @@ def calculate_metrics(
             order_date,
             quantity
         FROM sales
-        WHERE 1=1 {date_filter} {txn_filter} {source_filter}
+        WHERE 1=1 {tenant_filter} {date_filter} {txn_filter} {source_filter}
         """
         
         df = execute_query(all_data_sql)
@@ -1086,6 +1097,7 @@ def get_top_products(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     metric: str = 'revenue',
+    tenant_id: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Get top products by SKU with comprehensive metrics
@@ -1172,6 +1184,12 @@ def get_top_products(
             else:
                 date_filter = f'AND "{date_col}" >= \'{start_date}\' AND "{date_col}" <= \'{end_date}\''
         
+        # Build tenant filter (TENANT ISOLATION)
+        tenant_filter = ""
+        if tenant_id:
+            from utils.tenant_filter import get_tenant_filter_sql
+            tenant_filter = f"AND {get_tenant_filter_sql(tenant_id)}"
+        
         # Build SQL query
         # Calculate revenue from Shipments, refunds from Refunds, units_sold from Shipments
         if txn_col:
@@ -1189,7 +1207,7 @@ def get_top_products(
                 COALESCE(SUM(CASE WHEN "{txn_col}" = 'Refund' THEN ABS({revenue_col}) ELSE 0 END), 0) as refund_amount,
                 {rating_select} as rating
             FROM sales
-            WHERE 1=1 {date_filter}
+            WHERE 1=1 {tenant_filter} {date_filter}
             GROUP BY "{sku_col}"
             HAVING revenue > 0
             ORDER BY revenue DESC
@@ -1211,7 +1229,7 @@ def get_top_products(
                 COALESCE(SUM(CASE WHEN {revenue_col} < 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as refund_amount,
                 {rating_select} as rating
             FROM sales
-            WHERE 1=1 {date_filter}
+            WHERE 1=1 {tenant_filter} {date_filter}
             GROUP BY "{sku_col}"
             HAVING revenue > 0
             ORDER BY revenue DESC
@@ -1414,7 +1432,8 @@ def get_top_products(
 def get_revenue_by_city(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    limit: int = 10
+    limit: int = 10,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Get top cities by total revenue for a specific date range.
@@ -1549,8 +1568,14 @@ def get_revenue_by_city(
         elif start_date or end_date:
             logger.warning("Both start_date and end_date must be provided for date filtering")
         
+        # Build tenant filter (TENANT ISOLATION)
+        tenant_filter = ""
+        if tenant_id:
+            from utils.tenant_filter import get_tenant_filter_sql
+            tenant_filter = f"AND {get_tenant_filter_sql(tenant_id)}"
+        
         # DEBUG: Check if we have any data
-        count_sql = f'SELECT COUNT(*) as total FROM sales WHERE "{city_col}" IS NOT NULL AND TRIM("{city_col}") != \'\'{date_filter}'
+        count_sql = f'SELECT COUNT(*) as total FROM sales WHERE "{city_col}" IS NOT NULL AND TRIM("{city_col}") != \'\'{tenant_filter} {date_filter}'
         count_df = execute_query(count_sql)
         total_records = int(count_df['total'].iloc[0]) if not count_df.empty else 0
         logger.info(f"Total records with city data: {total_records}")
@@ -1585,7 +1610,7 @@ def get_revenue_by_city(
             AND TRIM("{city_col}") != ''
             AND {revenue_col} IS NOT NULL
             AND {revenue_col} != 0
-            {date_filter}
+            {tenant_filter} {date_filter}
         """
         
         raw_df = execute_query(sql)
@@ -1883,6 +1908,7 @@ def get_movers_decliners(
     start_date: str,
     end_date: str,
     limit: int = 10,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Get movers (fast growing) and decliners (declining) SKUs using adaptive moving average comparison.
@@ -2065,6 +2091,12 @@ def get_movers_decliners(
             else:
                 return f'"{date_col}" >= \'{start_str}\' AND "{date_col}" <= \'{end_str}\''
         
+        # Build tenant filter (TENANT ISOLATION)
+        tenant_filter = ""
+        if tenant_id:
+            from utils.tenant_filter import get_tenant_filter_sql
+            tenant_filter = f"AND {get_tenant_filter_sql(tenant_id)}"
+        
         # Helper function to build revenue query for a period
         def build_revenue_query(period_start, period_end):
             date_filter = build_date_filter(period_start, period_end)
@@ -2075,7 +2107,7 @@ def get_movers_decliners(
                         "{sku_col}" as sku,
                         COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' AND {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
                     FROM sales
-                    WHERE {date_filter}
+                    WHERE {date_filter} {tenant_filter}
                     GROUP BY "{sku_col}"
                     """
                 else:
@@ -2084,7 +2116,7 @@ def get_movers_decliners(
                         "{sku_col}" as sku,
                         COALESCE(SUM(CASE WHEN "{txn_col}" = 'Shipment' THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
                     FROM sales
-                    WHERE {date_filter}
+                    WHERE {date_filter} {tenant_filter}
                     GROUP BY "{sku_col}"
                     """
             else:
@@ -2094,7 +2126,7 @@ def get_movers_decliners(
                         "{sku_col}" as sku,
                         COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN {revenue_col} ELSE 0 END), 0) as revenue
                     FROM sales
-                    WHERE {revenue_col} > 0 AND {date_filter}
+                    WHERE {revenue_col} > 0 AND {date_filter} {tenant_filter}
                     GROUP BY "{sku_col}"
                     """
                 else:
@@ -2103,7 +2135,7 @@ def get_movers_decliners(
                         "{sku_col}" as sku,
                         COALESCE(SUM(CASE WHEN {revenue_col} > 0 THEN ABS({revenue_col}) ELSE 0 END), 0) as revenue
                     FROM sales
-                    WHERE {revenue_col} > 0 AND {date_filter}
+                    WHERE {revenue_col} > 0 AND {date_filter} {tenant_filter}
                     GROUP BY "{sku_col}"
                     """
         

@@ -51,7 +51,8 @@ def create_access_token(
     user_id: int,
     email: str,
     role: str,
-    tenant_id: Optional[str] = None
+    tenant_id: Optional[str] = None,
+    token_version: int = 0
 ) -> str:
     """
     Create a JWT access token.
@@ -61,6 +62,7 @@ def create_access_token(
         email: User email
         role: User role ("user" or "admin")
         tenant_id: Optional tenant ID for multi-tenant support
+        token_version: Token version for session invalidation (incremented on password change)
         
     Returns:
         Encoded JWT token string
@@ -73,13 +75,14 @@ def create_access_token(
         "role": role,
         "exp": expire,
         "iat": datetime.utcnow(),
+        "tv": token_version,  # Token version - invalidates old sessions on password change
     }
     
     if tenant_id:
         payload["tenant_id"] = tenant_id
     
     token = jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-    logger.debug(f"Created access token for user {user_id} (role: {role})")
+    logger.debug(f"Created access token for user {user_id} (role: {role}, token_version: {token_version})")
     
     return token
 

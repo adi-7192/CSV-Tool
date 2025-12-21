@@ -1,11 +1,14 @@
 """
-Chart/Diagnostics API Endpoints
+Chart/Diagnostics API Endpoints with tenant isolation
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import Optional
 import logging
 
 from core.database import execute_query, table_exists, get_connection
+from api.deps.auth_deps import get_current_user
+from models.user import UserInDB
+from utils.tenant_filter import get_tenant_filter_sql
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -15,14 +18,21 @@ logger = logging.getLogger(__name__)
 async def get_refunds_by_source(
     start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
     Diagnostic endpoint to see refunds breakdown by source file
     
     Helps identify if multiple CSV files are contributing to refund totals
+    
+    TENANT ISOLATION: Results are filtered by user's tenant_id.
     """
     if not table_exists('sales'):
         return {"error": "Sales table does not exist"}
+    
+    # TENANT ISOLATION: Get tenant filter
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    tenant_filter = get_tenant_filter_sql(tenant_id)
     
     try:
         # Find column names
@@ -62,7 +72,7 @@ async def get_refunds_by_source(
             else:
                 date_filter = f"AND \"{date_col}\" >= '{start_date}' AND \"{date_col}\" <= '{end_date}'"
         
-        # Query refunds by source file
+        # Query refunds by source file with tenant isolation
         sql = f"""
         SELECT 
             COALESCE(source_file, 'Unknown') as source_file,
@@ -71,7 +81,7 @@ async def get_refunds_by_source(
             MIN(CAST("{date_col}" AS DATE)) as min_date,
             MAX(CAST("{date_col}" AS DATE)) as max_date
         FROM sales
-        WHERE "{txn_col}" = 'Refund'
+        WHERE {tenant_filter} AND "{txn_col}" = 'Refund'
         {date_filter}
         GROUP BY source_file
         ORDER BY total_refunds DESC
@@ -94,13 +104,21 @@ async def get_refunds_by_source(
 
 
 @router.get("/july-refunds-breakdown")
-async def get_july_refunds_breakdown():
+async def get_july_refunds_breakdown(
+    current_user: UserInDB = Depends(get_current_user),
+):
     """
     Detailed breakdown of July 2025 refunds by source file
     Helps diagnose why database total (414,186) doesn't match CSV total (332,996)
+    
+    TENANT ISOLATION: Results are filtered by user's tenant_id.
     """
     if not table_exists('sales'):
         return {"error": "Sales table does not exist"}
+    
+    # TENANT ISOLATION: Get tenant filter
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    tenant_filter = get_tenant_filter_sql(tenant_id)
     
     try:
         # Find column names
@@ -135,17 +153,17 @@ async def get_july_refunds_breakdown():
         col_type = column_info[column_info['column_name'] == date_col]['column_type'].values[0]
         date_cast = f'CAST("{date_col}" AS DATE)' if 'VARCHAR' in str(col_type).upper() else f'"{date_col}"'
         
-        # 1. Total refunds for July 2025
+        # 1. Total refunds for July 2025 (with tenant isolation)
         total_sql = f"""
         SELECT SUM(ABS("{amount_col}")) as total_refunds, COUNT(*) as count
         FROM sales
-        WHERE "{txn_col}" = 'Refund'
+        WHERE {tenant_filter} AND "{txn_col}" = 'Refund'
         AND {date_cast} >= '2025-07-01'
         AND {date_cast} <= '2025-07-31'
         """
         total_df = execute_query(total_sql)
         
-        # 2. Breakdown by source file
+        # 2. Breakdown by source file (with tenant isolation)
         breakdown_sql = f"""
         SELECT 
             COALESCE(source_file, 'Unknown') as source_file,
@@ -154,7 +172,7 @@ async def get_july_refunds_breakdown():
             MIN({date_cast}) as min_date,
             MAX({date_cast}) as max_date
         FROM sales
-        WHERE "{txn_col}" = 'Refund'
+        WHERE {tenant_filter} AND "{txn_col}" = 'Refund'
         AND {date_cast} >= '2025-07-01'
         AND {date_cast} <= '2025-07-31'
         GROUP BY source_file
@@ -178,7 +196,7 @@ async def get_july_refunds_breakdown():
                 STRING_AGG(DISTINCT source_file, ', ') as source_files,
                 SUM(ABS("{amount_col}")) as total_amount
             FROM sales
-            WHERE "{txn_col}" = 'Refund'
+            WHERE {tenant_filter} AND "{txn_col}" = 'Refund'
             AND {date_cast} >= '2025-07-01'
             AND {date_cast} <= '2025-07-31'
             GROUP BY "{invoice_col}"

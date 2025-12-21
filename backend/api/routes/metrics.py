@@ -1,7 +1,7 @@
 """
-Metrics API Endpoints - Serve KPIs to frontend
+Metrics API Endpoints - Serve KPIs to frontend with tenant isolation
 """
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
 from typing import Optional
 from datetime import datetime, timedelta
 import logging
@@ -34,6 +34,9 @@ from utils.sanitizers import (
     sanitize_city_name,
 )
 from utils.logger import api_logger, log_api_request, log_api_response
+from utils.tenant_filter import get_tenant_filter_sql
+from api.deps.auth_deps import get_current_user
+from models.user import UserInDB
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -46,6 +49,7 @@ async def get_metrics(
     end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     transaction_type: Optional[str] = Query(None, description="Filter by transaction type"),
     source_file: Optional[str] = Query(None, description="Filter by source file"),
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
     Get core business metrics with transaction-aware calculations
@@ -100,15 +104,22 @@ async def get_metrics(
         if transaction_type:
             validate_transaction_type(transaction_type)
         
-        # Check if sales table exists and has data
+        # TENANT ISOLATION: Get tenant_id from authenticated user
+        tenant_id = current_user.tenant_id
+        if not tenant_id:
+            tenant_id = str(current_user.id)
+        
+        # Check if sales table exists and has data FOR THIS TENANT
         from core.database import table_exists, execute_query
         has_data = False
         if table_exists('sales'):
-            count_result = execute_query("SELECT COUNT(*) as count FROM sales")
+            tenant_filter = get_tenant_filter_sql(tenant_id)
+            count_result = execute_query(f"SELECT COUNT(*) as count FROM sales WHERE {tenant_filter}")
             if not count_result.empty and count_result.iloc[0]['count'] > 0:
                 has_data = True
         
-        metrics = calculate_metrics(start_date, end_date, transaction_type, source_file)
+        # Pass tenant_id to calculate_metrics for data isolation
+        metrics = calculate_metrics(start_date, end_date, transaction_type, source_file, tenant_id=tenant_id)
         
         duration_ms = (time.time() - start_time) * 1000
         log_api_response(api_logger, 'GET', '/api/metrics/', 200, duration_ms)

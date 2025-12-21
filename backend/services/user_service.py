@@ -50,9 +50,13 @@ def create_user(user_data: UserCreate) -> UserInDB:
     except ImportError:
         now = datetime.utcnow()
     
+    # TENANT ISOLATION: Set tenant_id = user.id (as string) for strict data isolation
+    # Each user's data is scoped to their own tenant_id
+    tenant_id = str(new_id)
+    
     conn.execute("""
-        INSERT INTO users (id, email, password_hash, role, plan, onboarded, tenant_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO users (id, email, password_hash, role, plan, onboarded, tenant_id, is_active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         new_id,
         user_data.email,
@@ -60,11 +64,12 @@ def create_user(user_data: UserCreate) -> UserInDB:
         user_data.role,
         user_data.plan,
         user_data.onboarded,
-        user_data.tenant_id,
+        tenant_id,  # Always set to user's own ID for isolation
+        True,  # New users are active by default
         now
     ])
     
-    logger.info(f"Created user {new_id} with email {user_data.email}")
+    logger.info(f"Created user {new_id} with email {user_data.email}, tenant_id={tenant_id}")
     
     # Return created user
     return get_user_by_id(new_id)
@@ -98,7 +103,10 @@ def get_user_by_email(email: str) -> Optional[UserInDB]:
         plan=row.get('plan', 'free'),
         onboarded=bool(row.get('onboarded', False)),
         tenant_id=row.get('tenant_id'),
-        created_at=row['created_at']
+        created_at=row['created_at'],
+        token_version=int(row.get('token_version', 0)),
+        is_active=bool(row.get('is_active', True)),
+        last_login_at=row.get('last_login_at') if pd.notna(row.get('last_login_at')) else None
     )
 
 
@@ -130,7 +138,10 @@ def get_user_by_id(user_id: int) -> Optional[UserInDB]:
         plan=row.get('plan', 'free'),
         onboarded=bool(row.get('onboarded', False)),
         tenant_id=row.get('tenant_id'),
-        created_at=row['created_at']
+        created_at=row['created_at'],
+        token_version=int(row.get('token_version', 0)),
+        is_active=bool(row.get('is_active', True)),
+        last_login_at=row.get('last_login_at') if pd.notna(row.get('last_login_at')) else None
     )
 
 
@@ -157,7 +168,10 @@ def get_all_users() -> list[UserInDB]:
             plan=row.get('plan', 'free'),
             onboarded=bool(row.get('onboarded', False)),
             tenant_id=row.get('tenant_id'),
-            created_at=row['created_at']
+            created_at=row['created_at'],
+            token_version=int(row.get('token_version', 0)),
+            is_active=bool(row.get('is_active', True)),
+            last_login_at=row.get('last_login_at') if pd.notna(row.get('last_login_at')) else None
         ))
     
     return users

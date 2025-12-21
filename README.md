@@ -70,6 +70,8 @@ Nisarg Project/
 ✅ **AI-Powered Insights** - Natural language queries (Ollama)  
 ✅ **Data Trust** - Validation, deduplication, lineage tracking  
 ✅ **Production Ready** - Docker, tests, reconciliation  
+✅ **Backup & Restore** - Automated backups for DuckDB and ChromaDB  
+✅ **Structured Logging** - Request tracking with tenant isolation  
 
 ---
 
@@ -78,7 +80,8 @@ Nisarg Project/
 - **AFTER_PHASE_0_IMPLEMENTATION.md** - Complete Phase 0 summary
 - **ARCHITECTURE.md** - System architecture details
 - **DOCKER_SETUP.md** - Docker deployment guide
-- **backend/** - FastAPI backend (NEW)
+- **backend/README.md** - Backend setup and API documentation
+- **backend/docs/BACKUP_AND_MONITORING.md** - Backup, restore, and monitoring guide
 
 ---
 

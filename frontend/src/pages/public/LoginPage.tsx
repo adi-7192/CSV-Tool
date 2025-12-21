@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { Form, Input, Button, Card, Alert } from 'antd';
 import { MailOutlined, LockOutlined } from '@ant-design/icons';
 import { useAuthStore } from '@/store/authStore';
+import { dataService } from '@/services/api';
 
 const LoginPage: React.FC = () => {
   const navigate = useNavigate();
@@ -11,18 +12,28 @@ const LoginPage: React.FC = () => {
 
   // Redirect if already logged in
   useEffect(() => {
-    if (user && !loading) {
-      if (user.role === 'admin') {
-        navigate('/admin/users');
-      } else {
-        // Check onboarded status
-        if (!user.onboarded) {
+    const checkDataAndRedirect = async () => {
+      if (user && !loading) {
+        try {
+          // Check if user has data in the database
+          const dataSummary = await dataService.getSummary();
+
+          if (dataSummary.has_data && dataSummary.row_count > 0) {
+            // User has data → go directly to dashboard
+            navigate('/app/dashboard');
+          } else {
+            // User has no data → show onboarding
+            navigate('/app/onboarding');
+          }
+        } catch (err) {
+          // If check fails, default to onboarding (safer)
+          console.error('Failed to check user data:', err);
           navigate('/app/onboarding');
-        } else {
-          navigate('/app/dashboard');
         }
       }
-    }
+    };
+
+    checkDataAndRedirect();
   }, [user, loading, navigate]);
 
   const handleSubmit = async (values: { email: string; password: string }) => {
@@ -103,6 +114,19 @@ const LoginPage: React.FC = () => {
               autoComplete="current-password"
             />
           </Form.Item>
+
+          <div style={{ textAlign: 'right', marginTop: '-16px', marginBottom: '16px' }}>
+            <Link
+              to="/forgot-password"
+              style={{
+                color: '#6366F1',
+                fontSize: '14px',
+                fontWeight: '500',
+              }}
+            >
+              Forgot password?
+            </Link>
+          </div>
 
           <Form.Item>
             <Button

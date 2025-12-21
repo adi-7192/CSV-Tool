@@ -2,7 +2,7 @@
 File Management Routes - File listing, deletion, and download
 Provides RESTful API for managing uploaded CSV files
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any
 import pandas as pd
@@ -11,6 +11,8 @@ import logging
 
 from core.database import get_connection, table_exists, execute_query
 from utils.error_handler import log_error
+from api.deps.auth_deps import get_current_user
+from models.user import UserInDB
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +82,19 @@ async def list_files() -> Dict[str, Any]:
 
 
 @router.delete("/{filename}")
-async def delete_file(filename: str) -> Dict[str, Any]:
+async def delete_file(
+    filename: str,
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, Any]:
     """
-    Delete a single file by filename
+    Delete a single file by filename (tenant-isolated).
+    
+    TENANT ISOLATION: Only deletes files belonging to the current user's tenant.
+    Users cannot delete other tenants' files even if they know the filename.
     
     Args:
         filename: Name of the file to delete
+        current_user: Authenticated user (from JWT token)
     
     Returns:
         {
@@ -94,17 +103,23 @@ async def delete_file(filename: str) -> Dict[str, Any]:
             "deleted_rows": int
         }
     """
+    from utils.tenant_filter import get_tenant_filter_sql
+    
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    tenant_id = current_user.tenant_id or str(current_user.id)
+    
     try:
         if not table_exists('ingestion_log'):
             raise HTTPException(status_code=404, detail="No uploads found")
         
         conn = get_connection()
+        tenant_filter = get_tenant_filter_sql(tenant_id)
         
-        # Find file by filename
-        find_sql = """
+        # Find file by filename - verify it belongs to this tenant (TENANT ISOLATION)
+        find_sql = f"""
         SELECT ingestion_id, filename
         FROM ingestion_log
-        WHERE filename = ?
+        WHERE filename = ? AND {tenant_filter}
         LIMIT 1
         """
         
@@ -113,41 +128,43 @@ async def delete_file(filename: str) -> Dict[str, Any]:
         if result_df.empty:
             raise HTTPException(
                 status_code=404,
-                detail=f"File '{filename}' not found"
+                detail=f"File '{filename}' not found or does not belong to your account"
             )
         
         ingestion_id = result_df.iloc[0]['ingestion_id']
         found_filename = result_df.iloc[0]['filename']
         
-        # Count rows to be deleted
+        # Count rows to be deleted (TENANT ISOLATED)
         deleted_rows = 0
         if table_exists('sales'):
-            count_sql = """
+            count_sql = f"""
             SELECT COUNT(*) as count
             FROM sales
-            WHERE ingestion_id = ?
+            WHERE ingestion_id = ? AND {tenant_filter}
             """
             count_df = conn.execute(count_sql, [ingestion_id]).fetchdf()
             if not count_df.empty:
                 deleted_rows = int(count_df.iloc[0]['count'])
         
-        # Delete rows from sales table
+        # Delete rows from sales table (TENANT ISOLATED)
         if table_exists('sales') and deleted_rows > 0:
-            delete_sql = """
+            delete_sql = f"""
             DELETE FROM sales
-            WHERE ingestion_id = ?
+            WHERE ingestion_id = ? AND {tenant_filter}
             """
             conn.execute(delete_sql, [ingestion_id])
-            logger.info(f"✅ Deleted {deleted_rows} rows for file: {found_filename}")
+            logger.info(f"✅ Deleted {deleted_rows} rows for file: {found_filename} (tenant: {tenant_id})")
         
-        # Delete from ingestion_log
-        delete_log_sql = """
-        DELETE FROM ingestion_log
-        WHERE ingestion_id = ?
-        """
-        conn.execute(delete_log_sql, [ingestion_id])
+        # Delete from ingestion_log (tenant-isolated)
+        # Since we already verified the ingestion belongs to this tenant, we can safely delete it
+        if deleted_rows > 0 or table_exists('ingestion_log'):
+            delete_log_sql = f"""
+            DELETE FROM ingestion_log
+            WHERE ingestion_id = ? AND {tenant_filter}
+            """
+            conn.execute(delete_log_sql, [ingestion_id])
         
-        logger.info(f"✅ Deleted file: {found_filename} (ingestion_id: {ingestion_id})")
+        logger.info(f"✅ Deleted file: {found_filename} (ingestion_id: {ingestion_id}, tenant: {tenant_id})")
         
         return {
             'success': True,

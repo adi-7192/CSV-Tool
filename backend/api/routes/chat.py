@@ -9,7 +9,7 @@ Hybrid Architecture with ChromaDB RAG:
 5. EXPLORATION: RAG-enhanced LLM SQL generation with validation
 6. Response generator with data grounding (no hallucination)
 """
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Depends
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import logging
@@ -39,6 +39,10 @@ from services.rag_service import retrieve_context, enhance_prompt_with_rag
 from services.sql_validator import validate_sql_columns, auto_correct_sql
 from services.embedding_service import index_all_documents, get_collection
 from services.metrics_registry import find_matching_function, get_function_call_params, call_metric_function
+from utils.auth import get_current_user_id
+from utils.tenant_filter import inject_tenant_filter
+from api.deps.auth_deps import get_current_user
+from models.user import UserInDB
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -63,10 +67,10 @@ class ChatResponse(BaseModel):
 @router.post("/ask", response_model=ChatResponse)
 async def ask_question(
     request: ChatRequest,
-    x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
-    Ask a natural language question about the data.
+    Ask a natural language question about the data with tenant isolation.
     
     Flow:
     1. Classify intent (METRIC, ADVISORY, EXPLORATION)
@@ -74,27 +78,47 @@ async def ask_question(
     3. ADVISORY: Query comprehensive data, use Gemini for analysis
     4. EXPLORATION: Fall back to LLM SQL generation
     5. Generate natural language response
+    
+    TENANT ISOLATION: All queries are filtered by the user's tenant_id.
+    AI-generated SQL is automatically modified to include tenant filter,
+    preventing users from accessing other tenants' data.
+    
+    Requires authentication - user ID is extracted from JWT token.
+    Each user's API keys are isolated and secure.
     """
     
-    # Check if database has data
+    # TENANT ISOLATION: Get tenant_id from authenticated user
+    current_user_id = str(current_user.id)
+    tenant_id = current_user.tenant_id
+    if not tenant_id:
+        tenant_id = current_user_id  # Fallback to user ID
+    
+    # Check if database has data FOR THIS TENANT
+    from utils.tenant_filter import get_tenant_filter_sql
+    tenant_filter = get_tenant_filter_sql(tenant_id)
+    
     if not table_exists('sales'):
         return ChatResponse(
             answer="No data available. Please upload a CSV file first.",
             error="No data in database"
         )
     
-    # Get user ID
-    current_user_id = x_user_id.strip() if x_user_id and x_user_id.strip() else 'user-123'
+    # Check if this tenant has any data
+    tenant_data_check = execute_query(f"SELECT COUNT(*) as count FROM sales WHERE {tenant_filter}")
+    if tenant_data_check.empty or tenant_data_check.iloc[0]['count'] == 0:
+        return ChatResponse(
+            answer="You don't have any data yet. Please upload a CSV file to get started.",
+            error="No data for this tenant"
+        )
     
-    # Check API key status
+    # Check API key status for authenticated user
     has_gemini_key = False
-    if current_user_id:
-        try:
-            from services.api_key_service import APIKeyService
-            gemini_key = APIKeyService.get_api_key(current_user_id, 'gemini', decrypt=False)
-            has_gemini_key = gemini_key is not None and gemini_key.get('enabled', True)
-        except Exception as e:
-            logger.warning(f"Error checking API keys: {e}")
+    try:
+        from services.api_key_service import APIKeyService
+        gemini_key = APIKeyService.get_api_key(current_user_id, 'gemini', decrypt=False)
+        has_gemini_key = gemini_key is not None and gemini_key.get('enabled', True)
+    except Exception as e:
+        logger.warning(f"Error checking API keys for user {current_user_id}: {e}")
     
     # Extract date range from context
     start_date = None
@@ -351,12 +375,12 @@ async def ask_question(
                     error="Schema retrieval failed"
                 )
             
-            # STEP 1: Retrieve RAG context (ChromaDB semantic search)
+            # STEP 1: Retrieve RAG context (ChromaDB semantic search) - TENANT ISOLATED
             try:
-                rag_context = retrieve_context(request.question, schema)
-                logger.info(f"RAG: Retrieved context with {len(rag_context.get('semantic_matches', []))} semantic matches")
+                rag_context = retrieve_context(request.question, schema, tenant_id=tenant_id)
+                logger.info(f"RAG: Retrieved context with {len(rag_context.get('semantic_matches', []))} semantic matches for tenant {tenant_id}")
             except Exception as rag_error:
-                logger.warning(f"RAG context retrieval failed: {rag_error}")
+                logger.warning(f"RAG context retrieval failed for tenant {tenant_id}: {rag_error}")
                 rag_context = {'column_mappings': {}, 'semantic_matches': [], 'business_rules': []}
             
             # Generate SQL with LLM (will be enhanced with RAG context internally)
@@ -398,6 +422,11 @@ async def ask_question(
                     provider=provider,
                     confidence=confidence,
                 )
+            
+            # TENANT ISOLATION: Inject tenant filter into AI-generated SQL
+            # This is a critical security measure to prevent cross-tenant data access
+            sql = inject_tenant_filter(sql, tenant_id, table_name='sales')
+            logger.info(f"Tenant-filtered SQL: {sql[:200]}...")
             
             # Execute SQL
             try:

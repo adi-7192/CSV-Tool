@@ -10,6 +10,7 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { useAuthStore } from '@/store/authStore';
@@ -37,7 +38,7 @@ const AdminLayout: React.FC<AdminLayoutProps> = ({ children }) => {
       icon: <UserOutlined />,
       label: 'Profile',
       onClick: () => {
-        // TODO: Navigate to profile page
+        navigate('/app/profile');
       },
     },
     {
@@ -80,6 +81,11 @@ const AdminLayout: React.FC<AdminLayoutProps> = ({ children }) => {
       key: '/admin/system',
       icon: <SettingOutlined />,
       label: <Link to="/admin/system">System</Link>,
+    },
+    {
+      key: '/admin/monitoring',
+      icon: <WarningOutlined />,
+      label: <Link to="/admin/monitoring">Monitoring</Link>,
     },
   ];
 

@@ -1,17 +1,11 @@
 /**
  * Data Service - Raw transaction data API calls
+ * 
+ * Uses the shared apiClient from api.ts which includes JWT authentication interceptor.
+ * All endpoints in this service require authentication.
  */
-import axios, { AxiosError } from 'axios';
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-
-const apiClient = axios.create({
-  baseURL: API_BASE_URL,
-  timeout: 10000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
+import { AxiosError } from 'axios';
+import { apiClient } from './api';
 
 export interface Transaction {
   order_id: string;
@@ -220,7 +214,25 @@ export const downloadTransactionsCSV = async (
  * @param file - File object to upload
  * @returns Upload response with status and row count
  */
-export const uploadCSV = async (file: File): Promise<UploadResponse | null> => {
+export interface DuplicateUploadError {
+  error: 'DUPLICATE_UPLOAD';
+  message: string;
+  existing_ingestion_id: string;
+  existing_filename: string;
+  existing_uploaded_at: string;
+  existing_rows: number;
+}
+
+export interface RequiredColumnsError {
+  error: 'REQUIRED_COLUMNS_MISSING';
+  message: string;
+  missing_columns: string[];
+  expected_schema: Record<string, string>;
+  csv_columns: string[];
+  detected_mapping: Record<string, string>;
+}
+
+export const uploadCSV = async (file: File): Promise<UploadResponse | DuplicateUploadError | RequiredColumnsError | null> => {
   try {
     const formData = new FormData();
     formData.append('file', file);
@@ -234,6 +246,86 @@ export const uploadCSV = async (file: File): Promise<UploadResponse | null> => {
     return response.data;
   } catch (error) {
     console.error('Error uploading CSV:', error);
+    if (error instanceof AxiosError) {
+      const responseData = error.response?.data;
+      
+      // Handle duplicate upload (409)
+      if (error.response?.status === 409 && responseData?.error === 'DUPLICATE_UPLOAD') {
+        return {
+          error: 'DUPLICATE_UPLOAD',
+          message: responseData.message || 'This file has already been uploaded',
+          existing_ingestion_id: responseData.existing_ingestion_id,
+          existing_filename: responseData.existing_filename,
+          existing_uploaded_at: responseData.existing_uploaded_at,
+          existing_rows: responseData.existing_rows || 0,
+        } as DuplicateUploadError;
+      }
+      
+      // Handle required columns missing (400)
+      if (error.response?.status === 400 && responseData?.error === 'REQUIRED_COLUMNS_MISSING') {
+        return {
+          error: 'REQUIRED_COLUMNS_MISSING',
+          message: responseData.message || 'Required columns are missing',
+          missing_columns: responseData.missing_columns || [],
+          expected_schema: responseData.expected_schema || {},
+          csv_columns: responseData.csv_columns || [],
+          detected_mapping: responseData.detected_mapping || {},
+        } as RequiredColumnsError;
+      }
+      
+      console.error('Response:', responseData);
+    }
+    return null;
+  }
+};
+
+export interface BatchUploadResult {
+  filename: string;
+  success: boolean;
+  rows_inserted: number;
+  ingestion_id?: string;
+  message: string;
+  error?: string;
+  existing_ingestion_id?: string;
+  existing_filename?: string;
+  existing_uploaded_at?: string;
+  existing_rows?: number;
+  missing_columns?: string[];
+  expected_schema?: Record<string, any>;
+  csv_columns?: string[];
+  detected_mapping?: Record<string, string>;
+}
+
+export interface BatchUploadResponse {
+  results: BatchUploadResult[];
+  total_files: number;
+  successful: number;
+  failed: number;
+}
+
+/**
+ * Upload multiple CSV files in a batch
+ * @param files - Array of File objects to upload
+ * @returns Batch upload response with per-file results
+ */
+export const uploadMultipleCSV = async (files: File[]): Promise<BatchUploadResponse | null> => {
+  try {
+    const formData = new FormData();
+    
+    // Append all files to FormData
+    files.forEach((file) => {
+      formData.append('files', file);
+    });
+    
+    const response = await apiClient.post<BatchUploadResponse>('/api/data/upload/multiple', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    
+    return response.data;
+  } catch (error) {
+    console.error('Error uploading multiple CSVs:', error);
     if (error instanceof AxiosError) {
       console.error('Response:', error.response?.data);
     }

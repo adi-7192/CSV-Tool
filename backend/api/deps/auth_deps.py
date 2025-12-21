@@ -59,6 +59,30 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    # Check if user is active
+    if not user.is_active:
+        logger.warning(f"Inactive user {user_id} attempted to access protected endpoint")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is deactivated. Please contact support.",
+        )
+    
+    # SESSION INVALIDATION: Validate token version
+    # If password was changed after token was issued, token_version will be incremented
+    # and this token will be rejected, forcing user to login again
+    jwt_token_version = payload.get("tv")
+    if jwt_token_version is None or jwt_token_version != user.token_version:
+        logger.warning(
+            f"Token version mismatch for user {user_id}: "
+            f"JWT has tv={jwt_token_version}, user has token_version={user.token_version}. "
+            f"Session invalidated (likely password was changed)."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
     return user
 
 

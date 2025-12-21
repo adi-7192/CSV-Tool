@@ -325,6 +325,7 @@ def transform_to_standard_schema(
         'issues': [],
         'warnings': [],
         'transformations': [],
+        'row_errors': [],  # Row-level errors: [{"row": int, "reason": str}, ...]
     }
     
     # Start with empty DataFrame with standard schema
@@ -346,18 +347,38 @@ def transform_to_standard_schema(
         invalid_dates = df_standard['order_date'].isna().sum()
         if invalid_dates > 0:
             validation_report['warnings'].append(f"{invalid_dates} invalid dates found and excluded")
+            # Collect row-level errors for invalid dates (first 10)
+            invalid_date_rows = df_standard[df_standard['order_date'].isna()].head(10)
+            for idx, row in invalid_date_rows.iterrows():
+                original_date = row.get('order_date', 'N/A') if 'order_date' in df_standard.columns else 'N/A'
+                validation_report['row_errors'].append({
+                    'row': int(idx) + 1,  # 1-indexed for user display
+                    'reason': f"Invalid date format: {original_date}",
+                    'column': 'order_date'
+                })
             df_standard = df_standard[df_standard['order_date'].notna()]
     else:
         validation_report['issues'].append("order_date column not found - this is critical!")
     
     # 2b. Revenue Amount → NUMERIC
     if 'revenue_amount' in df_standard.columns:
+        # Store original values before cleaning
+        original_revenue = df_standard['revenue_amount'].copy()
         # Clean currency symbols and commas
         df_standard['revenue_amount'] = df_standard['revenue_amount'].astype(str).str.replace(r'[₹$,\s]', '', regex=True)
         df_standard['revenue_amount'] = pd.to_numeric(df_standard['revenue_amount'], errors='coerce')
         invalid_amounts = df_standard['revenue_amount'].isna().sum()
         if invalid_amounts > 0:
             validation_report['warnings'].append(f"{invalid_amounts} invalid amounts converted to 0")
+            # Collect row-level errors for invalid amounts (first 10)
+            invalid_amount_rows = df_standard[df_standard['revenue_amount'].isna()].head(10)
+            for idx, row in invalid_amount_rows.iterrows():
+                original_amount = original_revenue.iloc[idx] if idx < len(original_revenue) else 'N/A'
+                validation_report['row_errors'].append({
+                    'row': int(idx) + 1,  # 1-indexed for user display
+                    'reason': f"Invalid numeric format: {original_amount}",
+                    'column': 'revenue_amount'
+                })
             df_standard['revenue_amount'].fillna(0, inplace=True)
     else:
         validation_report['issues'].append("revenue_amount column not found - this is critical!")
@@ -459,6 +480,8 @@ def transform_to_standard_schema(
     df_standard['updated_at'] = datetime.now()
     
     validation_report['transformations'].append("Added data lineage: source_file, ingestion_id, loaded_at, updated_at")
+    
+    # Note: tenant_id will be added in process_csv_upload after transformation
     
     # 5. Remove duplicates based on business key
     if all(col in df_standard.columns for col in BUSINESS_KEY):
@@ -625,9 +648,10 @@ def store_to_database(
 def process_csv_upload(
     file_content: bytes,
     filename: str,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Complete CSV upload pipeline with full error handling
+    Complete CSV upload pipeline with full error handling and tenant isolation
     
     Pipeline:
     1. Read CSV
@@ -637,11 +661,52 @@ def process_csv_upload(
     5. Store to database with upsert
     6. Log to ingestion_log (optional)
     
+    Args:
+        file_content: Raw CSV file bytes
+        filename: Original filename
+        tenant_id: User's tenant ID for data isolation (REQUIRED for multi-tenant)
+    
     Returns: Complete upload result with validation report
     """
     
     import time
+    import hashlib
     start_time = time.time()
+    
+    # Compute file content hash for duplicate detection
+    file_hash = hashlib.sha256(file_content).hexdigest()
+    file_size = len(file_content)
+    
+    # Check for duplicate upload (same tenant + same file hash)
+    if tenant_id:
+        from core.database import get_connection, table_exists
+        conn = get_connection()
+        
+        if table_exists('ingestion_log'):
+            # Check if this tenant has already uploaded a file with the same hash
+            duplicate_check_sql = """
+            SELECT ingestion_id, filename, uploaded_at, rows_inserted
+            FROM ingestion_log
+            WHERE file_hash = ? AND tenant_id = ?
+            LIMIT 1
+            """
+            try:
+                duplicate_df = conn.execute(duplicate_check_sql, [file_hash, tenant_id]).fetchdf()
+                if not duplicate_df.empty:
+                    existing_ingestion = duplicate_df.iloc[0]
+                    return {
+                        'success': False,
+                        'error': 'DUPLICATE_UPLOAD',
+                        'message': f'This file has already been uploaded',
+                        'existing_ingestion_id': existing_ingestion['ingestion_id'],
+                        'existing_filename': existing_ingestion['filename'],
+                        'existing_uploaded_at': str(existing_ingestion['uploaded_at']),
+                        'existing_rows': int(existing_ingestion['rows_inserted']) if 'rows_inserted' in existing_ingestion else 0,
+                        'status_code': 409,
+                    }
+            except Exception as e:
+                # If file_hash column doesn't exist yet, continue (will be added in migration)
+                logger.warning(f"Could not check for duplicates (file_hash column may not exist): {e}")
     
     ingestion_id = str(uuid.uuid4())
     
@@ -706,11 +771,27 @@ def process_csv_upload(
         missing_required = [col for col in required_cols if col not in column_mapping]
         
         if missing_required:
+            # Build example expected schema
+            example_schema = {
+                'order_id': 'Invoice Number, Order ID, Order Number',
+                'revenue_amount': 'Invoice Amount, Total Amount, Revenue',
+                'order_date': 'Invoice Date, Order Date, Date',
+                'sku': 'SKU, Product ID, Item Code',
+                'transaction_type': 'Type, Transaction Type, Order Type',
+                'quantity': 'Qty, Quantity, Units'
+            }
+            
+            missing_examples = {col: example_schema.get(col, 'Any column with similar name') for col in missing_required}
+            
             return {
                 'success': False,
-                'error': f'Could not detect critical columns: {", ".join(missing_required)}',
+                'error': 'REQUIRED_COLUMNS_MISSING',
+                'message': f'Could not detect required columns: {", ".join(missing_required)}',
+                'missing_columns': missing_required,
+                'expected_schema': missing_examples,
                 'detected_mapping': column_mapping,
                 'csv_columns': list(df_raw.columns),
+                'status_code': 400,
             }
         
         # Step 3: Transform to standard schema
@@ -749,14 +830,69 @@ def process_csv_upload(
             else:
                 validation_warnings.append(msg)
 
+        # TENANT ISOLATION: Add tenant_id to all rows for data isolation
+        if tenant_id:
+            df_standard['tenant_id'] = tenant_id
+            logger.info(f"📊 Added tenant_id={tenant_id} to {len(df_standard)} rows")
+        else:
+            # For backward compatibility, set to None (will be filtered out in queries)
+            df_standard['tenant_id'] = None
+            logger.warning("⚠️ No tenant_id provided - data will not be tenant-isolated")
+
         # Step 4: Store to database
         storage_result = store_to_database(df_standard)
         
         # Step 5: Calculate processing time
         processing_time = time.time() - start_time
         
-        # Step 6: Return complete result
+        # Step 6: Log to ingestion_log (if table exists)
+        if table_exists('ingestion_log'):
+            try:
+                from core.database import get_connection
+                from datetime import timezone as tz
+                conn = get_connection()
+                
+                # Get date range from df_standard
+                date_range_start = None
+                date_range_end = None
+                if 'order_date' in df_standard.columns and len(df_standard) > 0:
+                    date_range_start = df_standard['order_date'].min()
+                    date_range_end = df_standard['order_date'].max()
+                
+                now = datetime.now(tz.utc) if hasattr(datetime, 'now') else datetime.utcnow()
+                
+                insert_sql = """
+                INSERT INTO ingestion_log (
+                    ingestion_id, filename, uploaded_at, rows_raw, rows_cleaned, rows_inserted,
+                    date_range_start, date_range_end, validation_status, processing_time_seconds,
+                    file_hash, file_size, tenant_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                
+                conn.execute(insert_sql, [
+                    ingestion_id,
+                    filename,
+                    now,
+                    len(df_raw),
+                    len(df_standard),
+                    storage_result.get('rows_inserted', len(df_standard)),
+                    date_range_start,
+                    date_range_end,
+                    'success' if validation_report.get('issues') == [] else 'warning',
+                    round(processing_time, 2),
+                    file_hash,
+                    file_size,
+                    tenant_id,
+                ])
+                logger.info(f"✅ Logged ingestion to ingestion_log: {ingestion_id}")
+            except Exception as e:
+                logger.warning(f"Could not log to ingestion_log: {e}")
+        
+        # Step 7: Return complete result
         logger.info(f"✅ Upload complete in {processing_time:.2f}s: {len(df_standard)} rows uploaded")
+        
+        # Limit row_errors to first 20 for response size
+        row_errors = validation_report.get('row_errors', [])[:20]
         
         return {
             'success': True,
@@ -767,6 +903,7 @@ def process_csv_upload(
             'rows_deleted': storage_result['rows_deleted'],
             'column_mapping': column_mapping,
             'validation_report': validation_report,
+            'row_errors': row_errors,  # First 20 row-level errors
             'storage_result': storage_result,
             'processing_time_seconds': round(processing_time, 2),
             'schema_standardized': True,
